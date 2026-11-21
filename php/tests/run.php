@@ -157,4 +157,28 @@ $unknownRb = array_merge($idem['rollback']['initial'], [
 ]);
 assertEq($send('/wallet/rollback', $unknownRb)['status'], 'SC_TRANSACTION_NOT_EXISTS', 'wb:emptyRollback');
 
+// 6. CR-01..CR-10 regressions: empty object {} accepted as JSON object (returns missing-field SC_INVALID_REQUEST, not Invalid JSON body),
+// rollback after settle rejected, malformed decimal caught as SC_INVALID_REQUEST, custom WalletHandlerInterface supported!
+$emptyObjRaw = '{}';
+$emptyObjRes = $disp->handle('/wallet/balance', $apiKey, Signing::signBody($emptyObjRaw, $secret), $emptyObjRaw)['body'];
+assertEq($emptyObjRes['status'], 'SC_INVALID_REQUEST', 'wb:emptyJsonObj');
+assertEq($emptyObjRes['message'], 'username and currency are required', 'wb:emptyJsonObjMsg');
+assertEq($send('/wallet/rollback', $idem['rollback']['initial'])['status'], 'SC_TRANSACTION_DUPLICATED', 'wb:rbAfterSettle');
+
+$wallet->setDisabled('player_9527', false);
+$badAmtBet = array_merge($idem['bet']['initial'], ['transactionId' => 'bet_bad_php', 'betId' => 'b2btkt_bad_php', 'amount' => 'bad']);
+assertEq($send('/wallet/bet', $badAmtBet)['status'], 'SC_INVALID_REQUEST', 'wb:badAmtCaught');
+$zeroBet = array_merge($idem['bet']['initial'], ['transactionId' => 'bet_zero_php', 'betId' => 'b2btkt_zero_php', 'amount' => '0.00']);
+assertEq($send('/wallet/bet', $zeroBet)['status'], 'SC_INVALID_REQUEST', 'wb:zeroBet');
+assertEq($disp->handle('/wallet/bet', 'bad', 'bad', str_repeat('[', 50000))['body']['status'], 'SC_AUTHENTICATION_FAILED', 'wb:preAuthDeep');
+
+$customWallet = new class implements \Bebebus\BaccaratSdk\WalletHandlerInterface {
+    public function onBalance(array $req): array { return ['traceId' => $req['traceId'] ?? '', 'status' => 'SC_OK', 'data' => ['balance' => '42.00', 'timestamp' => 1]]; }
+    public function onBet(array $req): array { return $this->onBalance($req); }
+    public function onBetResult(array $req): array { return $this->onBalance($req); }
+    public function onRollback(array $req): array { return $this->onBalance($req); }
+};
+$customDisp = new WebhookDispatcher($cfg, $customWallet);
+assertEq($customDisp->handle('/wallet/balance', $apiKey, Signing::signBody($emptyObjRaw, $secret), $emptyObjRaw)['body']['data']['balance'], '42.00', 'wb:customInterface');
+
 echo "PHP SDK: ALL TESTS PASSED\n";

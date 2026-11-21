@@ -9,13 +9,34 @@
 #include <openssl/sha.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cstdio>
+#include <sstream>
+#include <thread>
 
 namespace baccarat {
 
 namespace {
+
+constexpr size_t MAX_HTTP_RESPONSE_BYTES = 16 * 1024 * 1024;
+std::once_flag g_curl_init_once;
+
+void ensure_curl_global_init() {
+    std::call_once(g_curl_init_once, []() {
+        curl_global_init(CURL_GLOBAL_DEFAULT);
+    });
+}
+
+struct CurlGuard {
+    CURL* curl = nullptr;
+    struct curl_slist* headers = nullptr;
+    ~CurlGuard() {
+        if (headers) curl_slist_free_all(headers);
+        if (curl) curl_easy_cleanup(curl);
+    }
+};
 
 std::string trim(const std::string& s) {
     size_t b = 0;
@@ -27,6 +48,11 @@ std::string trim(const std::string& s) {
 
 std::string to_upper(std::string s) {
     for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    return s;
+}
+
+std::string to_lower(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return s;
 }
 
@@ -119,9 +145,18 @@ std::string sub_unsigned(const std::string& a, const std::string& b) {
 }
 
 std::string uuid_v4() {
+    static std::atomic<uint64_t> fallback_seq{1};
     unsigned char b[16];
     if (RAND_bytes(b, 16) != 1) {
-        for (int i = 0; i < 16; ++i) b[i] = static_cast<unsigned char>(i * 17 + 3);
+        std::ostringstream oss;
+        oss << std::chrono::steady_clock::now().time_since_epoch().count() << ":"
+            << std::chrono::system_clock::now().time_since_epoch().count() << ":"
+            << std::this_thread::get_id() << ":"
+            << fallback_seq.fetch_add(1, std::memory_order_relaxed);
+        std::string seed = oss.str();
+        unsigned char digest[SHA256_DIGEST_LENGTH];
+        SHA256(reinterpret_cast<const unsigned char*>(seed.data()), seed.size(), digest);
+        std::copy(digest, digest + 16, b);
     }
     b[6] = (b[6] & 0x0F) | 0x40;
     b[8] = (b[8] & 0x3F) | 0x80;
@@ -135,10 +170,45 @@ std::string uuid_v4() {
     return std::string(out);
 }
 
-size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
-    auto* out = static_cast<std::string*>(userdata);
-    out->append(ptr, size * nmemb);
-    return size * nmemb;
+size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) noexcept {
+    size_t total = size * nmemb;
+    if (total == 0 || !ptr || !userdata) return 0;
+    try {
+        auto* out = static_cast<std::string*>(userdata);
+        if (out->size() + total > MAX_HTTP_RESPONSE_BYTES) {
+            return 0; // abort transfer cleanly in libcurl
+        }
+        out->append(ptr, total);
+        return total;
+    } catch (...) {
+        return 0;
+    }
+}
+
+std::string extract_trace_hint(const std::string& raw_body) {
+    std::string head = raw_body.substr(0, std::min<size_t>(raw_body.size(), 1024));
+    size_t key_pos = head.find("\"traceId\"");
+    if (key_pos == std::string::npos) return "";
+    size_t colon = head.find(':', key_pos + 9);
+    if (colon == std::string::npos) return "";
+    size_t q1 = head.find('"', colon + 1);
+    if (q1 == std::string::npos) return "";
+    size_t q2 = q1 + 1;
+    while (q2 < head.size() && head[q2] != '"' && (q2 - q1 - 1) < 128) {
+        unsigned char c = static_cast<unsigned char>(head[q2]);
+        if (!(std::isalnum(c) || c == '_' || c == '-' || c == '.' || c == ':')) return "";
+        ++q2;
+    }
+    if (q2 >= head.size() || head[q2] != '"') return "";
+    return head.substr(q1 + 1, q2 - q1 - 1);
+}
+
+Json make_err_json(const std::string& trace_id, const std::string& status, const std::string& msg) {
+    Json r = Json::object();
+    r.set("traceId", Json(trace_id));
+    r.set("status", Json(status));
+    r.set("message", Json(msg));
+    return r;
 }
 
 } // namespace
@@ -328,12 +398,14 @@ std::string rollback_fingerprint(const Json& p) {
 std::string Config::resolved_base_url() const {
     if (trim(api_key).empty()) throw SdkError("INVALID_CONFIG", "api_key is required");
     if (hmac_secret.empty()) throw SdkError("INVALID_CONFIG", "hmac_secret is required");
+    if (timeout_ms <= 0) throw SdkError("INVALID_CONFIG", "timeout_ms must be positive");
     std::string u = trim(base_url);
     if (u.empty()) {
         if (environment == Environment::Sandbox) u = SANDBOX_BASE_URL;
         else throw SdkError("INVALID_CONFIG", "base_url is required in Production environment");
     }
-    if (u.rfind("http://", 0) != 0 && u.rfind("https://", 0) != 0) {
+    std::string low = to_lower(u);
+    if (low.rfind("http://", 0) != 0 && low.rfind("https://", 0) != 0) {
         throw SdkError("INVALID_CONFIG", "base_url must start with http:// or https://");
     }
     while (!u.empty() && u.back() == '/') u.pop_back();
@@ -344,7 +416,9 @@ Client::Client(const Config& cfg)
     : api_key_(trim(cfg.api_key)),
       hmac_secret_(cfg.hmac_secret),
       base_url_(cfg.resolved_base_url()),
-      timeout_ms_(cfg.timeout_ms > 0 ? cfg.timeout_ms : 8000) {}
+      timeout_ms_(cfg.timeout_ms) {
+    ensure_curl_global_init();
+}
 
 Json Client::post_signed(const std::string& route_path, Json payload) const {
     if (!payload.is_object()) payload = Json::object();
@@ -356,30 +430,33 @@ Json Client::post_signed(const std::string& route_path, Json payload) const {
     std::string sig = sign_body(raw_body, hmac_secret_);
     std::string url = base_url_ + route_path;
 
-    CURL* curl = curl_easy_init();
-    if (!curl) throw SdkError(StatusCode::SC_OPERATOR_TIMEOUT, "curl_easy_init failed");
+    ensure_curl_global_init();
+    CurlGuard guard;
+    guard.curl = curl_easy_init();
+    if (!guard.curl) throw SdkError(StatusCode::SC_OPERATOR_TIMEOUT, "curl_easy_init failed");
 
-    struct curl_slist* headers = nullptr;
-    headers = curl_slist_append(headers, "Content-Type: application/json");
-    headers = curl_slist_append(headers, "Accept: application/json");
-    headers = curl_slist_append(headers, ("X-API-Key: " + api_key_).c_str());
-    headers = curl_slist_append(headers, ("X-Signature: " + sig).c_str());
+    std::string hdr_key = "X-API-Key: " + api_key_;
+    std::string hdr_sig = "X-Signature: " + sig;
+    guard.headers = curl_slist_append(guard.headers, "Content-Type: application/json");
+    guard.headers = curl_slist_append(guard.headers, "Accept: application/json");
+    guard.headers = curl_slist_append(guard.headers, hdr_key.c_str());
+    guard.headers = curl_slist_append(guard.headers, hdr_sig.c_str());
 
     std::string resp_body;
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, raw_body.data());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(raw_body.size()));
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms_);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp_body);
+    curl_easy_setopt(guard.curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(guard.curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(guard.curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(guard.curl, CURLOPT_HTTPHEADER, guard.headers);
+    curl_easy_setopt(guard.curl, CURLOPT_POSTFIELDS, raw_body.data());
+    curl_easy_setopt(guard.curl, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(raw_body.size()));
+    curl_easy_setopt(guard.curl, CURLOPT_TIMEOUT_MS, timeout_ms_);
+    curl_easy_setopt(guard.curl, CURLOPT_CONNECTTIMEOUT_MS, std::min<long>(timeout_ms_, 5000L));
+    curl_easy_setopt(guard.curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+    curl_easy_setopt(guard.curl, CURLOPT_WRITEDATA, &resp_body);
 
-    CURLcode rc = curl_easy_perform(curl);
+    CURLcode rc = curl_easy_perform(guard.curl);
     long http_code = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
+    curl_easy_getinfo(guard.curl, CURLINFO_RESPONSE_CODE, &http_code);
 
     if (rc != CURLE_OK) {
         throw SdkError(StatusCode::SC_OPERATOR_TIMEOUT, std::string("curl error: ") + curl_easy_strerror(rc));
@@ -394,14 +471,25 @@ Json Client::post_signed(const std::string& route_path, Json payload) const {
             : StatusCode::SC_INVALID_REQUEST;
         throw ApiError(st, "Non-JSON response", trace_id, static_cast<int>(http_code));
     }
+    if (!parsed.is_object()) {
+        throw ApiError(StatusCode::SC_INVALID_REQUEST, "Malformed envelope object", trace_id, static_cast<int>(http_code));
+    }
     std::string st = parsed.at("status").as_string();
     std::string eff_trace = parsed.at("traceId").as_string().empty() ? trace_id : parsed.at("traceId").as_string();
     if (http_code != 200 || st != StatusCode::SC_OK) {
+        std::map<std::string, std::string> val_map;
+        const Json& val_obj = parsed.at("validation");
+        if (val_obj.is_object()) {
+            for (const auto& kv : val_obj.as_object()) {
+                val_map[kv.first] = kv.second.to_scalar_string();
+            }
+        }
         throw ApiError(
             st.empty() ? StatusCode::SC_INVALID_REQUEST : st,
             parsed.at("message").as_string(),
             eff_trace,
-            static_cast<int>(http_code)
+            static_cast<int>(http_code),
+            std::move(val_map)
         );
     }
     Json out = Json::object();
@@ -416,6 +504,9 @@ Json Client::list_tables(Json params) const { return post_signed("/operator/v1/g
 Json Client::terminate_sessions(Json params) const { return post_signed("/operator/v1/game/terminate", std::move(params)); }
 
 Json Client::list_transactions(Json params) const {
+    if (!params.at("fromTime").is_int() || !params.at("toTime").is_int()) {
+        throw SdkError("INVALID_ARGUMENT", "fromTime and toTime must be integers");
+    }
     int64_t from = params.at("fromTime").as_int(-1);
     int64_t to = params.at("toTime").as_int(-1);
     if (from < 0 || to < from) throw SdkError("INVALID_ARGUMENT", "invalid [fromTime, toTime]");
@@ -423,6 +514,9 @@ Json Client::list_transactions(Json params) const {
 }
 
 std::vector<Json> Client::list_all_transactions(int64_t from_time, int64_t to_time, int page_size) const {
+    if (page_size < 1 || page_size > MAX_PAGE_SIZE) {
+        throw SdkError("INVALID_ARGUMENT", "page_size out of range 1..20000");
+    }
     std::vector<Json> all;
     int page_no = 1;
     while (true) {
@@ -444,10 +538,12 @@ std::vector<Json> Client::list_all_transactions(int64_t from_time, int64_t to_ti
 
 Json Client::get_transaction_detail(Json params) const {
     std::string bet_id = trim(params.at("betId").as_string());
+    if (bet_id.empty() || !params.at("fromTime").is_int() || !params.at("toTime").is_int()) {
+        throw SdkError("INVALID_ARGUMENT", "betId, fromTime, and toTime are required");
+    }
     int64_t from = params.at("fromTime").as_int(-1);
     int64_t to = params.at("toTime").as_int(-1);
-    int64_t span = to - from;
-    if (bet_id.empty() || from < 0 || span < 0 || span > MAX_DETAIL_WINDOW_MS) {
+    if (from < 0 || to < from || (to - from) > MAX_DETAIL_WINDOW_MS) {
         throw SdkError("INVALID_ARGUMENT", "detail window must satisfy 0 <= toTime - fromTime <= 604800000");
     }
     return post_signed("/operator/v1/transaction/detail", std::move(params));
@@ -493,22 +589,18 @@ Json InMemoryWallet::ok_envelope(const std::string& trace_id, const std::string&
 }
 
 Json InMemoryWallet::err_envelope(const std::string& trace_id, const std::string& status, const std::string& msg) {
-    Json r = Json::object();
-    r.set("traceId", Json(trace_id));
-    r.set("status", Json(status));
-    r.set("message", Json(msg));
-    return r;
+    return make_err_json(trace_id, status, msg);
 }
 
 Json InMemoryWallet::on_balance(const Json& req) {
     std::lock_guard<std::mutex> lk(mu_);
     std::string tid = req.at("traceId").as_string();
-    std::string u = req.at("username").as_string();
+    std::string u = trim(req.at("username").as_string());
+    std::string cur = to_upper(trim(req.at("currency").as_string()));
+    if (u.empty() || cur.empty()) return err_envelope(tid, StatusCode::SC_INVALID_REQUEST, "username and currency required");
     auto it = accounts_.find(u);
     if (it == accounts_.end()) return err_envelope(tid, StatusCode::SC_USER_NOT_EXISTS, "User missing");
-    if (it->second.currency != to_upper(trim(req.at("currency").as_string()))) {
-        return err_envelope(tid, StatusCode::SC_WRONG_CURRENCY, "Wrong currency");
-    }
+    if (it->second.currency != cur) return err_envelope(tid, StatusCode::SC_WRONG_CURRENCY, "Wrong currency");
     if (it->second.disabled) return err_envelope(tid, StatusCode::SC_USER_DISABLED, "Disabled");
     if (!it->second.tokens.empty() && it->second.tokens.count(req.at("token").as_string()) == 0) {
         return err_envelope(tid, StatusCode::SC_INVALID_TOKEN, "Invalid token");
@@ -519,87 +611,138 @@ Json InMemoryWallet::on_balance(const Json& req) {
 Json InMemoryWallet::on_bet(const Json& req) {
     std::lock_guard<std::mutex> lk(mu_);
     std::string tid = req.at("traceId").as_string();
-    std::string u = req.at("username").as_string();
+    std::string tx_id = trim(req.at("transactionId").as_string());
+    std::string bet_id = trim(req.at("betId").as_string());
+    std::string u = trim(req.at("username").as_string());
+    std::string cur = to_upper(trim(req.at("currency").as_string()));
+    std::string amt_str = req.at("amount").as_string();
+    if (tx_id.empty() || bet_id.empty() || u.empty() || cur.empty() || amt_str.empty()) {
+        return err_envelope(tid, StatusCode::SC_INVALID_REQUEST, "Missing required bet fields");
+    }
     auto it = accounts_.find(u);
     if (it == accounts_.end()) return err_envelope(tid, StatusCode::SC_USER_NOT_EXISTS, "User missing");
-    if (it->second.currency != to_upper(trim(req.at("currency").as_string()))) {
-        return err_envelope(tid, StatusCode::SC_WRONG_CURRENCY, "Wrong currency");
-    }
-    std::string tx_id = req.at("transactionId").as_string();
+    if (it->second.currency != cur) return err_envelope(tid, StatusCode::SC_WRONG_CURRENCY, "Wrong currency");
+
     std::string fp = bet_fingerprint(req);
     auto tx_it = transactions_.find(tx_id);
     if (tx_it != transactions_.end()) {
-        if (tx_it->second.fp != fp) return err_envelope(tid, StatusCode::SC_TRANSACTION_DUPLICATED, "Conflict");
+        if (tx_it->second.type != "BET" || tx_it->second.fp != fp) {
+            return err_envelope(tid, StatusCode::SC_TRANSACTION_DUPLICATED, "Conflict");
+        }
         return ok_envelope(tid, u, it->second);
+    }
+    if (deducted_bets_.count(bet_id) > 0) {
+        return err_envelope(tid, StatusCode::SC_TRANSACTION_DUPLICATED, "Duplicate betId");
     }
     if (it->second.disabled) return err_envelope(tid, StatusCode::SC_USER_DISABLED, "Disabled");
     if (!it->second.tokens.empty() && it->second.tokens.count(req.at("token").as_string()) == 0) {
         return err_envelope(tid, StatusCode::SC_INVALID_TOKEN, "Invalid token");
     }
-    std::string stake = decimal_to_ledger_units(req.at("amount").as_string(), it->second.exponent, false);
+    std::string stake = decimal_to_ledger_units(amt_str, it->second.exponent, false);
+    if (compare_unsigned(stake, "0") <= 0) {
+        return err_envelope(tid, StatusCode::SC_INVALID_REQUEST, "Bet amount must be positive");
+    }
     if (compare_unsigned(it->second.units, stake) < 0) {
         return err_envelope(tid, StatusCode::SC_INSUFFICIENT_FUNDS, "Insufficient funds");
     }
     it->second.units = sub_unsigned(it->second.units, stake);
-    transactions_[tx_id] = TxRec{fp, false};
-    deducted_bets_[req.at("betId").as_string()] = stake;
+    transactions_[tx_id] = TxRec{"BET", fp, false};
+    deducted_bets_[bet_id] = BetRec{tx_id, u, it->second.currency, stake, "DEDUCTED"};
     return ok_envelope(tid, u, it->second);
 }
 
 Json InMemoryWallet::on_bet_result(const Json& req) {
     std::lock_guard<std::mutex> lk(mu_);
     std::string tid = req.at("traceId").as_string();
-    std::string u = req.at("username").as_string();
+    std::string tx_id = trim(req.at("transactionId").as_string());
+    std::string bet_id = trim(req.at("betId").as_string());
+    std::string u = trim(req.at("username").as_string());
+    std::string cur = to_upper(trim(req.at("currency").as_string()));
+    std::string win_str = req.at("winAmount").as_string();
+    std::string bet_amt_str = req.at("betAmount").as_string();
+    if (tx_id.empty() || bet_id.empty() || u.empty() || cur.empty() || win_str.empty() || bet_amt_str.empty()) {
+        return err_envelope(tid, StatusCode::SC_INVALID_REQUEST, "Missing required bet_result fields");
+    }
     auto it = accounts_.find(u);
     if (it == accounts_.end()) return err_envelope(tid, StatusCode::SC_USER_NOT_EXISTS, "User missing");
-    if (it->second.currency != to_upper(trim(req.at("currency").as_string()))) {
-        return err_envelope(tid, StatusCode::SC_WRONG_CURRENCY, "Wrong currency");
-    }
-    std::string tx_id = req.at("transactionId").as_string();
+    if (it->second.currency != cur) return err_envelope(tid, StatusCode::SC_WRONG_CURRENCY, "Wrong currency");
+
     std::string fp = bet_result_fingerprint(req);
     auto tx_it = transactions_.find(tx_id);
     if (tx_it != transactions_.end()) {
-        if (tx_it->second.fp != fp) return err_envelope(tid, StatusCode::SC_TRANSACTION_DUPLICATED, "Conflict");
+        if (tx_it->second.type != "SETTLE" || tx_it->second.fp != fp) {
+            return err_envelope(tid, StatusCode::SC_TRANSACTION_DUPLICATED, "Conflict");
+        }
         return ok_envelope(tid, u, it->second);
     }
-    if (deducted_bets_.count(req.at("betId").as_string()) == 0) {
+    auto bet_it = deducted_bets_.find(bet_id);
+    if (bet_it == deducted_bets_.end()) {
         return err_envelope(tid, StatusCode::SC_TRANSACTION_NOT_EXISTS, "Original betId missing");
     }
-    std::string win = decimal_to_ledger_units(req.at("winAmount").as_string(), it->second.exponent, false);
+    std::string bet_units = decimal_to_ledger_units(bet_amt_str, it->second.exponent, false);
+    std::string win = decimal_to_ledger_units(win_str, it->second.exponent, false);
+    if (bet_it->second.username != u || bet_it->second.currency != it->second.currency || bet_it->second.stake != bet_units) {
+        return err_envelope(tid, StatusCode::SC_INVALID_REQUEST, "bet_result mismatch");
+    }
+    if (bet_it->second.state != "DEDUCTED") {
+        return err_envelope(tid, StatusCode::SC_TRANSACTION_DUPLICATED, "betId already finalized");
+    }
     it->second.units = add_unsigned(it->second.units, win);
-    transactions_[tx_id] = TxRec{fp, false};
+    bet_it->second.state = "SETTLED";
+    transactions_[tx_id] = TxRec{"SETTLE", fp, false};
     return ok_envelope(tid, u, it->second);
 }
 
 Json InMemoryWallet::on_rollback(const Json& req) {
     std::lock_guard<std::mutex> lk(mu_);
     std::string tid = req.at("traceId").as_string();
-    std::string u = req.at("username").as_string();
+    std::string tx_id = trim(req.at("transactionId").as_string());
+    std::string bet_id = trim(req.at("betId").as_string());
+    std::string u = trim(req.at("username").as_string());
+    std::string cur = to_upper(trim(req.at("currency").as_string()));
+    std::string amt_str = req.at("amount").as_string();
+    if (tx_id.empty() || bet_id.empty() || u.empty() || cur.empty() || amt_str.empty()) {
+        return err_envelope(tid, StatusCode::SC_INVALID_REQUEST, "Missing required rollback fields");
+    }
     auto it = accounts_.find(u);
     if (it == accounts_.end()) return err_envelope(tid, StatusCode::SC_USER_NOT_EXISTS, "User missing");
-    if (it->second.currency != to_upper(trim(req.at("currency").as_string()))) {
-        return err_envelope(tid, StatusCode::SC_WRONG_CURRENCY, "Wrong currency");
-    }
-    std::string tx_id = req.at("transactionId").as_string();
+    if (it->second.currency != cur) return err_envelope(tid, StatusCode::SC_WRONG_CURRENCY, "Wrong currency");
+
     std::string fp = rollback_fingerprint(req);
     auto tx_it = transactions_.find(tx_id);
     if (tx_it != transactions_.end()) {
-        if (tx_it->second.fp != fp) return err_envelope(tid, StatusCode::SC_TRANSACTION_DUPLICATED, "Conflict");
+        if (tx_it->second.type != "ROLLBACK" || tx_it->second.fp != fp) {
+            return err_envelope(tid, StatusCode::SC_TRANSACTION_DUPLICATED, "Conflict");
+        }
         if (tx_it->second.empty) return err_envelope(tid, StatusCode::SC_TRANSACTION_NOT_EXISTS, "Never deducted");
         return ok_envelope(tid, u, it->second);
     }
-    if (deducted_bets_.count(req.at("betId").as_string()) == 0) {
-        transactions_[tx_id] = TxRec{fp, true};
+    std::string refund = decimal_to_ledger_units(amt_str, it->second.exponent, false);
+    if (compare_unsigned(refund, "0") <= 0) {
+        return err_envelope(tid, StatusCode::SC_INVALID_REQUEST, "Rollback amount must be positive");
+    }
+    auto bet_it = deducted_bets_.find(bet_id);
+    if (bet_it == deducted_bets_.end()) {
+        transactions_[tx_id] = TxRec{"ROLLBACK", fp, true};
         return err_envelope(tid, StatusCode::SC_TRANSACTION_NOT_EXISTS, "Never deducted");
     }
-    std::string refund = decimal_to_ledger_units(req.at("amount").as_string(), it->second.exponent, false);
+    if (bet_it->second.username != u || bet_it->second.currency != it->second.currency || bet_it->second.stake != refund) {
+        return err_envelope(tid, StatusCode::SC_INVALID_REQUEST, "Rollback mismatch");
+    }
+    if (bet_it->second.state != "DEDUCTED") {
+        return err_envelope(tid, StatusCode::SC_TRANSACTION_DUPLICATED, "betId already finalized");
+    }
     it->second.units = add_unsigned(it->second.units, refund);
-    transactions_[tx_id] = TxRec{fp, false};
+    bet_it->second.state = "ROLLED_BACK";
+    transactions_[tx_id] = TxRec{"ROLLBACK", fp, false};
     return ok_envelope(tid, u, it->second);
 }
 
-WebhookDispatcher::WebhookDispatcher(const Config& cfg, InMemoryWallet& wallet)
-    : api_key_(trim(cfg.api_key)), hmac_secret_(cfg.hmac_secret), wallet_(wallet) {}
+WebhookDispatcher::WebhookDispatcher(const Config& cfg, WalletHandler& wallet)
+    : api_key_(trim(cfg.api_key)), hmac_secret_(cfg.hmac_secret), wallet_(wallet) {
+    if (api_key_.empty()) throw SdkError("INVALID_CONFIG", "api_key is required");
+    if (hmac_secret_.empty()) throw SdkError("INVALID_CONFIG", "hmac_secret is required");
+}
 
 Json WebhookDispatcher::handle(
     const std::string& route_path,
@@ -607,48 +750,46 @@ Json WebhookDispatcher::handle(
     const std::string& signature_header,
     const std::string& raw_body
 ) {
-    Json parsed;
-    bool valid_obj = false;
-    std::string trace_id;
-    try {
-        parsed = Json::parse(raw_body);
-        if (parsed.is_object()) {
-            valid_obj = true;
-            trace_id = trim(parsed.at("traceId").as_string()).substr(0, 128);
-        }
-    } catch (...) {}
+    if (raw_body.size() > MAX_WEBHOOK_BODY_BYTES) {
+        return make_err_json("", StatusCode::SC_INVALID_REQUEST, "Request body exceeds 1 MiB limit");
+    }
 
+    // Verify X-API-Key & X-Signature over raw bytes BEFORE JSON parsing!
     std::string auth = verify_webhook_headers(api_key_header, signature_header, raw_body, api_key_, hmac_secret_);
     if (auth != StatusCode::SC_OK) {
-        Json r = Json::object();
-        r.set("traceId", Json(trace_id));
-        r.set("status", Json(auth));
-        r.set("message", Json("Auth/signature failed"));
-        return r;
+        return make_err_json(extract_trace_hint(raw_body), auth, "Auth/signature failed");
     }
-    if (!valid_obj) {
-        Json r = Json::object();
-        r.set("traceId", Json(trace_id));
-        r.set("status", Json(StatusCode::SC_INVALID_REQUEST));
-        r.set("message", Json("Invalid JSON object"));
-        return r;
+
+    Json parsed;
+    try {
+        parsed = Json::parse(raw_body);
+    } catch (...) {
+        return make_err_json("", StatusCode::SC_INVALID_REQUEST, "Invalid JSON object");
     }
+    if (!parsed.is_object()) {
+        return make_err_json("", StatusCode::SC_INVALID_REQUEST, "Invalid JSON object");
+    }
+    std::string trace_id = trim(parsed.at("traceId").as_string()).substr(0, 128);
 
     std::string clean = route_path.substr(0, route_path.find('?'));
     while (!clean.empty() && clean.back() == '/') clean.pop_back();
     auto ends_with = [](const std::string& s, const std::string& suf) {
         return s.size() >= suf.size() && s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
     };
-    if (ends_with(clean, "/wallet/balance")) return wallet_.on_balance(parsed);
-    if (ends_with(clean, "/wallet/bet")) return wallet_.on_bet(parsed);
-    if (ends_with(clean, "/wallet/bet_result")) return wallet_.on_bet_result(parsed);
-    if (ends_with(clean, "/wallet/rollback")) return wallet_.on_rollback(parsed);
-
-    Json r = Json::object();
-    r.set("traceId", Json(trace_id));
-    r.set("status", Json(StatusCode::SC_INVALID_REQUEST));
-    r.set("message", Json("Unknown route"));
-    return r;
+    try {
+        if (ends_with(clean, "/wallet/balance")) return wallet_.on_balance(parsed);
+        if (ends_with(clean, "/wallet/bet")) return wallet_.on_bet(parsed);
+        if (ends_with(clean, "/wallet/bet_result")) return wallet_.on_bet_result(parsed);
+        if (ends_with(clean, "/wallet/rollback")) return wallet_.on_rollback(parsed);
+        return make_err_json(trace_id, StatusCode::SC_INVALID_REQUEST, "Unknown route");
+    } catch (const SdkError& e) {
+        std::string st = (e.code.rfind("SC_", 0) == 0) ? e.code : StatusCode::SC_INVALID_REQUEST;
+        return make_err_json(trace_id, st, e.what());
+    } catch (const std::exception& e) {
+        return make_err_json(trace_id, StatusCode::SC_INVALID_REQUEST, e.what());
+    } catch (...) {
+        return make_err_json(trace_id, StatusCode::SC_INVALID_REQUEST, "Wallet handler error");
+    }
 }
 
 } // namespace baccarat

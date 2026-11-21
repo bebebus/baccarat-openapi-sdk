@@ -7,6 +7,9 @@ import https from 'node:https';
 
 export const SANDBOX_BASE_URL = 'https://api.lt.cniia.cloud';
 export const MAX_DETAIL_WINDOW_MS = 604_800_000; // 7 days in ms
+export const MAX_PAGE_SIZE = 20_000;
+export const MAX_WEBHOOK_BODY_BYTES = 1_048_576; // 1 MiB
+const MAX_HTTP_RESPONSE_BYTES = 16 * 1024 * 1024; // 16 MiB
 
 export const Environment = Object.freeze({
   SANDBOX: 'SANDBOX',
@@ -68,6 +71,7 @@ export class BaccaratApiError extends BaccaratSdkError {
 // ── 1. Raw-Byte HMAC-SHA256 Signing & Timing-Safe Verification ──────────────
 
 const HEX64_RE = /^[0-9a-fA-F]{64}$/;
+const TRACE_HINT_RE = /"traceId"\s*:\s*"([A-Za-z0-9_.:-]{1,128})"/;
 
 export function signBody(rawBody, hmacSecret) {
   if (typeof hmacSecret !== 'string' || hmacSecret.length === 0) {
@@ -197,48 +201,48 @@ export function encodeTupleFingerprint(domain, fields) {
 
 export function betFingerprint(payload) {
   return encodeTupleFingerprint('wallet/bet', [
-    payload.transactionId,
-    payload.username,
-    payload.betId,
-    payload.externalTransactionId,
-    payload.roundId,
-    payload.currency,
-    payload.gameCode,
-    payload.amount,
+    payload?.transactionId ?? '',
+    payload?.username ?? '',
+    payload?.betId ?? '',
+    payload?.externalTransactionId ?? '',
+    payload?.roundId ?? '',
+    payload?.currency ?? '',
+    payload?.gameCode ?? '',
+    payload?.amount ?? '',
   ]);
 }
 
 export function betResultFingerprint(payload) {
   return encodeTupleFingerprint('wallet/bet_result', [
-    payload.transactionId,
-    payload.username,
-    payload.betId,
-    payload.externalTransactionId,
-    payload.roundId,
-    payload.currency,
-    payload.gameCode,
-    payload.betAmount,
-    payload.winAmount,
-    payload.effectiveTurnover,
-    payload.winLoss,
-    payload.jackpotAmount,
-    payload.resultType,
-    String(payload.isFreespin),
-    String(payload.isEndRound),
-    String(payload.betTime),
+    payload?.transactionId ?? '',
+    payload?.username ?? '',
+    payload?.betId ?? '',
+    payload?.externalTransactionId ?? '',
+    payload?.roundId ?? '',
+    payload?.currency ?? '',
+    payload?.gameCode ?? '',
+    payload?.betAmount ?? '',
+    payload?.winAmount ?? '',
+    payload?.effectiveTurnover ?? '',
+    payload?.winLoss ?? '',
+    payload?.jackpotAmount ?? '',
+    payload?.resultType ?? '',
+    String(payload?.isFreespin ?? ''),
+    String(payload?.isEndRound ?? ''),
+    String(payload?.betTime ?? ''),
   ]);
 }
 
 export function rollbackFingerprint(payload) {
   return encodeTupleFingerprint('wallet/rollback', [
-    payload.transactionId,
-    payload.username,
-    payload.betId,
-    payload.externalTransactionId,
-    payload.roundId,
-    payload.currency,
-    payload.gameCode,
-    payload.amount,
+    payload?.transactionId ?? '',
+    payload?.username ?? '',
+    payload?.betId ?? '',
+    payload?.externalTransactionId ?? '',
+    payload?.roundId ?? '',
+    payload?.currency ?? '',
+    payload?.gameCode ?? '',
+    payload?.amount ?? '',
   ]);
 }
 
@@ -284,6 +288,12 @@ function defaultHttpPost(urlStr, headers, rawBodyBuf, timeoutMs) {
   return new Promise((resolve, reject) => {
     const url = new URL(urlStr);
     const transport = url.protocol === 'https:' ? https : http;
+    let settled = false;
+    const finishReject = (err) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    };
     const req = transport.request(
       url,
       {
@@ -295,8 +305,19 @@ function defaultHttpPost(urlStr, headers, rawBodyBuf, timeoutMs) {
       },
       (res) => {
         const chunks = [];
-        res.on('data', (chunk) => chunks.push(chunk));
+        let received = 0;
+        res.on('data', (chunk) => {
+          received += chunk.length;
+          if (received > MAX_HTTP_RESPONSE_BYTES) {
+            req.destroy();
+            finishReject(new BaccaratSdkError('Gateway response exceeded 16 MiB limit', StatusCode.SC_INVALID_REQUEST));
+            return;
+          }
+          chunks.push(chunk);
+        });
         res.on('end', () => {
+          if (settled) return;
+          settled = true;
           resolve({
             httpStatus: res.statusCode ?? 0,
             rawBody: Buffer.concat(chunks).toString('utf8'),
@@ -308,8 +329,8 @@ function defaultHttpPost(urlStr, headers, rawBodyBuf, timeoutMs) {
       req.destroy(new BaccaratSdkError(`Request timed out after ${timeoutMs}ms`, StatusCode.SC_OPERATOR_TIMEOUT));
     });
     req.on('error', (err) => {
-      if (err instanceof BaccaratSdkError) reject(err);
-      else reject(new BaccaratSdkError(`Network error: ${err.message}`, StatusCode.SC_OPERATOR_TIMEOUT));
+      if (err instanceof BaccaratSdkError) finishReject(err);
+      else finishReject(new BaccaratSdkError(`Network error: ${err.message}`, StatusCode.SC_OPERATOR_TIMEOUT));
     });
     req.write(rawBodyBuf);
     req.end();
@@ -323,12 +344,18 @@ export class Client {
   }
 
   async postSigned(routePath, bodyObj) {
+    const rawInput = bodyObj && typeof bodyObj === 'object' && !Array.isArray(bodyObj) ? bodyObj : {};
+    const rawTrace = rawInput.traceId;
+    const resolvedTraceId =
+      typeof rawTrace === 'string' && rawTrace.trim().length > 0
+        ? rawTrace.trim()
+        : rawTrace != null && typeof rawTrace !== 'string' && String(rawTrace).trim().length > 0
+          ? String(rawTrace).trim()
+          : crypto.randomUUID();
     const payload = {
-      traceId: bodyObj?.traceId ? String(bodyObj.traceId).trim() : crypto.randomUUID(),
-      ...bodyObj,
+      ...rawInput,
+      traceId: resolvedTraceId,
     };
-    payload.traceId = String(payload.traceId).trim();
-    if (!payload.traceId) payload.traceId = crypto.randomUUID();
 
     const rawJson = JSON.stringify(payload);
     const rawBuf = Buffer.from(rawJson, 'utf8');
@@ -410,6 +437,9 @@ export class Client {
   }
 
   async listAllTransactions({ fromTime, toTime, pageSize = 2000 }) {
+    if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > MAX_PAGE_SIZE) {
+      throw new BaccaratSdkError(`pageSize must be an integer in 1..${MAX_PAGE_SIZE}`, 'INVALID_ARGUMENT');
+    }
     const all = [];
     let pageNo = 1;
     while (true) {
@@ -424,7 +454,7 @@ export class Client {
   }
 
   getTransactionDetail(params) {
-    if (params == null || !params.betId || typeof params.fromTime !== 'number' || typeof params.toTime !== 'number') {
+    if (params == null || typeof params.betId !== 'string' || !params.betId.trim() || typeof params.fromTime !== 'number' || typeof params.toTime !== 'number') {
       throw new BaccaratSdkError('betId, fromTime, and toTime are required', 'INVALID_ARGUMENT');
     }
     const span = params.toTime - params.fromTime;
@@ -437,11 +467,15 @@ export class Client {
 
 // ── 5. Seamless Wallet Webhook Dispatcher & Reference In-Memory Wallet ──────
 
+function requireNonEmptyStr(val) {
+  return typeof val === 'string' && val.trim().length > 0 ? val.trim() : null;
+}
+
 export class InMemoryWallet {
   constructor(initialAccounts = {}) {
     this.accounts = new Map();
-    this.transactions = new Map(); // txId -> { fingerprint, betId, type }
-    this.deductedBets = new Map(); // betId -> { username, currency, amountUnits }
+    this.transactions = new Map(); // txId -> { fingerprint, betId, type, emptyRollback }
+    this.deductedBets = new Map(); // betId -> { txId, username, currency, amountUnits, state: 'DEDUCTED'|'SETTLED'|'ROLLED_BACK' }
     for (const [username, info] of Object.entries(initialAccounts)) {
       const exponent = info.exponent ?? 2;
       const units = decimalToLedgerUnits(info.balance ?? '0.00', exponent);
@@ -489,112 +523,177 @@ export class InMemoryWallet {
   }
 
   async onBalance(req) {
-    const check = this._requireAccountAndCurrency(req.username, req.currency);
-    if (check.error) return { traceId: req.traceId, status: check.error, message: check.message };
-    const { acct } = check;
-    if (acct.disabled) return { traceId: req.traceId, status: StatusCode.SC_USER_DISABLED, message: 'User disabled' };
-    if (acct.validTokens.size > 0 && !acct.validTokens.has(req.token)) {
-      return { traceId: req.traceId, status: StatusCode.SC_INVALID_TOKEN, message: 'Invalid launch token' };
+    const traceId = typeof req?.traceId === 'string' ? req.traceId : '';
+    const username = requireNonEmptyStr(req?.username);
+    const currency = requireNonEmptyStr(req?.currency);
+    if (!username || !currency) {
+      return { traceId, status: StatusCode.SC_INVALID_REQUEST, message: 'username and currency are required' };
     }
-    return this._okEnvelope(req.traceId, req.username, acct);
+    const check = this._requireAccountAndCurrency(username, currency);
+    if (check.error) return { traceId, status: check.error, message: check.message };
+    const { acct } = check;
+    if (acct.disabled) return { traceId, status: StatusCode.SC_USER_DISABLED, message: 'User disabled' };
+    if (acct.validTokens.size > 0 && !acct.validTokens.has(req.token)) {
+      return { traceId, status: StatusCode.SC_INVALID_TOKEN, message: 'Invalid launch token' };
+    }
+    return this._okEnvelope(traceId, username, acct);
   }
 
   async onBet(req) {
-    const check = this._requireAccountAndCurrency(req.username, req.currency);
-    if (check.error) return { traceId: req.traceId, status: check.error, message: check.message };
+    const traceId = typeof req?.traceId === 'string' ? req.traceId : '';
+    const txId = requireNonEmptyStr(req?.transactionId);
+    const betId = requireNonEmptyStr(req?.betId);
+    const username = requireNonEmptyStr(req?.username);
+    const currency = requireNonEmptyStr(req?.currency);
+    if (!txId || !betId || !username || !currency || req?.amount == null) {
+      return { traceId, status: StatusCode.SC_INVALID_REQUEST, message: 'Missing required bet fields' };
+    }
+    const check = this._requireAccountAndCurrency(username, currency);
+    if (check.error) return { traceId, status: check.error, message: check.message };
     const { acct } = check;
     const fp = betFingerprint(req);
-    const prior = this.transactions.get(req.transactionId);
+    const prior = this.transactions.get(txId);
     if (prior) {
-      if (prior.fingerprint !== fp) {
-        return { traceId: req.traceId, status: StatusCode.SC_TRANSACTION_DUPLICATED, message: 'Conflicting bet payload on same transactionId' };
+      if (prior.type !== 'BET' || prior.fingerprint !== fp) {
+        return { traceId, status: StatusCode.SC_TRANSACTION_DUPLICATED, message: 'Conflicting bet payload on same transactionId' };
       }
-      return this._okEnvelope(req.traceId, req.username, acct);
+      return this._okEnvelope(traceId, username, acct);
     }
-    if (acct.disabled) return { traceId: req.traceId, status: StatusCode.SC_USER_DISABLED, message: 'User disabled' };
+    if (this.deductedBets.has(betId)) {
+      return { traceId, status: StatusCode.SC_TRANSACTION_DUPLICATED, message: 'Duplicate betId under different transactionId' };
+    }
+    if (acct.disabled) return { traceId, status: StatusCode.SC_USER_DISABLED, message: 'User disabled' };
     if (acct.validTokens.size > 0 && !acct.validTokens.has(req.token)) {
-      return { traceId: req.traceId, status: StatusCode.SC_INVALID_TOKEN, message: 'Invalid launch token' };
+      return { traceId, status: StatusCode.SC_INVALID_TOKEN, message: 'Invalid launch token' };
     }
     const stakeUnits = decimalToLedgerUnits(req.amount, acct.exponent);
+    if (stakeUnits <= 0n) {
+      return { traceId, status: StatusCode.SC_INVALID_REQUEST, message: 'Bet amount must be positive' };
+    }
     if (acct.balanceUnits < stakeUnits) {
-      return { traceId: req.traceId, status: StatusCode.SC_INSUFFICIENT_FUNDS, message: 'Insufficient funds' };
+      return { traceId, status: StatusCode.SC_INSUFFICIENT_FUNDS, message: 'Insufficient funds' };
     }
     acct.balanceUnits -= stakeUnits;
-    this.transactions.set(req.transactionId, { fingerprint: fp, betId: req.betId, type: 'BET' });
-    this.deductedBets.set(req.betId, { username: req.username, currency: acct.currency, amountUnits: stakeUnits });
-    return this._okEnvelope(req.traceId, req.username, acct);
+    this.transactions.set(txId, { fingerprint: fp, betId, type: 'BET', emptyRollback: false });
+    this.deductedBets.set(betId, { txId, username, currency: acct.currency, amountUnits: stakeUnits, state: 'DEDUCTED' });
+    return this._okEnvelope(traceId, username, acct);
   }
 
   async onBetResult(req) {
-    const check = this._requireAccountAndCurrency(req.username, req.currency);
-    if (check.error) return { traceId: req.traceId, status: check.error, message: check.message };
+    const traceId = typeof req?.traceId === 'string' ? req.traceId : '';
+    const txId = requireNonEmptyStr(req?.transactionId);
+    const betId = requireNonEmptyStr(req?.betId);
+    const username = requireNonEmptyStr(req?.username);
+    const currency = requireNonEmptyStr(req?.currency);
+    if (!txId || !betId || !username || !currency || req?.winAmount == null || req?.betAmount == null) {
+      return { traceId, status: StatusCode.SC_INVALID_REQUEST, message: 'Missing required bet_result fields' };
+    }
+    const check = this._requireAccountAndCurrency(username, currency);
+    if (check.error) return { traceId, status: check.error, message: check.message };
     const { acct } = check;
     const fp = betResultFingerprint(req);
-    const prior = this.transactions.get(req.transactionId);
+    const prior = this.transactions.get(txId);
     if (prior) {
-      if (prior.fingerprint !== fp) {
-        return { traceId: req.traceId, status: StatusCode.SC_TRANSACTION_DUPLICATED, message: 'Conflicting bet_result payload' };
+      if (prior.type !== 'SETTLE' || prior.fingerprint !== fp) {
+        return { traceId, status: StatusCode.SC_TRANSACTION_DUPLICATED, message: 'Conflicting bet_result payload' };
       }
-      return this._okEnvelope(req.traceId, req.username, acct);
+      return this._okEnvelope(traceId, username, acct);
     }
     // IMPORTANT (v1.2.0 invariant): Honor settlement for already-deducted betId even if player later logged out or was disabled!
-    if (!this.deductedBets.has(req.betId)) {
-      return { traceId: req.traceId, status: StatusCode.SC_TRANSACTION_NOT_EXISTS, message: 'Original betId not found' };
+    const origBet = this.deductedBets.get(betId);
+    if (!origBet) {
+      return { traceId, status: StatusCode.SC_TRANSACTION_NOT_EXISTS, message: 'Original betId not found' };
     }
+    const betUnits = decimalToLedgerUnits(req.betAmount, acct.exponent);
     const winUnits = decimalToLedgerUnits(req.winAmount, acct.exponent);
+    if (origBet.username !== username || origBet.currency !== acct.currency || origBet.amountUnits !== betUnits) {
+      return { traceId, status: StatusCode.SC_INVALID_REQUEST, message: 'bet_result does not match original deducted bet' };
+    }
+    if (origBet.state !== 'DEDUCTED') {
+      return { traceId, status: StatusCode.SC_TRANSACTION_DUPLICATED, message: `betId already in terminal state ${origBet.state}` };
+    }
     acct.balanceUnits += winUnits;
-    this.transactions.set(req.transactionId, { fingerprint: fp, betId: req.betId, type: 'SETTLE' });
-    return this._okEnvelope(req.traceId, req.username, acct);
+    origBet.state = 'SETTLED';
+    this.transactions.set(txId, { fingerprint: fp, betId, type: 'SETTLE', emptyRollback: false });
+    return this._okEnvelope(traceId, username, acct);
   }
 
   async onRollback(req) {
-    const check = this._requireAccountAndCurrency(req.username, req.currency);
-    if (check.error) return { traceId: req.traceId, status: check.error, message: check.message };
+    const traceId = typeof req?.traceId === 'string' ? req.traceId : '';
+    const txId = requireNonEmptyStr(req?.transactionId);
+    const betId = requireNonEmptyStr(req?.betId);
+    const username = requireNonEmptyStr(req?.username);
+    const currency = requireNonEmptyStr(req?.currency);
+    if (!txId || !betId || !username || !currency || req?.amount == null) {
+      return { traceId, status: StatusCode.SC_INVALID_REQUEST, message: 'Missing required rollback fields' };
+    }
+    const check = this._requireAccountAndCurrency(username, currency);
+    if (check.error) return { traceId, status: check.error, message: check.message };
     const { acct } = check;
     const fp = rollbackFingerprint(req);
-    const prior = this.transactions.get(req.transactionId);
+    const prior = this.transactions.get(txId);
     if (prior) {
-      if (prior.fingerprint !== fp) {
-        return { traceId: req.traceId, status: StatusCode.SC_TRANSACTION_DUPLICATED, message: 'Conflicting rollback payload' };
+      if (prior.type !== 'ROLLBACK' || prior.fingerprint !== fp) {
+        return { traceId, status: StatusCode.SC_TRANSACTION_DUPLICATED, message: 'Conflicting rollback payload' };
       }
       if (prior.emptyRollback) {
-        return { traceId: req.traceId, status: StatusCode.SC_TRANSACTION_NOT_EXISTS, message: 'Original betId was never deducted' };
+        return { traceId, status: StatusCode.SC_TRANSACTION_NOT_EXISTS, message: 'Original betId was never deducted' };
       }
-      return this._okEnvelope(req.traceId, req.username, acct);
-    }
-    const origBet = this.deductedBets.get(req.betId);
-    if (!origBet) {
-      // Empty-success convergence per v1.2.0 specification
-      this.transactions.set(req.transactionId, { fingerprint: fp, betId: req.betId, type: 'ROLLBACK', emptyRollback: true });
-      return { traceId: req.traceId, status: StatusCode.SC_TRANSACTION_NOT_EXISTS, message: 'Original betId was never deducted' };
+      return this._okEnvelope(traceId, username, acct);
     }
     const refundUnits = decimalToLedgerUnits(req.amount, acct.exponent);
+    if (refundUnits <= 0n) {
+      return { traceId, status: StatusCode.SC_INVALID_REQUEST, message: 'Rollback amount must be positive' };
+    }
+    const origBet = this.deductedBets.get(betId);
+    if (!origBet) {
+      // Empty-success convergence per v1.2.0 specification
+      this.transactions.set(txId, { fingerprint: fp, betId, type: 'ROLLBACK', emptyRollback: true });
+      return { traceId, status: StatusCode.SC_TRANSACTION_NOT_EXISTS, message: 'Original betId was never deducted' };
+    }
+    if (origBet.username !== username || origBet.currency !== acct.currency || origBet.amountUnits !== refundUnits) {
+      return { traceId, status: StatusCode.SC_INVALID_REQUEST, message: 'Rollback does not match original deducted bet' };
+    }
+    if (origBet.state !== 'DEDUCTED') {
+      return { traceId, status: StatusCode.SC_TRANSACTION_DUPLICATED, message: `betId already in terminal state ${origBet.state}` };
+    }
     acct.balanceUnits += refundUnits;
-    this.transactions.set(req.transactionId, { fingerprint: fp, betId: req.betId, type: 'ROLLBACK', emptyRollback: false });
-    return this._okEnvelope(req.traceId, req.username, acct);
+    origBet.state = 'ROLLED_BACK';
+    this.transactions.set(txId, { fingerprint: fp, betId, type: 'ROLLBACK', emptyRollback: false });
+    return this._okEnvelope(traceId, username, acct);
   }
+}
+
+function extractSafeTraceHint(rawBuf) {
+  const head = rawBuf.subarray(0, 1024).toString('utf8');
+  const m = TRACE_HINT_RE.exec(head);
+  return m ? m[1] : '';
 }
 
 export class WebhookDispatcher {
   constructor(config, walletHandler) {
     this.config = config instanceof Config ? config : new Config({ ...config, environment: Environment.SANDBOX });
+    if (!walletHandler || typeof walletHandler !== 'object') {
+      throw new BaccaratSdkError('walletHandler is required', 'INVALID_CONFIG');
+    }
     this.wallet = walletHandler;
   }
 
   async handle(routePath, apiKeyHeader, signatureHeader, rawBody) {
-    const rawBuf = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(String(rawBody ?? ''), 'utf8');
-    let traceId = '';
-    let parsed = null;
-    try {
-      const candidate = JSON.parse(rawBuf.toString('utf8'));
-      if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
-        parsed = candidate;
-        if (typeof candidate.traceId === 'string') traceId = candidate.traceId.trim().slice(0, 128);
-      }
-    } catch {
-      // keep parsed = null; header verification still runs first on raw bytes
+    const rawBuf = Buffer.isBuffer(rawBody)
+      ? rawBody
+      : rawBody instanceof Uint8Array
+        ? Buffer.from(rawBody)
+        : Buffer.from(String(rawBody ?? ''), 'utf8');
+
+    if (rawBuf.length > MAX_WEBHOOK_BODY_BYTES) {
+      return {
+        statusCode: 200,
+        body: { traceId: '', status: StatusCode.SC_INVALID_REQUEST, message: 'Request body exceeds 1 MiB limit' },
+      };
     }
 
+    // Verify X-API-Key & X-Signature over raw bytes BEFORE invoking JSON.parse!
     const authStatus = verifyWebhookHeaders(
       apiKeyHeader,
       signatureHeader,
@@ -606,11 +705,23 @@ export class WebhookDispatcher {
       return {
         statusCode: 200,
         body: {
-          traceId,
+          traceId: extractSafeTraceHint(rawBuf),
           status: authStatus,
           message: authStatus === StatusCode.SC_AUTHENTICATION_FAILED ? 'Invalid X-API-Key' : 'Invalid X-Signature',
         },
       };
+    }
+
+    let traceId = '';
+    let parsed = null;
+    try {
+      const candidate = JSON.parse(rawBuf.toString('utf8'));
+      if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
+        parsed = candidate;
+        if (typeof candidate.traceId === 'string') traceId = candidate.traceId.trim().slice(0, 128);
+      }
+    } catch {
+      parsed = null;
     }
 
     if (!parsed) {

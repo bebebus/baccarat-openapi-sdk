@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -13,10 +14,13 @@
 namespace baccarat {
 
 /**
- * Minimal, zero-dependency RFC-8259 JSON Value, Parser & Serializer (preserves insertion order & UTF-8).
+ * Minimal, zero-dependency RFC-8259 JSON Value, Parser & Serializer
+ * (enforces max nesting depth <= 64, UTF-16 surrogate pair integrity, and strict control-char rules).
  */
 class Json {
 public:
+    static constexpr int MAX_DEPTH = 64;
+
     enum class Type { Null, Bool, Int, Double, String, Array, Object };
     using Array = std::vector<Json>;
     using Object = std::vector<std::pair<std::string, Json>>;
@@ -114,7 +118,7 @@ public:
     static Json parse(const std::string& src) {
         Parser p(src);
         p.skip_ws();
-        Json v = p.read_value();
+        Json v = p.read_value(0);
         p.skip_ws();
         if (p.pos != src.size()) {
             throw std::runtime_error("Trailing characters in JSON");
@@ -153,6 +157,7 @@ private:
             case Type::Bool: out += (bool_val_ ? "true" : "false"); break;
             case Type::Int: out += std::to_string(int_val_); break;
             case Type::Double: {
+                if (!std::isfinite(double_val_)) throw std::runtime_error("Non-finite double in JSON");
                 char buf[64];
                 std::snprintf(buf, sizeof(buf), "%.15g", double_val_);
                 out += buf;
@@ -191,12 +196,15 @@ private:
             }
         }
 
-        Json read_value() {
+        Json read_value(int depth) {
+            if (depth > MAX_DEPTH) {
+                throw std::runtime_error("JSON nesting exceeds maximum depth");
+            }
             skip_ws();
             if (pos >= s.size()) throw std::runtime_error("Unexpected EOF in JSON");
             char c = s[pos];
-            if (c == '{') return read_object();
-            if (c == '[') return read_array();
+            if (c == '{') return read_object(depth + 1);
+            if (c == '[') return read_array(depth + 1);
             if (c == '"') return Json(read_string());
             if (c == 't') { expect("true"); return Json(true); }
             if (c == 'f') { expect("false"); return Json(false); }
@@ -248,9 +256,12 @@ private:
             ++pos; // '"'
             std::string out;
             while (pos < s.size()) {
-                char c = s[pos++];
-                if (c == '"') return out;
-                if (c == '\\') {
+                unsigned char uc = static_cast<unsigned char>(s[pos++]);
+                if (uc == '"') return out;
+                if (uc < 0x20) {
+                    throw std::runtime_error("Unescaped control character in JSON string");
+                }
+                if (uc == '\\') {
                     if (pos >= s.size()) throw std::runtime_error("Unterminated escape");
                     char e = s[pos++];
                     switch (e) {
@@ -264,10 +275,18 @@ private:
                         case 't': out.push_back('\t'); break;
                         case 'u': {
                             uint32_t cp = read_hex4();
-                            if (cp >= 0xD800 && cp <= 0xDBFF && pos + 2 <= s.size() && s[pos] == '\\' && s[pos + 1] == 'u') {
+                            if (cp >= 0xD800u && cp <= 0xDBFFu) {
+                                if (pos + 2 > s.size() || s[pos] != '\\' || s[pos + 1] != 'u') {
+                                    throw std::runtime_error("Unpaired high surrogate in JSON string");
+                                }
                                 pos += 2;
                                 uint32_t low = read_hex4();
-                                cp = 0x10000 + (((cp - 0xD800) << 10) | (low - 0xDC00));
+                                if (low < 0xDC00u || low > 0xDFFFu) {
+                                    throw std::runtime_error("Invalid low surrogate in JSON string");
+                                }
+                                cp = 0x10000u + (((cp - 0xD800u) << 10) | (low - 0xDC00u));
+                            } else if (cp >= 0xDC00u && cp <= 0xDFFFu) {
+                                throw std::runtime_error("Unpaired low surrogate in JSON string");
                             }
                             append_utf8(out, cp);
                             break;
@@ -275,7 +294,7 @@ private:
                         default: throw std::runtime_error("Invalid escape sequence");
                     }
                 } else {
-                    out.push_back(c);
+                    out.push_back(static_cast<char>(uc));
                 }
             }
             throw std::runtime_error("Unterminated JSON string");
@@ -283,34 +302,58 @@ private:
 
         Json read_number() {
             size_t start = pos;
-            if (s[pos] == '-') ++pos;
-            while (pos < s.size() && std::isdigit(static_cast<unsigned char>(s[pos]))) ++pos;
+            if (s[pos] == '-') {
+                ++pos;
+                if (pos >= s.size() || !std::isdigit(static_cast<unsigned char>(s[pos]))) {
+                    throw std::runtime_error("Malformed negative JSON number");
+                }
+            }
+            if (s[pos] == '0') {
+                ++pos;
+                if (pos < s.size() && std::isdigit(static_cast<unsigned char>(s[pos]))) {
+                    throw std::runtime_error("Leading zeros forbidden in JSON number");
+                }
+            } else {
+                while (pos < s.size() && std::isdigit(static_cast<unsigned char>(s[pos]))) ++pos;
+            }
             bool is_float = false;
             if (pos < s.size() && s[pos] == '.') {
                 is_float = true;
                 ++pos;
+                if (pos >= s.size() || !std::isdigit(static_cast<unsigned char>(s[pos]))) {
+                    throw std::runtime_error("Malformed fractional JSON number");
+                }
                 while (pos < s.size() && std::isdigit(static_cast<unsigned char>(s[pos]))) ++pos;
             }
             if (pos < s.size() && (s[pos] == 'e' || s[pos] == 'E')) {
                 is_float = true;
                 ++pos;
                 if (pos < s.size() && (s[pos] == '+' || s[pos] == '-')) ++pos;
+                if (pos >= s.size() || !std::isdigit(static_cast<unsigned char>(s[pos]))) {
+                    throw std::runtime_error("Malformed exponent in JSON number");
+                }
                 while (pos < s.size() && std::isdigit(static_cast<unsigned char>(s[pos]))) ++pos;
             }
             std::string tok = s.substr(start, pos - start);
             if (!is_float) {
-                return Json(static_cast<int64_t>(std::stoll(tok)));
+                try {
+                    size_t idx = 0;
+                    long long v = std::stoll(tok, &idx, 10);
+                    if (idx == tok.size()) return Json(static_cast<int64_t>(v));
+                } catch (...) {}
             }
-            return Json(std::stod(tok));
+            double dv = std::stod(tok);
+            if (!std::isfinite(dv)) throw std::runtime_error("Numeric overflow in JSON");
+            return Json(dv);
         }
 
-        Json read_array() {
+        Json read_array(int depth) {
             ++pos; // '['
             Array arr;
             skip_ws();
             if (pos < s.size() && s[pos] == ']') { ++pos; return Json(std::move(arr)); }
             while (true) {
-                arr.push_back(read_value());
+                arr.push_back(read_value(depth));
                 skip_ws();
                 if (pos < s.size() && s[pos] == ',') { ++pos; }
                 else if (pos < s.size() && s[pos] == ']') { ++pos; return Json(std::move(arr)); }
@@ -318,7 +361,7 @@ private:
             }
         }
 
-        Json read_object() {
+        Json read_object(int depth) {
             ++pos; // '{'
             Object obj;
             skip_ws();
@@ -330,7 +373,7 @@ private:
                 skip_ws();
                 if (pos >= s.size() || s[pos] != ':') throw std::runtime_error("Expected ':'");
                 ++pos;
-                Json v = read_value();
+                Json v = read_value(depth);
                 obj.emplace_back(std::move(k), std::move(v));
                 skip_ws();
                 if (pos < s.size() && s[pos] == ',') { ++pos; }

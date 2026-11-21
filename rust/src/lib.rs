@@ -7,14 +7,19 @@ pub mod json;
 
 pub use crate::json::Json;
 
+use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::hash::{BuildHasher, Hasher};
+use std::io::Read as _;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const SANDBOX_BASE_URL: &str = "https://api.lt.cniia.cloud";
 pub const MAX_DETAIL_WINDOW_MS: i64 = 604_800_000;
+pub const MAX_PAGE_SIZE: i64 = 20_000;
+pub const MAX_WEBHOOK_BODY_BYTES: usize = 1_048_576;
 const LEDGER_SCALE: i128 = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +65,7 @@ pub enum SdkError {
         trace_id: String,
         status: String,
         message: String,
+        validation: Option<HashMap<String, String>>,
         http_status: u16,
     },
 }
@@ -322,7 +328,8 @@ impl Config {
             None if self.environment == Environment::Sandbox => SANDBOX_BASE_URL,
             None => return Err(SdkError::Config("base_url is required when environment is Production".into())),
         };
-        if !raw.starts_with("http://") && !raw.starts_with("https://") {
+        let lower = raw.to_ascii_lowercase();
+        if !lower.starts_with("http://") && !lower.starts_with("https://") {
             return Err(SdkError::Config("base_url must start with http:// or https://".into()));
         }
         if self.timeout_ms == 0 {
@@ -332,6 +339,32 @@ impl Config {
     }
 }
 
+fn os_random_seed() -> [u8; 16] {
+    static SEED: OnceLock<[u8; 16]> = OnceLock::new();
+    *SEED.get_or_init(|| {
+        let mut buf = [0u8; 16];
+        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+            if f.read_exact(&mut buf).is_ok() {
+                return buf;
+            }
+        }
+        let rs1 = RandomState::new();
+        let rs2 = RandomState::new();
+        let mut h1 = rs1.build_hasher();
+        h1.write_u32(std::process::id());
+        let mut h2 = rs2.build_hasher();
+        h2.write_u64(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0),
+        );
+        buf[..8].copy_from_slice(&h1.finish().to_le_bytes());
+        buf[8..].copy_from_slice(&h2.finish().to_le_bytes());
+        buf
+    })
+}
+
 fn next_trace_uuid() -> String {
     static SEQ: AtomicU64 = AtomicU64::new(1);
     let nanos = SystemTime::now()
@@ -339,9 +372,13 @@ fn next_trace_uuid() -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
-    let seed = format!("{}:{}:{}", std::process::id(), nanos, n);
+    let mut material = Vec::with_capacity(48);
+    material.extend_from_slice(&os_random_seed());
+    material.extend_from_slice(&std::process::id().to_le_bytes());
+    material.extend_from_slice(&nanos.to_le_bytes());
+    material.extend_from_slice(&n.to_le_bytes());
     let mut b = [0u8; 16];
-    b.copy_from_slice(&crypto::sha256(seed.as_bytes())[..16]);
+    b.copy_from_slice(&crypto::sha256(&material)[..16]);
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
     format!(
@@ -397,16 +434,20 @@ impl Client {
                 .post_json(&url, &self.api_key, &sig, raw_bytes, self.timeout_ms)?;
 
         let resp_str = String::from_utf8_lossy(&resp_bytes);
-        let parsed = Json::parse(&resp_str).map_err(|_| SdkError::Api {
-            trace_id: trace_id.clone(),
-            status: if http_status >= 500 || http_status == 408 || http_status == 429 {
-                status_code::SC_OPERATOR_TIMEOUT.into()
-            } else {
-                status_code::SC_INVALID_REQUEST.into()
-            },
-            message: format!("Non-JSON HTTP {}", http_status),
-            http_status,
-        })?;
+        let parsed = Json::parse(&resp_str)
+            .ok()
+            .filter(Json::is_object)
+            .ok_or_else(|| SdkError::Api {
+                trace_id: trace_id.clone(),
+                status: if http_status >= 500 || http_status == 408 || http_status == 429 {
+                    status_code::SC_OPERATOR_TIMEOUT.into()
+                } else {
+                    status_code::SC_INVALID_REQUEST.into()
+                },
+                message: format!("Non-JSON-object HTTP {}", http_status),
+                validation: None,
+                http_status,
+            })?;
 
         let st = parsed.get("status").as_str().unwrap_or(status_code::SC_INVALID_REQUEST);
         let eff_trace = parsed
@@ -417,10 +458,17 @@ impl Client {
             .to_string();
 
         if http_status != 200 || st != status_code::SC_OK {
+            let validation = parsed.get("validation").as_object_entries().map(|entries| {
+                entries
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.to_scalar_string()))
+                    .collect::<HashMap<String, String>>()
+            });
             return Err(SdkError::Api {
                 trace_id: eff_trace,
                 status: st.to_string(),
                 message: parsed.get("message").as_str().unwrap_or("API error").to_string(),
+                validation,
                 http_status,
             });
         }
@@ -445,8 +493,12 @@ impl Client {
     }
 
     pub fn list_transactions(&self, params: Json) -> Result<Json, SdkError> {
-        let from = params.get("fromTime").as_i64().unwrap_or(-1);
-        let to = params.get("toTime").as_i64().unwrap_or(-1);
+        let Some(from) = params.get("fromTime").as_i64() else {
+            return Err(SdkError::Argument("fromTime integer is required".into()));
+        };
+        let Some(to) = params.get("toTime").as_i64() else {
+            return Err(SdkError::Argument("toTime integer is required".into()));
+        };
         if from < 0 || to < from {
             return Err(SdkError::Argument("invalid [fromTime, toTime]".into()));
         }
@@ -454,6 +506,9 @@ impl Client {
     }
 
     pub fn list_all_transactions(&self, from_time: i64, to_time: i64, page_size: i64) -> Result<Vec<Json>, SdkError> {
+        if !(1..=MAX_PAGE_SIZE).contains(&page_size) {
+            return Err(SdkError::Argument(format!("page_size must be in 1..={}", MAX_PAGE_SIZE)));
+        }
         let mut all = Vec::new();
         let mut page_no = 1_i64;
         loop {
@@ -466,7 +521,7 @@ impl Client {
             let data = res.get("data");
             let batch = data.get("transactions").as_array().unwrap_or(&[]);
             all.extend_from_slice(batch);
-            let total = data.get("total").as_i64().unwrap_or(all.len() as i64) as usize;
+            let total = data.get("total").as_i64().unwrap_or(all.len() as i64).max(0) as usize;
             if all.len() >= total || batch.is_empty() {
                 break;
             }
@@ -477,10 +532,13 @@ impl Client {
 
     pub fn get_transaction_detail(&self, params: Json) -> Result<Json, SdkError> {
         let bet_id = params.get("betId").as_str().unwrap_or("").trim();
-        let from = params.get("fromTime").as_i64().unwrap_or(-1);
-        let to = params.get("toTime").as_i64().unwrap_or(-1);
-        let span = to - from;
-        if bet_id.is_empty() || from < 0 || span < 0 || span > MAX_DETAIL_WINDOW_MS {
+        let Some(from) = params.get("fromTime").as_i64() else {
+            return Err(SdkError::Argument("fromTime integer is required".into()));
+        };
+        let Some(to) = params.get("toTime").as_i64() else {
+            return Err(SdkError::Argument("toTime integer is required".into()));
+        };
+        if bet_id.is_empty() || from < 0 || to < from || (to - from) > MAX_DETAIL_WINDOW_MS {
             return Err(SdkError::Argument(
                 "detail window must satisfy 0 <= toTime - fromTime <= 604800000".into(),
             ));
@@ -489,7 +547,14 @@ impl Client {
     }
 }
 
-// ── 5. Seamless Wallet WebhookDispatcher & InMemoryWallet ───────────────────
+// ── 5. Seamless Wallet Pluggable WalletHandler, WebhookDispatcher & InMemoryWallet ─
+
+pub trait WalletHandler: Send + Sync {
+    fn on_balance(&self, req: &Json) -> Json;
+    fn on_bet(&self, req: &Json) -> Json;
+    fn on_bet_result(&self, req: &Json) -> Json;
+    fn on_rollback(&self, req: &Json) -> Json;
+}
 
 struct Acct {
     currency: String,
@@ -500,14 +565,29 @@ struct Acct {
 }
 
 struct TxRec {
+    kind: &'static str,
     fp: String,
     empty: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BetState {
+    Deducted,
+    Settled,
+    RolledBack,
+}
+
+struct BetRec {
+    username: String,
+    currency: String,
+    stake: i128,
+    state: BetState,
 }
 
 struct WalletState {
     accounts: HashMap<String, Acct>,
     transactions: HashMap<String, TxRec>,
-    deducted_bets: HashMap<String, i128>,
+    deducted_bets: HashMap<String, BetRec>,
 }
 
 pub struct InMemoryWallet {
@@ -586,15 +666,21 @@ impl InMemoryWallet {
         r.set("data", data);
         r
     }
+}
 
-    pub fn on_balance(&self, req: &Json) -> Json {
+impl WalletHandler for InMemoryWallet {
+    fn on_balance(&self, req: &Json) -> Json {
         let st = self.inner.lock().unwrap();
         let tid = req.get("traceId").as_str().unwrap_or("");
-        let u = req.get("username").as_str().unwrap_or("");
+        let u = req.get("username").as_str().unwrap_or("").trim();
+        let cur = req.get("currency").as_str().unwrap_or("").trim().to_ascii_uppercase();
+        if u.is_empty() || cur.is_empty() {
+            return Self::err_env(tid, status_code::SC_INVALID_REQUEST, "username and currency required");
+        }
         let Some(a) = st.accounts.get(u) else {
             return Self::err_env(tid, status_code::SC_USER_NOT_EXISTS, "User missing");
         };
-        if a.currency != req.get("currency").as_str().unwrap_or("").trim().to_ascii_uppercase() {
+        if a.currency != cur {
             return Self::err_env(tid, status_code::SC_WRONG_CURRENCY, "Wrong currency");
         }
         if a.disabled {
@@ -606,12 +692,17 @@ impl InMemoryWallet {
         Self::ok_env(tid, u, a)
     }
 
-    pub fn on_bet(&self, req: &Json) -> Json {
+    fn on_bet(&self, req: &Json) -> Json {
         let mut st = self.inner.lock().unwrap();
         let tid = req.get("traceId").as_str().unwrap_or("");
-        let u = req.get("username").as_str().unwrap_or("");
+        let tx_id = req.get("transactionId").as_str().unwrap_or("").trim().to_string();
+        let bet_id = req.get("betId").as_str().unwrap_or("").trim().to_string();
+        let u = req.get("username").as_str().unwrap_or("").trim();
         let cur = req.get("currency").as_str().unwrap_or("").trim().to_ascii_uppercase();
-        let tx_id = req.get("transactionId").as_str().unwrap_or("").to_string();
+        let amt_str = req.get("amount").as_str().unwrap_or("");
+        if tx_id.is_empty() || bet_id.is_empty() || u.is_empty() || cur.is_empty() || amt_str.is_empty() {
+            return Self::err_env(tid, status_code::SC_INVALID_REQUEST, "Missing required bet fields");
+        }
         let fp = bet_fingerprint(req);
 
         let (exp, disabled, tok_ok, cur_ok, units_now) = match st.accounts.get(u) {
@@ -628,10 +719,13 @@ impl InMemoryWallet {
             return Self::err_env(tid, status_code::SC_WRONG_CURRENCY, "Wrong currency");
         }
         if let Some(prior) = st.transactions.get(&tx_id) {
-            if prior.fp != fp {
+            if prior.kind != "BET" || prior.fp != fp {
                 return Self::err_env(tid, status_code::SC_TRANSACTION_DUPLICATED, "Conflict");
             }
             return Self::ok_env(tid, u, st.accounts.get(u).unwrap());
+        }
+        if st.deducted_bets.contains_key(&bet_id) {
+            return Self::err_env(tid, status_code::SC_TRANSACTION_DUPLICATED, "Duplicate betId");
         }
         if disabled {
             return Self::err_env(tid, status_code::SC_USER_DISABLED, "Disabled");
@@ -639,25 +733,54 @@ impl InMemoryWallet {
         if !tok_ok {
             return Self::err_env(tid, status_code::SC_INVALID_TOKEN, "Invalid token");
         }
-        let Ok(stake) = decimal_to_ledger_units(req.get("amount").as_str().unwrap_or(""), exp, false) else {
+        let Ok(stake) = decimal_to_ledger_units(amt_str, exp, false) else {
             return Self::err_env(tid, status_code::SC_INVALID_REQUEST, "Bad amount");
         };
+        if stake <= 0 {
+            return Self::err_env(tid, status_code::SC_INVALID_REQUEST, "Bet amount must be positive");
+        }
         if units_now < stake {
             return Self::err_env(tid, status_code::SC_INSUFFICIENT_FUNDS, "Insufficient funds");
         }
         st.accounts.get_mut(u).unwrap().units -= stake;
-        st.transactions.insert(tx_id, TxRec { fp, empty: false });
-        st.deducted_bets
-            .insert(req.get("betId").as_str().unwrap_or("").to_string(), stake);
+        st.transactions.insert(
+            tx_id,
+            TxRec {
+                kind: "BET",
+                fp,
+                empty: false,
+            },
+        );
+        st.deducted_bets.insert(
+            bet_id,
+            BetRec {
+                username: u.to_string(),
+                currency: cur,
+                stake,
+                state: BetState::Deducted,
+            },
+        );
         Self::ok_env(tid, u, st.accounts.get(u).unwrap())
     }
 
-    pub fn on_bet_result(&self, req: &Json) -> Json {
+    fn on_bet_result(&self, req: &Json) -> Json {
         let mut st = self.inner.lock().unwrap();
         let tid = req.get("traceId").as_str().unwrap_or("");
-        let u = req.get("username").as_str().unwrap_or("");
+        let tx_id = req.get("transactionId").as_str().unwrap_or("").trim().to_string();
+        let bet_id = req.get("betId").as_str().unwrap_or("").trim().to_string();
+        let u = req.get("username").as_str().unwrap_or("").trim();
         let cur = req.get("currency").as_str().unwrap_or("").trim().to_ascii_uppercase();
-        let tx_id = req.get("transactionId").as_str().unwrap_or("").to_string();
+        let win_str = req.get("winAmount").as_str().unwrap_or("");
+        let bet_amt_str = req.get("betAmount").as_str().unwrap_or("");
+        if tx_id.is_empty()
+            || bet_id.is_empty()
+            || u.is_empty()
+            || cur.is_empty()
+            || win_str.is_empty()
+            || bet_amt_str.is_empty()
+        {
+            return Self::err_env(tid, status_code::SC_INVALID_REQUEST, "Missing required bet_result fields");
+        }
         let fp = bet_result_fingerprint(req);
 
         let exp = match st.accounts.get(u) {
@@ -666,28 +789,54 @@ impl InMemoryWallet {
             Some(a) => a.exponent,
         };
         if let Some(prior) = st.transactions.get(&tx_id) {
-            if prior.fp != fp {
+            if prior.kind != "SETTLE" || prior.fp != fp {
                 return Self::err_env(tid, status_code::SC_TRANSACTION_DUPLICATED, "Conflict");
             }
             return Self::ok_env(tid, u, st.accounts.get(u).unwrap());
         }
-        if !st.deducted_bets.contains_key(req.get("betId").as_str().unwrap_or("")) {
-            return Self::err_env(tid, status_code::SC_TRANSACTION_NOT_EXISTS, "Original betId missing");
-        }
-        let Ok(win) = decimal_to_ledger_units(req.get("winAmount").as_str().unwrap_or("0"), exp, false) else {
-            return Self::err_env(tid, status_code::SC_INVALID_REQUEST, "Bad winAmount");
+        let (Ok(bet_units), Ok(win)) = (
+            decimal_to_ledger_units(bet_amt_str, exp, false),
+            decimal_to_ledger_units(win_str, exp, false),
+        ) else {
+            return Self::err_env(tid, status_code::SC_INVALID_REQUEST, "Bad bet_result amount");
         };
-        st.accounts.get_mut(u).unwrap().units += win;
-        st.transactions.insert(tx_id, TxRec { fp, empty: false });
+        let Some(orig) = st.deducted_bets.get_mut(&bet_id) else {
+            return Self::err_env(tid, status_code::SC_TRANSACTION_NOT_EXISTS, "Original betId missing");
+        };
+        if orig.username != u || orig.currency != cur || orig.stake != bet_units {
+            return Self::err_env(tid, status_code::SC_INVALID_REQUEST, "bet_result mismatch");
+        }
+        if orig.state != BetState::Deducted {
+            return Self::err_env(tid, status_code::SC_TRANSACTION_DUPLICATED, "betId already finalized");
+        }
+        orig.state = BetState::Settled;
+        let acct = st.accounts.get_mut(u).unwrap();
+        let Some(next_units) = acct.units.checked_add(win) else {
+            return Self::err_env(tid, status_code::SC_INVALID_REQUEST, "Balance overflow");
+        };
+        acct.units = next_units;
+        st.transactions.insert(
+            tx_id,
+            TxRec {
+                kind: "SETTLE",
+                fp,
+                empty: false,
+            },
+        );
         Self::ok_env(tid, u, st.accounts.get(u).unwrap())
     }
 
-    pub fn on_rollback(&self, req: &Json) -> Json {
+    fn on_rollback(&self, req: &Json) -> Json {
         let mut st = self.inner.lock().unwrap();
         let tid = req.get("traceId").as_str().unwrap_or("");
-        let u = req.get("username").as_str().unwrap_or("");
+        let tx_id = req.get("transactionId").as_str().unwrap_or("").trim().to_string();
+        let bet_id = req.get("betId").as_str().unwrap_or("").trim().to_string();
+        let u = req.get("username").as_str().unwrap_or("").trim();
         let cur = req.get("currency").as_str().unwrap_or("").trim().to_ascii_uppercase();
-        let tx_id = req.get("transactionId").as_str().unwrap_or("").to_string();
+        let amt_str = req.get("amount").as_str().unwrap_or("");
+        if tx_id.is_empty() || bet_id.is_empty() || u.is_empty() || cur.is_empty() || amt_str.is_empty() {
+            return Self::err_env(tid, status_code::SC_INVALID_REQUEST, "Missing required rollback fields");
+        }
         let fp = rollback_fingerprint(req);
 
         let exp = match st.accounts.get(u) {
@@ -696,7 +845,7 @@ impl InMemoryWallet {
             Some(a) => a.exponent,
         };
         if let Some(prior) = st.transactions.get(&tx_id) {
-            if prior.fp != fp {
+            if prior.kind != "ROLLBACK" || prior.fp != fp {
                 return Self::err_env(tid, status_code::SC_TRANSACTION_DUPLICATED, "Conflict");
             }
             if prior.empty {
@@ -704,27 +853,105 @@ impl InMemoryWallet {
             }
             return Self::ok_env(tid, u, st.accounts.get(u).unwrap());
         }
-        if !st.deducted_bets.contains_key(req.get("betId").as_str().unwrap_or("")) {
-            st.transactions.insert(tx_id, TxRec { fp, empty: true });
-            return Self::err_env(tid, status_code::SC_TRANSACTION_NOT_EXISTS, "Never deducted");
-        }
-        let Ok(refund) = decimal_to_ledger_units(req.get("amount").as_str().unwrap_or("0"), exp, false) else {
+        let Ok(refund) = decimal_to_ledger_units(amt_str, exp, false) else {
             return Self::err_env(tid, status_code::SC_INVALID_REQUEST, "Bad amount");
         };
-        st.accounts.get_mut(u).unwrap().units += refund;
-        st.transactions.insert(tx_id, TxRec { fp, empty: false });
+        if refund <= 0 {
+            return Self::err_env(tid, status_code::SC_INVALID_REQUEST, "Rollback amount must be positive");
+        }
+        let Some(orig) = st.deducted_bets.get_mut(&bet_id) else {
+            st.transactions.insert(
+                tx_id,
+                TxRec {
+                    kind: "ROLLBACK",
+                    fp,
+                    empty: true,
+                },
+            );
+            return Self::err_env(tid, status_code::SC_TRANSACTION_NOT_EXISTS, "Never deducted");
+        };
+        if orig.username != u || orig.currency != cur || orig.stake != refund {
+            return Self::err_env(tid, status_code::SC_INVALID_REQUEST, "Rollback mismatch");
+        }
+        if orig.state != BetState::Deducted {
+            return Self::err_env(tid, status_code::SC_TRANSACTION_DUPLICATED, "betId already finalized");
+        }
+        orig.state = BetState::RolledBack;
+        let acct = st.accounts.get_mut(u).unwrap();
+        let Some(next_units) = acct.units.checked_add(refund) else {
+            return Self::err_env(tid, status_code::SC_INVALID_REQUEST, "Balance overflow");
+        };
+        acct.units = next_units;
+        st.transactions.insert(
+            tx_id,
+            TxRec {
+                kind: "ROLLBACK",
+                fp,
+                empty: false,
+            },
+        );
         Self::ok_env(tid, u, st.accounts.get(u).unwrap())
+    }
+}
+
+impl InMemoryWallet {
+    pub fn on_balance(&self, req: &Json) -> Json {
+        <Self as WalletHandler>::on_balance(self, req)
+    }
+
+    pub fn on_bet(&self, req: &Json) -> Json {
+        <Self as WalletHandler>::on_bet(self, req)
+    }
+
+    pub fn on_bet_result(&self, req: &Json) -> Json {
+        <Self as WalletHandler>::on_bet_result(self, req)
+    }
+
+    pub fn on_rollback(&self, req: &Json) -> Json {
+        <Self as WalletHandler>::on_rollback(self, req)
+    }
+}
+
+fn extract_trace_hint(raw_body: &[u8]) -> String {
+    let head = &raw_body[..raw_body.len().min(1024)];
+    let Ok(s) = std::str::from_utf8(head) else {
+        return String::new();
+    };
+    let Some(idx) = s.find("\"traceId\"") else {
+        return String::new();
+    };
+    let rest = &s[idx + 9..];
+    let Some(colon) = rest.find(':') else {
+        return String::new();
+    };
+    let after_colon = rest[colon + 1..].trim_start();
+    if !after_colon.starts_with('"') {
+        return String::new();
+    }
+    let val_rest = &after_colon[1..];
+    let Some(end_q) = val_rest.find('"') else {
+        return String::new();
+    };
+    let candidate = &val_rest[..end_q];
+    if candidate.len() <= 128
+        && candidate
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':'))
+    {
+        candidate.to_string()
+    } else {
+        String::new()
     }
 }
 
 pub struct WebhookDispatcher<'a> {
     api_key: String,
     hmac_secret: String,
-    wallet: &'a InMemoryWallet,
+    wallet: &'a dyn WalletHandler,
 }
 
 impl<'a> WebhookDispatcher<'a> {
-    pub fn new(config: &Config, wallet: &'a InMemoryWallet) -> Self {
+    pub fn new(config: &Config, wallet: &'a dyn WalletHandler) -> Self {
         Self {
             api_key: config.api_key.trim().to_string(),
             hmac_secret: config.hmac_secret.clone(),
@@ -732,26 +959,42 @@ impl<'a> WebhookDispatcher<'a> {
         }
     }
 
-    pub fn handle(&self, route_path: &str, api_key_header: &str, signature_header: &str, raw_body: &[u8]) -> Json {
-        let parsed = std::str::from_utf8(raw_body)
-            .ok()
-            .and_then(|s| Json::parse(s).ok())
-            .filter(Json::is_object);
-        let trace_id = parsed
-            .as_ref()
-            .and_then(|p| p.get("traceId").as_str())
-            .map(str::trim)
-            .map(|s| &s[..s.len().min(128)])
-            .unwrap_or("")
-            .to_string();
+    pub fn try_new(config: &Config, wallet: &'a dyn WalletHandler) -> Result<Self, SdkError> {
+        if config.api_key.trim().is_empty() {
+            return Err(SdkError::Config("api_key is required".into()));
+        }
+        if config.hmac_secret.is_empty() {
+            return Err(SdkError::Config("hmac_secret is required".into()));
+        }
+        Ok(Self::new(config, wallet))
+    }
 
+    pub fn handle(&self, route_path: &str, api_key_header: &str, signature_header: &str, raw_body: &[u8]) -> Json {
+        if raw_body.len() > MAX_WEBHOOK_BODY_BYTES {
+            return InMemoryWallet::err_env("", status_code::SC_INVALID_REQUEST, "Request body exceeds 1 MiB limit");
+        }
+
+        // Verify X-API-Key & X-Signature over raw bytes BEFORE JSON parsing!
         let auth = verify_webhook_headers(api_key_header, signature_header, raw_body, &self.api_key, &self.hmac_secret);
         if auth != status_code::SC_OK {
-            return InMemoryWallet::err_env(&trace_id, auth, "Auth/signature failed");
+            return InMemoryWallet::err_env(&extract_trace_hint(raw_body), auth, "Auth/signature failed");
         }
-        let Some(body_obj) = parsed else {
-            return InMemoryWallet::err_env(&trace_id, status_code::SC_INVALID_REQUEST, "Invalid JSON object");
+
+        let Some(body_obj) = std::str::from_utf8(raw_body)
+            .ok()
+            .and_then(|s| Json::parse(s).ok())
+            .filter(Json::is_object)
+        else {
+            return InMemoryWallet::err_env("", status_code::SC_INVALID_REQUEST, "Invalid JSON object");
         };
+        let trace_id: String = body_obj
+            .get("traceId")
+            .as_str()
+            .map(str::trim)
+            .unwrap_or("")
+            .chars()
+            .take(128)
+            .collect();
 
         let clean = route_path.split('?').next().unwrap_or("").trim_end_matches('/');
         if clean.ends_with("/wallet/balance") {
@@ -1045,11 +1288,11 @@ mod tests {
         let _ = std::net::TcpStream::connect(("127.0.0.1", port));
         let _ = srv_handle.join();
 
-        // WebhookDispatcher + InMemoryWallet lifecycle
+        // WebhookDispatcher + InMemoryWallet lifecycle + CR-01..CR-10 adversarial checks
         let tok = "b2bt_9f81c204d7e641b8a5309c17e248f6b109d3a4c5e6f70819";
         let wallet = InMemoryWallet::new();
         wallet.add_account("player_9527", "USD", "1000.00", 2, &[tok]).unwrap();
-        let disp = WebhookDispatcher::new(&cfg, &wallet);
+        let disp = WebhookDispatcher::try_new(&cfg, &wallet).unwrap();
         let send = |route: &str, p: &Json| -> Json {
             let raw = p.dump();
             disp.handle(route, api_key, &sign_body(raw.as_bytes(), secret).unwrap(), raw.as_bytes())
@@ -1070,10 +1313,28 @@ mod tests {
         wallet.set_disabled("player_9527", true);
         assert_eq!(send("/wallet/bet_result", idem.get("betResult").get("initial")).get("data").get("balance").as_str(), Some("1100.00"));
 
+        // CR-03: Rollback after already-settled betId rejected!
+        assert_eq!(send("/wallet/rollback", idem.get("rollback").get("initial")).get("status").as_str(), Some("SC_TRANSACTION_DUPLICATED"));
+
         let mut unknown_rb = idem.get("rollback").get("initial").clone();
         unknown_rb.set("transactionId", Json::Str("rb_b2btkt000000000000000000000000".into()));
         unknown_rb.set("betId", Json::Str("b2btkt000000000000000000000000".into()));
         unknown_rb.set("externalTransactionId", Json::Str("b2btkt000000000000000000000000".into()));
         assert_eq!(send("/wallet/rollback", &unknown_rb).get("status").as_str(), Some("SC_TRANSACTION_NOT_EXISTS"));
+
+        // CR-01 & CR-07: Pre-auth deep nesting rejected; signed >64 depth rejected; bad surrogate \uD83D\u0041 does NOT underflow/panic!
+        assert_eq!(
+            disp.handle("/wallet/bet", "bad", "bad", "[".repeat(50_000).as_bytes()).get("status").as_str(),
+            Some("SC_AUTHENTICATION_FAILED")
+        );
+        let deep_signed = format!("{{\"a\":{}{}}}", "[".repeat(80), "]".repeat(80));
+        assert_eq!(
+            disp.handle("/wallet/bet", api_key, &sign_body(deep_signed.as_bytes(), secret).unwrap(), deep_signed.as_bytes())
+                .get("status")
+                .as_str(),
+            Some("SC_INVALID_REQUEST")
+        );
+        assert!(Json::parse("{\"bad\":\"\\uD83D\\u0041\"}").is_err());
+        assert_eq!(Json::parse("{\"ok\":\"\\uD83C\\uDFB2\"}").unwrap().get("ok").as_str(), Some("🎲"));
     }
 }

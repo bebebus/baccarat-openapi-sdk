@@ -25,8 +25,11 @@ import (
 )
 
 const (
-	SandboxBaseURL    = "https://api.lt.cniia.cloud"
-	MaxDetailWindowMs = int64(604_800_000) // 7 days in ms
+	SandboxBaseURL       = "https://api.lt.cniia.cloud"
+	MaxDetailWindowMs    = int64(604_800_000) // 7 days in ms
+	MaxPageSize          = 20_000
+	MaxWebhookBodyBytes  = 1_048_576          // 1 MiB
+	maxHTTPResponseBytes = 16 * 1024 * 1024   // 16 MiB
 
 	EnvSandbox    = "SANDBOX"
 	EnvProduction = "PRODUCTION"
@@ -51,8 +54,9 @@ const (
 )
 
 var (
-	hex64Re   = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
-	decimalRe = regexp.MustCompile(`^(-?)(\d+)(?:\.(\d+))?$`)
+	hex64Re     = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+	decimalRe   = regexp.MustCompile(`^(-?)(\d+)(?:\.(\d+))?$`)
+	traceHintRe = regexp.MustCompile(`"traceId"\s*:\s*"([A-Za-z0-9_.:-]{1,128})"`)
 )
 
 func IsRetryableStatus(status string) bool {
@@ -383,6 +387,11 @@ func marshalNoEscapeHTML(v any) ([]byte, error) {
 	return out, nil
 }
 
+func isJSONObjectBytes(raw []byte) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) >= 2 && trimmed[0] == '{' && trimmed[len(trimmed)-1] == '}'
+}
+
 type rawEnvelope struct {
 	TraceID    string            `json:"traceId"`
 	Status     string            `json:"status"`
@@ -414,12 +423,15 @@ func (c *Client) postSigned(ctx context.Context, route string, reqBody any, trac
 		return "", &SdkError{Code: SC_OPERATOR_TIMEOUT, Message: "network error: " + err.Error()}
 	}
 	defer resp.Body.Close()
-	respBytes, err := io.ReadAll(resp.Body)
+	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxHTTPResponseBytes+1))
 	if err != nil {
 		return "", &SdkError{Code: SC_OPERATOR_TIMEOUT, Message: "read error: " + err.Error()}
 	}
+	if len(respBytes) > maxHTTPResponseBytes {
+		return "", &SdkError{Code: SC_INVALID_REQUEST, Message: "gateway response exceeded 16 MiB limit"}
+	}
 	var env rawEnvelope
-	if err := json.Unmarshal(respBytes, &env); err != nil {
+	if !isJSONObjectBytes(respBytes) || json.Unmarshal(respBytes, &env) != nil {
 		st := SC_INVALID_REQUEST
 		if resp.StatusCode >= 500 || resp.StatusCode == 408 || resp.StatusCode == 429 {
 			st = SC_OPERATOR_TIMEOUT
@@ -591,8 +603,11 @@ func (c *Client) ListTransactions(ctx context.Context, req ListTransactionsReque
 }
 
 func (c *Client) ListAllTransactions(ctx context.Context, fromTime, toTime int64, pageSize int) ([]ReconcileTransactionRow, error) {
-	if pageSize <= 0 {
+	if pageSize == 0 {
 		pageSize = 2000
+	}
+	if pageSize < 1 || pageSize > MaxPageSize {
+		return nil, &SdkError{Code: "INVALID_ARGUMENT", Message: fmt.Sprintf("pageSize must be in 1..%d", MaxPageSize)}
 	}
 	var all []ReconcileTransactionRow
 	pageNo := 1
@@ -637,8 +652,7 @@ type TransactionDetailData struct {
 }
 
 func (c *Client) GetTransactionDetail(ctx context.Context, req TransactionDetailRequest) (*TransactionDetailData, string, error) {
-	span := req.ToTime - req.FromTime
-	if strings.TrimSpace(req.BetID) == "" || req.FromTime < 0 || span < 0 || span > MaxDetailWindowMs {
+	if strings.TrimSpace(req.BetID) == "" || req.FromTime < 0 || req.ToTime < req.FromTime || (req.ToTime-req.FromTime) > MaxDetailWindowMs {
 		return nil, "", &SdkError{Code: "INVALID_ARGUMENT", Message: "detail window must satisfy 0 <= ToTime - FromTime <= 604800000"}
 	}
 	if strings.TrimSpace(req.TraceID) == "" {
@@ -692,22 +706,39 @@ type walletAcct struct {
 }
 
 type txRecord struct {
+	kind  string
 	fp    string
 	empty bool
+}
+
+type betState string
+
+const (
+	betStateDeducted   betState = "DEDUCTED"
+	betStateSettled    betState = "SETTLED"
+	betStateRolledBack betState = "ROLLED_BACK"
+)
+
+type betRecord struct {
+	txID     string
+	username string
+	currency string
+	stake    *big.Int
+	state    betState
 }
 
 type InMemoryWallet struct {
 	mu           sync.Mutex
 	accounts     map[string]*walletAcct
 	transactions map[string]txRecord
-	deductedBets map[string]*big.Int
+	deductedBets map[string]*betRecord
 }
 
 func NewInMemoryWallet(initial map[string]AccountInit) (*InMemoryWallet, error) {
 	w := &InMemoryWallet{
 		accounts:     make(map[string]*walletAcct),
 		transactions: make(map[string]txRecord),
-		deductedBets: make(map[string]*big.Int),
+		deductedBets: make(map[string]*betRecord),
 	}
 	for u, info := range initial {
 		uVal, err := DecimalToLedgerUnits(info.Balance, info.Exponent, false)
@@ -754,11 +785,16 @@ func (w *InMemoryWallet) okResp(traceID, username string, a *walletAcct) WalletR
 func (w *InMemoryWallet) OnBalance(_ context.Context, req WalletBalanceRequest) WalletResponse {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	a, ok := w.accounts[req.Username]
+	username := strings.TrimSpace(req.Username)
+	currency := strings.ToUpper(strings.TrimSpace(req.Currency))
+	if username == "" || currency == "" {
+		return WalletResponse{TraceID: req.TraceID, Status: SC_INVALID_REQUEST, Message: "username and currency are required"}
+	}
+	a, ok := w.accounts[username]
 	if !ok {
 		return WalletResponse{TraceID: req.TraceID, Status: SC_USER_NOT_EXISTS, Message: "user not exists"}
 	}
-	if a.currency != strings.ToUpper(strings.TrimSpace(req.Currency)) {
+	if a.currency != currency {
 		return WalletResponse{TraceID: req.TraceID, Status: SC_WRONG_CURRENCY, Message: "wrong currency"}
 	}
 	if a.disabled {
@@ -767,25 +803,35 @@ func (w *InMemoryWallet) OnBalance(_ context.Context, req WalletBalanceRequest) 
 	if len(a.tokens) > 0 && !a.tokens[req.Token] {
 		return WalletResponse{TraceID: req.TraceID, Status: SC_INVALID_TOKEN, Message: "invalid token"}
 	}
-	return w.okResp(req.TraceID, req.Username, a)
+	return w.okResp(req.TraceID, username, a)
 }
 
 func (w *InMemoryWallet) OnBet(_ context.Context, req WalletBetRequest) WalletResponse {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	a, ok := w.accounts[req.Username]
+	txID := strings.TrimSpace(req.TransactionID)
+	betID := strings.TrimSpace(req.BetID)
+	username := strings.TrimSpace(req.Username)
+	currency := strings.ToUpper(strings.TrimSpace(req.Currency))
+	if txID == "" || betID == "" || username == "" || currency == "" || strings.TrimSpace(req.Amount) == "" {
+		return WalletResponse{TraceID: req.TraceID, Status: SC_INVALID_REQUEST, Message: "missing required bet fields"}
+	}
+	a, ok := w.accounts[username]
 	if !ok {
 		return WalletResponse{TraceID: req.TraceID, Status: SC_USER_NOT_EXISTS}
 	}
-	if a.currency != strings.ToUpper(strings.TrimSpace(req.Currency)) {
+	if a.currency != currency {
 		return WalletResponse{TraceID: req.TraceID, Status: SC_WRONG_CURRENCY}
 	}
 	fp := BetFingerprint(req)
-	if prior, exists := w.transactions[req.TransactionID]; exists {
-		if prior.fp != fp {
+	if prior, exists := w.transactions[txID]; exists {
+		if prior.kind != "BET" || prior.fp != fp {
 			return WalletResponse{TraceID: req.TraceID, Status: SC_TRANSACTION_DUPLICATED, Message: "conflicting bet"}
 		}
-		return w.okResp(req.TraceID, req.Username, a)
+		return w.okResp(req.TraceID, username, a)
+	}
+	if _, dupBet := w.deductedBets[betID]; dupBet {
+		return WalletResponse{TraceID: req.TraceID, Status: SC_TRANSACTION_DUPLICATED, Message: "duplicate betId"}
 	}
 	if a.disabled {
 		return WalletResponse{TraceID: req.TraceID, Status: SC_USER_DISABLED}
@@ -794,78 +840,112 @@ func (w *InMemoryWallet) OnBet(_ context.Context, req WalletBetRequest) WalletRe
 		return WalletResponse{TraceID: req.TraceID, Status: SC_INVALID_TOKEN}
 	}
 	stake, err := DecimalToLedgerUnits(req.Amount, a.exponent, false)
-	if err != nil {
-		return WalletResponse{TraceID: req.TraceID, Status: SC_INVALID_REQUEST, Message: err.Error()}
+	if err != nil || stake.Sign() <= 0 {
+		return WalletResponse{TraceID: req.TraceID, Status: SC_INVALID_REQUEST, Message: "invalid bet amount"}
 	}
 	if a.units.Cmp(stake) < 0 {
 		return WalletResponse{TraceID: req.TraceID, Status: SC_INSUFFICIENT_FUNDS, Message: "insufficient funds"}
 	}
 	a.units.Sub(a.units, stake)
-	w.transactions[req.TransactionID] = txRecord{fp: fp}
-	w.deductedBets[req.BetID] = new(big.Int).Set(stake)
-	return w.okResp(req.TraceID, req.Username, a)
+	w.transactions[txID] = txRecord{kind: "BET", fp: fp}
+	w.deductedBets[betID] = &betRecord{
+		txID:     txID,
+		username: username,
+		currency: a.currency,
+		stake:    new(big.Int).Set(stake),
+		state:    betStateDeducted,
+	}
+	return w.okResp(req.TraceID, username, a)
 }
 
 func (w *InMemoryWallet) OnBetResult(_ context.Context, req WalletBetResultRequest) WalletResponse {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	a, ok := w.accounts[req.Username]
+	txID := strings.TrimSpace(req.TransactionID)
+	betID := strings.TrimSpace(req.BetID)
+	username := strings.TrimSpace(req.Username)
+	currency := strings.ToUpper(strings.TrimSpace(req.Currency))
+	if txID == "" || betID == "" || username == "" || currency == "" || strings.TrimSpace(req.WinAmount) == "" || strings.TrimSpace(req.BetAmount) == "" {
+		return WalletResponse{TraceID: req.TraceID, Status: SC_INVALID_REQUEST, Message: "missing required bet_result fields"}
+	}
+	a, ok := w.accounts[username]
 	if !ok {
 		return WalletResponse{TraceID: req.TraceID, Status: SC_USER_NOT_EXISTS}
 	}
-	if a.currency != strings.ToUpper(strings.TrimSpace(req.Currency)) {
+	if a.currency != currency {
 		return WalletResponse{TraceID: req.TraceID, Status: SC_WRONG_CURRENCY}
 	}
 	fp := BetResultFingerprint(req)
-	if prior, exists := w.transactions[req.TransactionID]; exists {
-		if prior.fp != fp {
+	if prior, exists := w.transactions[txID]; exists {
+		if prior.kind != "SETTLE" || prior.fp != fp {
 			return WalletResponse{TraceID: req.TraceID, Status: SC_TRANSACTION_DUPLICATED, Message: "conflicting bet_result"}
 		}
-		return w.okResp(req.TraceID, req.Username, a)
+		return w.okResp(req.TraceID, username, a)
 	}
-	if _, existed := w.deductedBets[req.BetID]; !existed {
+	orig, existed := w.deductedBets[betID]
+	if !existed {
 		return WalletResponse{TraceID: req.TraceID, Status: SC_TRANSACTION_NOT_EXISTS}
 	}
-	winAmt, err := DecimalToLedgerUnits(req.WinAmount, a.exponent, false)
-	if err != nil {
-		return WalletResponse{TraceID: req.TraceID, Status: SC_INVALID_REQUEST, Message: err.Error()}
+	betAmt, errBet := DecimalToLedgerUnits(req.BetAmount, a.exponent, false)
+	winAmt, errWin := DecimalToLedgerUnits(req.WinAmount, a.exponent, false)
+	if errBet != nil || errWin != nil || orig.username != username || orig.currency != a.currency || orig.stake.Cmp(betAmt) != 0 {
+		return WalletResponse{TraceID: req.TraceID, Status: SC_INVALID_REQUEST, Message: "bet_result mismatch"}
+	}
+	if orig.state != betStateDeducted {
+		return WalletResponse{TraceID: req.TraceID, Status: SC_TRANSACTION_DUPLICATED, Message: "betId already finalized"}
 	}
 	a.units.Add(a.units, winAmt)
-	w.transactions[req.TransactionID] = txRecord{fp: fp}
-	return w.okResp(req.TraceID, req.Username, a)
+	orig.state = betStateSettled
+	w.transactions[txID] = txRecord{kind: "SETTLE", fp: fp}
+	return w.okResp(req.TraceID, username, a)
 }
 
 func (w *InMemoryWallet) OnRollback(_ context.Context, req WalletRollbackRequest) WalletResponse {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	a, ok := w.accounts[req.Username]
+	txID := strings.TrimSpace(req.TransactionID)
+	betID := strings.TrimSpace(req.BetID)
+	username := strings.TrimSpace(req.Username)
+	currency := strings.ToUpper(strings.TrimSpace(req.Currency))
+	if txID == "" || betID == "" || username == "" || currency == "" || strings.TrimSpace(req.Amount) == "" {
+		return WalletResponse{TraceID: req.TraceID, Status: SC_INVALID_REQUEST, Message: "missing required rollback fields"}
+	}
+	a, ok := w.accounts[username]
 	if !ok {
 		return WalletResponse{TraceID: req.TraceID, Status: SC_USER_NOT_EXISTS}
 	}
-	if a.currency != strings.ToUpper(strings.TrimSpace(req.Currency)) {
+	if a.currency != currency {
 		return WalletResponse{TraceID: req.TraceID, Status: SC_WRONG_CURRENCY}
 	}
 	fp := RollbackFingerprint(req)
-	if prior, exists := w.transactions[req.TransactionID]; exists {
-		if prior.fp != fp {
+	if prior, exists := w.transactions[txID]; exists {
+		if prior.kind != "ROLLBACK" || prior.fp != fp {
 			return WalletResponse{TraceID: req.TraceID, Status: SC_TRANSACTION_DUPLICATED, Message: "conflicting rollback"}
 		}
 		if prior.empty {
 			return WalletResponse{TraceID: req.TraceID, Status: SC_TRANSACTION_NOT_EXISTS, Message: "never deducted"}
 		}
-		return w.okResp(req.TraceID, req.Username, a)
-	}
-	if _, existed := w.deductedBets[req.BetID]; !existed {
-		w.transactions[req.TransactionID] = txRecord{fp: fp, empty: true}
-		return WalletResponse{TraceID: req.TraceID, Status: SC_TRANSACTION_NOT_EXISTS, Message: "never deducted"}
+		return w.okResp(req.TraceID, username, a)
 	}
 	refund, err := DecimalToLedgerUnits(req.Amount, a.exponent, false)
-	if err != nil {
-		return WalletResponse{TraceID: req.TraceID, Status: SC_INVALID_REQUEST, Message: err.Error()}
+	if err != nil || refund.Sign() <= 0 {
+		return WalletResponse{TraceID: req.TraceID, Status: SC_INVALID_REQUEST, Message: "invalid rollback amount"}
+	}
+	orig, existed := w.deductedBets[betID]
+	if !existed {
+		w.transactions[txID] = txRecord{kind: "ROLLBACK", fp: fp, empty: true}
+		return WalletResponse{TraceID: req.TraceID, Status: SC_TRANSACTION_NOT_EXISTS, Message: "never deducted"}
+	}
+	if orig.username != username || orig.currency != a.currency || orig.stake.Cmp(refund) != 0 {
+		return WalletResponse{TraceID: req.TraceID, Status: SC_INVALID_REQUEST, Message: "rollback mismatch"}
+	}
+	if orig.state != betStateDeducted {
+		return WalletResponse{TraceID: req.TraceID, Status: SC_TRANSACTION_DUPLICATED, Message: "betId already finalized"}
 	}
 	a.units.Add(a.units, refund)
-	w.transactions[req.TransactionID] = txRecord{fp: fp}
-	return w.okResp(req.TraceID, req.Username, a)
+	orig.state = betStateRolledBack
+	w.transactions[txID] = txRecord{kind: "ROLLBACK", fp: fp}
+	return w.okResp(req.TraceID, username, a)
 }
 
 type WebhookDispatcher struct {
@@ -885,7 +965,31 @@ func NewWebhookDispatcher(apiKey, hmacSecret string, wallet WalletHandler) (*Web
 	}, nil
 }
 
+func extractTraceHint(rawBody []byte) string {
+	head := rawBody
+	if len(head) > 1024 {
+		head = head[:1024]
+	}
+	if m := traceHintRe.FindSubmatch(head); len(m) == 2 {
+		return string(m[1])
+	}
+	return ""
+}
+
 func (d *WebhookDispatcher) HandleRaw(ctx context.Context, routePath, apiKeyHeader, sigHeader string, rawBody []byte) WalletResponse {
+	if len(rawBody) > MaxWebhookBodyBytes {
+		return WalletResponse{Status: SC_INVALID_REQUEST, Message: "request body exceeds 1 MiB limit"}
+	}
+
+	// Verify X-API-Key & X-Signature over raw bytes BEFORE JSON unmarshaling!
+	if st := VerifyWebhookHeaders(apiKeyHeader, sigHeader, rawBody, d.apiKey, d.hmacSecret); st != SC_OK {
+		return WalletResponse{TraceID: extractTraceHint(rawBody), Status: st, Message: "auth/signature check failed"}
+	}
+
+	if !isJSONObjectBytes(rawBody) {
+		return WalletResponse{Status: SC_INVALID_REQUEST, Message: "request body must be a JSON object"}
+	}
+
 	var traceProbe struct {
 		TraceID string `json:"traceId"`
 	}
@@ -893,10 +997,6 @@ func (d *WebhookDispatcher) HandleRaw(ctx context.Context, routePath, apiKeyHead
 	traceID := strings.TrimSpace(traceProbe.TraceID)
 	if len(traceID) > 128 {
 		traceID = traceID[:128]
-	}
-
-	if st := VerifyWebhookHeaders(apiKeyHeader, sigHeader, rawBody, d.apiKey, d.hmacSecret); st != SC_OK {
-		return WalletResponse{TraceID: traceID, Status: st, Message: "auth/signature check failed"}
 	}
 
 	clean := strings.TrimRight(strings.SplitN(routePath, "?", 2)[0], "/")
@@ -931,7 +1031,8 @@ func (d *WebhookDispatcher) HandleRaw(ctx context.Context, routePath, apiKeyHead
 }
 
 func (d *WebhookDispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	raw, err := io.ReadAll(r.Body)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	raw, err := io.ReadAll(io.LimitReader(r.Body, MaxWebhookBodyBytes+1))
 	if err != nil {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"SC_INVALID_REQUEST","message":"failed to read body"}`))
@@ -939,7 +1040,6 @@ func (d *WebhookDispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := d.HandleRaw(r.Context(), r.URL.Path, r.Header.Get("X-API-Key"), r.Header.Get("X-Signature"), raw)
 	out, _ := marshalNoEscapeHTML(resp)
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(out)
 }

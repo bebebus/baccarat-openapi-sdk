@@ -9,6 +9,7 @@ use Closure;
 final class Client
 {
     public const MAX_DETAIL_WINDOW_MS = 604800000;
+    public const MAX_PAGE_SIZE = 20000;
 
     private Config $config;
     /** @var Closure(string, array<string, string>, string, int): array{0: int, 1: string} */
@@ -37,6 +38,7 @@ final class Client
             CURLOPT_POSTFIELDS => $rawBody,
             CURLOPT_HTTPHEADER => $headerLines,
             CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_NOSIGNAL => true,
             CURLOPT_TIMEOUT_MS => $timeoutMs,
             CURLOPT_CONNECTTIMEOUT_MS => min($timeoutMs, 5000),
         ]);
@@ -87,13 +89,15 @@ final class Client
             $this->config->timeoutMs
         );
 
-        $decoded = json_decode($rawResp, true);
-        if (!is_array($decoded)) {
+        $probeObj = json_decode($rawResp, false, 64);
+        if (!($probeObj instanceof \stdClass)) {
             $st = ($httpStatus >= 500 || $httpStatus === 408 || $httpStatus === 429)
                 ? StatusCode::SC_OPERATOR_TIMEOUT
                 : StatusCode::SC_INVALID_REQUEST;
-            throw new BaccaratApiException($st, "Non-JSON HTTP {$httpStatus}", $traceId, null, $httpStatus);
+            throw new BaccaratApiException($st, "Non-JSON-object HTTP {$httpStatus}", $traceId, null, $httpStatus);
         }
+        /** @var array<string, mixed> $decoded */
+        $decoded = json_decode($rawResp, true, 64);
 
         $respStatus = (string) ($decoded['status'] ?? StatusCode::SC_INVALID_REQUEST);
         if ($httpStatus !== 200 || $respStatus !== StatusCode::SC_OK) {
@@ -148,6 +152,9 @@ final class Client
     /** @return list<array<string, mixed>> */
     public function listAllTransactions(int $fromTime, int $toTime, int $pageSize = 2000): array
     {
+        if ($pageSize < 1 || $pageSize > self::MAX_PAGE_SIZE) {
+            throw new BaccaratSdkException('pageSize must be in 1..' . self::MAX_PAGE_SIZE, 'INVALID_ARGUMENT');
+        }
         $all = [];
         $pageNo = 1;
         while (true) {

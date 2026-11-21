@@ -322,6 +322,25 @@ int main() {
     unknown_rb.set("externalTransactionId", Json("b2btkt000000000000000000000000"));
     require_eq(send_wb("/wallet/rollback", unknown_rb).at("status").as_string(), "SC_TRANSACTION_NOT_EXISTS", "wb:emptyRb");
 
+    // 6. CR-01..CR-10 adversarial regressions:
+    // Pre-auth deep nesting rejected without stack overflow; signed >64 depth rejected; surrogate validation; rollback after settle rejected
+    require_eq(disp.handle("/wallet/bet", "bad", "bad", std::string(50000, '[')).at("status").as_string(), "SC_AUTHENTICATION_FAILED", "wb:preAuthDeep");
+    std::string deep_signed = "{\"a\":" + std::string(80, '[') + std::string(80, ']') + "}";
+    require_eq(disp.handle("/wallet/bet", api_key, sign_body(deep_signed, secret), deep_signed).at("status").as_string(), "SC_INVALID_REQUEST", "wb:maxDepth64");
+    require_eq(send_wb("/wallet/rollback", rb.at("initial")).at("status").as_string(), "SC_TRANSACTION_DUPLICATED", "wb:rbAfterSettle");
+
+    wallet.set_disabled("player_9527", false);
+    Json bad_bet = bet.at("initial");
+    bad_bet.set("transactionId", Json("bet_bad_cpp"));
+    bad_bet.set("betId", Json("b2btkt_bad_cpp"));
+    bad_bet.set("amount", Json("invalid_decimal"));
+    require_eq(send_wb("/wallet/bet", bad_bet).at("status").as_string(), "SC_INVALID_REQUEST", "wb:badDecimalCaught");
+
+    bool bad_surr = false;
+    try { Json::parse("{\"x\":\"\\uD83D\\u0041\"}"); } catch (const std::exception&) { bad_surr = true; }
+    require_true(bad_surr, "json:badSurrogatePair");
+    require_eq(Json::parse("{\"x\":\"\\uD83C\\uDFB2\"}").at("x").as_string(), "\xF0\x9F\x8E\xB2", "json:goodSurrogatePair");
+
     std::cout << "C++17 SDK: ALL TESTS PASSED\n";
     return 0;
 }

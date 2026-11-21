@@ -191,6 +191,24 @@ class TestBaccaratPythonSdk(unittest.TestCase):
         )
         self.assertEqual(call("/wallet/rollback", unknown_rb)["status"], "SC_TRANSACTION_NOT_EXISTS")
 
+        # CR-01..CR-10 adversarial regressions:
+        # 1. Rollback after settled betId must be rejected (no double credit)
+        self.assertEqual(call("/wallet/rollback", VECTORS["idempotencyVectors"]["rollback"]["initial"])["status"], "SC_TRANSACTION_DUPLICATED")
+        # 2. Malformed decimal or missing field inside signed webhook returns HTTP 200 + SC_INVALID_REQUEST (never raises KeyError/BaccaratSdkError)
+        bad_bet = dict(VECTORS["idempotencyVectors"]["bet"]["initial"], transactionId="bet_bad_amt", betId="b2btkt_bad", amount="not_a_number")
+        wallet.set_disabled("player_9527", False)
+        self.assertEqual(call("/wallet/bet", bad_bet)["status"], "SC_INVALID_REQUEST")
+        self.assertEqual(call("/wallet/bet", {"traceId": "t_empty"})["status"], "SC_INVALID_REQUEST")
+        # 3. Zero-stake bet rejected
+        zero_bet = dict(VECTORS["idempotencyVectors"]["bet"]["initial"], transactionId="bet_zero", betId="b2btkt_zero", amount="0.00")
+        self.assertEqual(call("/wallet/bet", zero_bet)["status"], "SC_INVALID_REQUEST")
+        # 4. Pre-auth deep nesting rejected before JSON parse; timeout_ms=True rejected
+        st_code, unauth_body = disp.handle("/wallet/bet", "bad_key", "bad_sig", b"[" * 50_000)
+        self.assertEqual(st_code, 200)
+        self.assertEqual(unauth_body["status"], "SC_AUTHENTICATION_FAILED")
+        with self.assertRaises(BaccaratSdkError):
+            Config(api_key=api_key, hmac_secret=secret, environment=Environment.SANDBOX, timeout_ms=True)  # type: ignore[arg-type]
+
 
 if __name__ == "__main__":
     unittest.main()

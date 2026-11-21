@@ -3,6 +3,8 @@
 
 use std::fmt::Write;
 
+pub const MAX_JSON_DEPTH: usize = 64;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Json {
     Null,
@@ -33,7 +35,6 @@ impl Json {
     pub fn as_i64(&self) -> Option<i64> {
         match self {
             Json::Int(v) => Some(*v),
-            Json::Float(f) => Some(*f as i64),
             _ => None,
         }
     }
@@ -48,6 +49,13 @@ impl Json {
     pub fn as_array(&self) -> Option<&[Json]> {
         match self {
             Json::Arr(a) => Some(a.as_slice()),
+            _ => None,
+        }
+    }
+
+    pub fn as_object_entries(&self) -> Option<&[(String, Json)]> {
+        match self {
+            Json::Obj(entries) => Some(entries.as_slice()),
             _ => None,
         }
     }
@@ -131,7 +139,11 @@ impl Json {
                 let _ = write!(out, "{}", v);
             }
             Json::Float(f) => {
-                let _ = write!(out, "{}", f);
+                if f.is_finite() {
+                    let _ = write!(out, "{}", f);
+                } else {
+                    out.push_str("null");
+                }
             }
             Json::Str(s) => Self::write_escaped(out, s),
             Json::Arr(items) => {
@@ -166,7 +178,7 @@ impl Json {
             pos: 0,
         };
         p.skip_ws();
-        let val = p.read_value()?;
+        let val = p.read_value(0)?;
         p.skip_ws();
         if p.pos != p.b.len() {
             return Err(format!("trailing JSON bytes at {}", p.pos));
@@ -188,14 +200,17 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn read_value(&mut self) -> Result<Json, String> {
+    fn read_value(&mut self, depth: usize) -> Result<Json, String> {
+        if depth > MAX_JSON_DEPTH {
+            return Err(format!("JSON nesting exceeds max depth {}", MAX_JSON_DEPTH));
+        }
         self.skip_ws();
         if self.pos >= self.b.len() {
             return Err("unexpected EOF".into());
         }
         match self.b[self.pos] {
-            b'{' => self.read_object(),
-            b'[' => self.read_array(),
+            b'{' => self.read_object(depth + 1),
+            b'[' => self.read_array(depth + 1),
             b'"' => Ok(Json::Str(self.read_string()?)),
             b't' => {
                 self.expect(b"true")?;
@@ -249,6 +264,9 @@ impl<'a> Parser<'a> {
                 self.pos += 1;
                 return Ok(out);
             }
+            if b0 < 0x20 {
+                return Err("unescaped control character in JSON string".into());
+            }
             if b0 == b'\\' {
                 self.pos += 1;
                 if self.pos >= self.b.len() {
@@ -267,12 +285,18 @@ impl<'a> Parser<'a> {
                     b't' => out.push('\t'),
                     b'u' => {
                         let hi = self.read_hex4()? as u32;
-                        let cp = if (0xD800..=0xDBFF).contains(&hi)
-                            && self.b.get(self.pos..self.pos + 2) == Some(b"\\u")
-                        {
+                        let cp = if (0xD800..=0xDBFF).contains(&hi) {
+                            if self.b.get(self.pos..self.pos + 2) != Some(b"\\u") {
+                                return Err("unpaired high surrogate in JSON string".into());
+                            }
                             self.pos += 2;
                             let lo = self.read_hex4()? as u32;
+                            if !(0xDC00..=0xDFFF).contains(&lo) {
+                                return Err("invalid low surrogate in JSON string".into());
+                            }
                             0x10000 + (((hi - 0xD800) << 10) | (lo - 0xDC00))
+                        } else if (0xDC00..=0xDFFF).contains(&hi) {
+                            return Err("unpaired low surrogate in JSON string".into());
                         } else {
                             hi
                         };
@@ -295,14 +319,27 @@ impl<'a> Parser<'a> {
         let start = self.pos;
         if self.b[self.pos] == b'-' {
             self.pos += 1;
+            if self.pos >= self.b.len() || !self.b[self.pos].is_ascii_digit() {
+                return Err("malformed negative JSON number".into());
+            }
         }
-        while self.pos < self.b.len() && self.b[self.pos].is_ascii_digit() {
+        if self.b[self.pos] == b'0' {
             self.pos += 1;
+            if self.pos < self.b.len() && self.b[self.pos].is_ascii_digit() {
+                return Err("leading zeros forbidden in JSON number".into());
+            }
+        } else {
+            while self.pos < self.b.len() && self.b[self.pos].is_ascii_digit() {
+                self.pos += 1;
+            }
         }
         let mut is_float = false;
         if self.pos < self.b.len() && self.b[self.pos] == b'.' {
             is_float = true;
             self.pos += 1;
+            if self.pos >= self.b.len() || !self.b[self.pos].is_ascii_digit() {
+                return Err("malformed fractional JSON number".into());
+            }
             while self.pos < self.b.len() && self.b[self.pos].is_ascii_digit() {
                 self.pos += 1;
             }
@@ -313,21 +350,27 @@ impl<'a> Parser<'a> {
             if self.pos < self.b.len() && matches!(self.b[self.pos], b'+' | b'-') {
                 self.pos += 1;
             }
+            if self.pos >= self.b.len() || !self.b[self.pos].is_ascii_digit() {
+                return Err("malformed exponent in JSON number".into());
+            }
             while self.pos < self.b.len() && self.b[self.pos].is_ascii_digit() {
                 self.pos += 1;
             }
         }
         let s = &self.src[start..self.pos];
         if !is_float {
-            let v = s.parse::<i64>().map_err(|e| e.to_string())?;
-            Ok(Json::Int(v))
-        } else {
-            let f = s.parse::<f64>().map_err(|e| e.to_string())?;
-            Ok(Json::Float(f))
+            if let Ok(v) = s.parse::<i64>() {
+                return Ok(Json::Int(v));
+            }
         }
+        let f = s.parse::<f64>().map_err(|e| e.to_string())?;
+        if !f.is_finite() {
+            return Err("numeric overflow in JSON".into());
+        }
+        Ok(Json::Float(f))
     }
 
-    fn read_array(&mut self) -> Result<Json, String> {
+    fn read_array(&mut self, depth: usize) -> Result<Json, String> {
         self.pos += 1;
         let mut items = Vec::new();
         self.skip_ws();
@@ -336,7 +379,7 @@ impl<'a> Parser<'a> {
             return Ok(Json::Arr(items));
         }
         loop {
-            items.push(self.read_value()?);
+            items.push(self.read_value(depth)?);
             self.skip_ws();
             if self.pos < self.b.len() && self.b[self.pos] == b',' {
                 self.pos += 1;
@@ -349,7 +392,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn read_object(&mut self) -> Result<Json, String> {
+    fn read_object(&mut self, depth: usize) -> Result<Json, String> {
         self.pos += 1;
         let mut entries = Vec::new();
         self.skip_ws();
@@ -368,7 +411,7 @@ impl<'a> Parser<'a> {
                 return Err("expected ':'".into());
             }
             self.pos += 1;
-            let v = self.read_value()?;
+            let v = self.read_value(depth)?;
             entries.push((k, v));
             self.skip_ws();
             if self.pos < self.b.len() && self.b[self.pos] == b',' {

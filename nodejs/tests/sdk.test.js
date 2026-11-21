@@ -217,4 +217,42 @@ test('WebhookDispatcher & InMemoryWallet full seamless wallet lifecycle', async 
   };
   const rbEmpty = await send('/wallet/rollback', unknownRb);
   assert.equal(rbEmpty.body.status, 'SC_TRANSACTION_NOT_EXISTS');
+
+  // 5. CR-03: Rollback after already-settled betId must be rejected as SC_TRANSACTION_DUPLICATED (no double credit!)
+  const rbAfterSettle = await send('/wallet/rollback', VECTORS.idempotencyVectors.rollback.initial);
+  assert.equal(rbAfterSettle.body.status, 'SC_TRANSACTION_DUPLICATED');
+  assert.equal((await send('/wallet/bet_result', VECTORS.idempotencyVectors.betResult.retrySameBusiness)).body.data.balance, '1100.00');
+
+  // 6. CR-03: Zero-stake bet rejected + settle after rollback rejected
+  wallet.setDisabled('player_9527', false);
+  const zeroBet = await send('/wallet/bet', { ...betReq, transactionId: 'bet_zero_1', betId: 'b2btkt_zero', externalTransactionId: 'b2btkt_zero', amount: '0.00' });
+  assert.equal(zeroBet.body.status, 'SC_INVALID_REQUEST');
+
+  const bet2 = await send('/wallet/bet', { ...betReq, transactionId: 'bet_2', betId: 'b2btkt_2', externalTransactionId: 'b2btkt_2', amount: '50.00' });
+  assert.equal(bet2.body.data.balance, '1050.00');
+  const rb2 = await send('/wallet/rollback', { ...VECTORS.idempotencyVectors.rollback.initial, transactionId: 'rb_2', betId: 'b2btkt_2', externalTransactionId: 'b2btkt_2', amount: '50.00' });
+  assert.equal(rb2.body.status, 'SC_OK');
+  assert.equal(rb2.body.data.balance, '1100.00');
+  const settleAfterRb = await send('/wallet/bet_result', { ...VECTORS.idempotencyVectors.betResult.initial, transactionId: 'stl_2', betId: 'b2btkt_2', externalTransactionId: 'b2btkt_2', betAmount: '50.00', winAmount: '100.00' });
+  assert.equal(settleAfterRb.body.status, 'SC_TRANSACTION_DUPLICATED');
+
+  // 7. CR-01 & CR-04: Pre-auth oversized/unauthenticated payload rejected before parse; traceId: undefined/null generates UUID
+  const unauthDeep = await dispatcher.handle('/wallet/bet', 'wrong', 'bad', '['.repeat(50_000));
+  assert.equal(unauthDeep.body.status, 'SC_AUTHENTICATION_FAILED');
+  const capturedTraces = [];
+  const mockClient = new Client(
+    { apiKey, hmacSecret: secret, environment: Environment.SANDBOX },
+    {
+      transport: async (_url, _headers, rawBuf) => {
+        const p = JSON.parse(rawBuf.toString('utf8'));
+        capturedTraces.push(p.traceId);
+        return { httpStatus: 200, rawBody: JSON.stringify({ traceId: p.traceId, status: 'SC_OK', data: {} }) };
+      },
+    },
+  );
+  await mockClient.listTables({ traceId: undefined });
+  await mockClient.listTables({ traceId: null });
+  for (const tid of capturedTraces) {
+    assert.match(tid, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  }
 });

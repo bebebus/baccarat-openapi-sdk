@@ -27,9 +27,12 @@ import java.util.regex.Pattern;
 public final class BaccaratSdk {
     public static final String SANDBOX_BASE_URL = "https://api.lt.cniia.cloud";
     public static final long MAX_DETAIL_WINDOW_MS = 604_800_000L;
+    public static final int MAX_PAGE_SIZE = 20_000;
+    public static final int MAX_WEBHOOK_BODY_BYTES = 1_048_576;
 
     private static final Pattern HEX64_RE = Pattern.compile("^[0-9a-fA-F]{64}$");
     private static final Pattern DECIMAL_RE = Pattern.compile("^(-?)(\\d+)(?:\\.(\\d+))?$");
+    private static final Pattern TRACE_HINT_RE = Pattern.compile("\"traceId\"\\s*:\\s*\"([A-Za-z0-9_.:-]{1,128})\"");
     private static final HexFormat HEX = HexFormat.of();
 
     private BaccaratSdk() {}
@@ -220,8 +223,18 @@ public final class BaccaratSdk {
     }
 
     private static String str(Map<String, Object> m, String k) {
+        if (m == null) return "";
         Object v = m.get(k);
         return v == null ? "" : String.valueOf(v);
+    }
+
+    private static long requireLong(Map<String, Object> m, String k) {
+        if (m == null) throw new SdkException("INVALID_ARGUMENT", k + " is required");
+        Object v = m.get(k);
+        if (v instanceof Integer || v instanceof Long || v instanceof BigInteger) {
+            return ((Number) v).longValue();
+        }
+        throw new SdkException("INVALID_ARGUMENT", k + " must be an integer");
     }
 
     public static String betFingerprint(Map<String, Object> p) {
@@ -284,6 +297,7 @@ public final class BaccaratSdk {
         private final HttpClient httpClient;
 
         public Client(Config config) {
+            if (config == null) throw new SdkException("INVALID_CONFIG", "config is required");
             this.config = config;
             this.httpClient = HttpClient.newBuilder()
                     .connectTimeout(Duration.ofMillis(Math.min(config.timeoutMs, 5000)))
@@ -366,14 +380,17 @@ public final class BaccaratSdk {
         }
 
         public Map<String, Object> listTransactions(Map<String, Object> params) {
-            long from = ((Number) params.get("fromTime")).longValue();
-            long to = ((Number) params.get("toTime")).longValue();
+            long from = requireLong(params, "fromTime");
+            long to = requireLong(params, "toTime");
             if (from < 0 || to < from) throw new SdkException("INVALID_ARGUMENT", "Invalid [fromTime, toTime]");
             return postSigned("/operator/v1/transaction/list", params);
         }
 
         @SuppressWarnings("unchecked")
         public List<Map<String, Object>> listAllTransactions(long fromTime, long toTime, int pageSize) {
+            if (pageSize < 1 || pageSize > MAX_PAGE_SIZE) {
+                throw new SdkException("INVALID_ARGUMENT", "pageSize must be in 1.." + MAX_PAGE_SIZE);
+            }
             List<Map<String, Object>> all = new ArrayList<>();
             int pageNo = 1;
             while (true) {
@@ -395,10 +412,9 @@ public final class BaccaratSdk {
 
         public Map<String, Object> getTransactionDetail(Map<String, Object> params) {
             String betId = str(params, "betId").trim();
-            long from = ((Number) params.get("fromTime")).longValue();
-            long to = ((Number) params.get("toTime")).longValue();
-            long span = to - from;
-            if (betId.isEmpty() || from < 0 || span < 0 || span > MAX_DETAIL_WINDOW_MS) {
+            long from = requireLong(params, "fromTime");
+            long to = requireLong(params, "toTime");
+            if (betId.isEmpty() || from < 0 || to < from || (to - from) > MAX_DETAIL_WINDOW_MS) {
                 throw new SdkException("INVALID_ARGUMENT", "Detail window must satisfy 0 <= toTime - fromTime <= 604800000");
             }
             return postSigned("/operator/v1/transaction/detail", params);
@@ -407,7 +423,22 @@ public final class BaccaratSdk {
 
     // ── 5. Seamless Wallet Webhook Dispatcher & Thread-Safe InMemoryWallet ──
 
-    public static final class InMemoryWallet {
+    public interface WalletHandler {
+        Map<String, Object> onBalance(Map<String, Object> req);
+        Map<String, Object> onBet(Map<String, Object> req);
+        Map<String, Object> onBetResult(Map<String, Object> req);
+        Map<String, Object> onRollback(Map<String, Object> req);
+    }
+
+    private static Map<String, Object> makeErrEnvelope(String traceId, String status, String msg) {
+        Map<String, Object> r = new LinkedHashMap<>();
+        r.put("traceId", traceId == null ? "" : traceId);
+        r.put("status", status);
+        r.put("message", msg);
+        return r;
+    }
+
+    public static final class InMemoryWallet implements WalletHandler {
         private static final class Acct {
             final String currency;
             final int exponent;
@@ -422,11 +453,26 @@ public final class BaccaratSdk {
             }
         }
 
-        private record TxRec(String fp, boolean empty) {}
+        private record TxRec(String type, String fp, boolean empty) {}
+
+        private static final class BetRec {
+            final String txId;
+            final String username;
+            final String currency;
+            final BigInteger stake;
+            String state = "DEDUCTED";
+
+            BetRec(String txId, String username, String currency, BigInteger stake) {
+                this.txId = txId;
+                this.username = username;
+                this.currency = currency;
+                this.stake = stake;
+            }
+        }
 
         private final Map<String, Acct> accounts = new HashMap<>();
         private final Map<String, TxRec> transactions = new HashMap<>();
-        private final Map<String, BigInteger> deductedBets = new HashMap<>();
+        private final Map<String, BetRec> deductedBets = new HashMap<>();
 
         public synchronized void addAccount(String username, String currency, String balance, int exponent, List<String> tokens) {
             Acct a = new Acct(currency.trim().toUpperCase(Locale.ROOT), exponent, decimalToLedgerUnits(balance, exponent, false));
@@ -437,14 +483,6 @@ public final class BaccaratSdk {
         public synchronized void setDisabled(String username, boolean disabled) {
             Acct a = accounts.get(username);
             if (a != null) a.disabled = disabled;
-        }
-
-        private Map<String, Object> errResp(String traceId, String status, String msg) {
-            Map<String, Object> r = new LinkedHashMap<>();
-            r.put("traceId", traceId);
-            r.put("status", status);
-            r.put("message", msg);
-            return r;
         }
 
         private Map<String, Object> okResp(String traceId, String username, Acct a) {
@@ -460,132 +498,207 @@ public final class BaccaratSdk {
             return r;
         }
 
+        @Override
         public synchronized Map<String, Object> onBalance(Map<String, Object> req) {
             String traceId = str(req, "traceId");
-            String username = str(req, "username");
-            Acct a = accounts.get(username);
-            if (a == null) return errResp(traceId, StatusCode.SC_USER_NOT_EXISTS, "User not exists");
-            if (!a.currency.equals(str(req, "currency").trim().toUpperCase(Locale.ROOT))) {
-                return errResp(traceId, StatusCode.SC_WRONG_CURRENCY, "Wrong currency");
+            String username = str(req, "username").trim();
+            String currency = str(req, "currency").trim().toUpperCase(Locale.ROOT);
+            if (username.isEmpty() || currency.isEmpty()) {
+                return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "username and currency are required");
             }
-            if (a.disabled) return errResp(traceId, StatusCode.SC_USER_DISABLED, "User disabled");
+            Acct a = accounts.get(username);
+            if (a == null) return makeErrEnvelope(traceId, StatusCode.SC_USER_NOT_EXISTS, "User not exists");
+            if (!a.currency.equals(currency)) return makeErrEnvelope(traceId, StatusCode.SC_WRONG_CURRENCY, "Wrong currency");
+            if (a.disabled) return makeErrEnvelope(traceId, StatusCode.SC_USER_DISABLED, "User disabled");
             if (!a.tokens.isEmpty() && !a.tokens.contains(str(req, "token"))) {
-                return errResp(traceId, StatusCode.SC_INVALID_TOKEN, "Invalid token");
+                return makeErrEnvelope(traceId, StatusCode.SC_INVALID_TOKEN, "Invalid token");
             }
             return okResp(traceId, username, a);
         }
 
+        @Override
         public synchronized Map<String, Object> onBet(Map<String, Object> req) {
             String traceId = str(req, "traceId");
-            String username = str(req, "username");
-            Acct a = accounts.get(username);
-            if (a == null) return errResp(traceId, StatusCode.SC_USER_NOT_EXISTS, "User not exists");
-            if (!a.currency.equals(str(req, "currency").trim().toUpperCase(Locale.ROOT))) {
-                return errResp(traceId, StatusCode.SC_WRONG_CURRENCY, "Wrong currency");
+            String txId = str(req, "transactionId").trim();
+            String betId = str(req, "betId").trim();
+            String username = str(req, "username").trim();
+            String currency = str(req, "currency").trim().toUpperCase(Locale.ROOT);
+            if (txId.isEmpty() || betId.isEmpty() || username.isEmpty() || currency.isEmpty() || str(req, "amount").isEmpty()) {
+                return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "Missing required bet fields");
             }
-            String txId = str(req, "transactionId");
+            Acct a = accounts.get(username);
+            if (a == null) return makeErrEnvelope(traceId, StatusCode.SC_USER_NOT_EXISTS, "User not exists");
+            if (!a.currency.equals(currency)) return makeErrEnvelope(traceId, StatusCode.SC_WRONG_CURRENCY, "Wrong currency");
+
             String fp = betFingerprint(req);
             TxRec prior = transactions.get(txId);
             if (prior != null) {
-                if (!prior.fp.equals(fp)) return errResp(traceId, StatusCode.SC_TRANSACTION_DUPLICATED, "Conflict");
+                if (!"BET".equals(prior.type) || !prior.fp.equals(fp)) {
+                    return makeErrEnvelope(traceId, StatusCode.SC_TRANSACTION_DUPLICATED, "Conflict");
+                }
                 return okResp(traceId, username, a);
             }
-            if (a.disabled) return errResp(traceId, StatusCode.SC_USER_DISABLED, "User disabled");
+            if (deductedBets.containsKey(betId)) {
+                return makeErrEnvelope(traceId, StatusCode.SC_TRANSACTION_DUPLICATED, "Duplicate betId");
+            }
+            if (a.disabled) return makeErrEnvelope(traceId, StatusCode.SC_USER_DISABLED, "User disabled");
             if (!a.tokens.isEmpty() && !a.tokens.contains(str(req, "token"))) {
-                return errResp(traceId, StatusCode.SC_INVALID_TOKEN, "Invalid token");
+                return makeErrEnvelope(traceId, StatusCode.SC_INVALID_TOKEN, "Invalid token");
             }
             BigInteger stake = decimalToLedgerUnits(str(req, "amount"), a.exponent, false);
+            if (stake.signum() <= 0) {
+                return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "Bet amount must be positive");
+            }
             if (a.units.compareTo(stake) < 0) {
-                return errResp(traceId, StatusCode.SC_INSUFFICIENT_FUNDS, "Insufficient funds");
+                return makeErrEnvelope(traceId, StatusCode.SC_INSUFFICIENT_FUNDS, "Insufficient funds");
             }
             a.units = a.units.subtract(stake);
-            transactions.put(txId, new TxRec(fp, false));
-            deductedBets.put(str(req, "betId"), stake);
+            transactions.put(txId, new TxRec("BET", fp, false));
+            deductedBets.put(betId, new BetRec(txId, username, a.currency, stake));
             return okResp(traceId, username, a);
         }
 
+        @Override
         public synchronized Map<String, Object> onBetResult(Map<String, Object> req) {
             String traceId = str(req, "traceId");
-            String username = str(req, "username");
-            Acct a = accounts.get(username);
-            if (a == null) return errResp(traceId, StatusCode.SC_USER_NOT_EXISTS, "User not exists");
-            if (!a.currency.equals(str(req, "currency").trim().toUpperCase(Locale.ROOT))) {
-                return errResp(traceId, StatusCode.SC_WRONG_CURRENCY, "Wrong currency");
+            String txId = str(req, "transactionId").trim();
+            String betId = str(req, "betId").trim();
+            String username = str(req, "username").trim();
+            String currency = str(req, "currency").trim().toUpperCase(Locale.ROOT);
+            if (txId.isEmpty() || betId.isEmpty() || username.isEmpty() || currency.isEmpty()
+                    || str(req, "winAmount").isEmpty() || str(req, "betAmount").isEmpty()) {
+                return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "Missing required bet_result fields");
             }
-            String txId = str(req, "transactionId");
+            Acct a = accounts.get(username);
+            if (a == null) return makeErrEnvelope(traceId, StatusCode.SC_USER_NOT_EXISTS, "User not exists");
+            if (!a.currency.equals(currency)) return makeErrEnvelope(traceId, StatusCode.SC_WRONG_CURRENCY, "Wrong currency");
+
             String fp = betResultFingerprint(req);
             TxRec prior = transactions.get(txId);
             if (prior != null) {
-                if (!prior.fp.equals(fp)) return errResp(traceId, StatusCode.SC_TRANSACTION_DUPLICATED, "Conflict");
+                if (!"SETTLE".equals(prior.type) || !prior.fp.equals(fp)) {
+                    return makeErrEnvelope(traceId, StatusCode.SC_TRANSACTION_DUPLICATED, "Conflict");
+                }
                 return okResp(traceId, username, a);
             }
-            if (!deductedBets.containsKey(str(req, "betId"))) {
-                return errResp(traceId, StatusCode.SC_TRANSACTION_NOT_EXISTS, "Original betId missing");
+            BetRec orig = deductedBets.get(betId);
+            if (orig == null) {
+                return makeErrEnvelope(traceId, StatusCode.SC_TRANSACTION_NOT_EXISTS, "Original betId missing");
             }
+            BigInteger betAmt = decimalToLedgerUnits(str(req, "betAmount"), a.exponent, false);
             BigInteger win = decimalToLedgerUnits(str(req, "winAmount"), a.exponent, false);
+            if (!orig.username.equals(username) || !orig.currency.equals(a.currency) || !orig.stake.equals(betAmt)) {
+                return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "bet_result mismatch");
+            }
+            if (!"DEDUCTED".equals(orig.state)) {
+                return makeErrEnvelope(traceId, StatusCode.SC_TRANSACTION_DUPLICATED, "betId already finalized");
+            }
             a.units = a.units.add(win);
-            transactions.put(txId, new TxRec(fp, false));
+            orig.state = "SETTLED";
+            transactions.put(txId, new TxRec("SETTLE", fp, false));
             return okResp(traceId, username, a);
         }
 
+        @Override
         public synchronized Map<String, Object> onRollback(Map<String, Object> req) {
             String traceId = str(req, "traceId");
-            String username = str(req, "username");
-            Acct a = accounts.get(username);
-            if (a == null) return errResp(traceId, StatusCode.SC_USER_NOT_EXISTS, "User not exists");
-            if (!a.currency.equals(str(req, "currency").trim().toUpperCase(Locale.ROOT))) {
-                return errResp(traceId, StatusCode.SC_WRONG_CURRENCY, "Wrong currency");
+            String txId = str(req, "transactionId").trim();
+            String betId = str(req, "betId").trim();
+            String username = str(req, "username").trim();
+            String currency = str(req, "currency").trim().toUpperCase(Locale.ROOT);
+            if (txId.isEmpty() || betId.isEmpty() || username.isEmpty() || currency.isEmpty() || str(req, "amount").isEmpty()) {
+                return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "Missing required rollback fields");
             }
-            String txId = str(req, "transactionId");
+            Acct a = accounts.get(username);
+            if (a == null) return makeErrEnvelope(traceId, StatusCode.SC_USER_NOT_EXISTS, "User not exists");
+            if (!a.currency.equals(currency)) return makeErrEnvelope(traceId, StatusCode.SC_WRONG_CURRENCY, "Wrong currency");
+
             String fp = rollbackFingerprint(req);
             TxRec prior = transactions.get(txId);
             if (prior != null) {
-                if (!prior.fp.equals(fp)) return errResp(traceId, StatusCode.SC_TRANSACTION_DUPLICATED, "Conflict");
-                if (prior.empty) return errResp(traceId, StatusCode.SC_TRANSACTION_NOT_EXISTS, "Never deducted");
+                if (!"ROLLBACK".equals(prior.type) || !prior.fp.equals(fp)) {
+                    return makeErrEnvelope(traceId, StatusCode.SC_TRANSACTION_DUPLICATED, "Conflict");
+                }
+                if (prior.empty) return makeErrEnvelope(traceId, StatusCode.SC_TRANSACTION_NOT_EXISTS, "Never deducted");
                 return okResp(traceId, username, a);
             }
-            if (!deductedBets.containsKey(str(req, "betId"))) {
-                transactions.put(txId, new TxRec(fp, true));
-                return errResp(traceId, StatusCode.SC_TRANSACTION_NOT_EXISTS, "Never deducted");
-            }
             BigInteger refund = decimalToLedgerUnits(str(req, "amount"), a.exponent, false);
+            if (refund.signum() <= 0) {
+                return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "Rollback amount must be positive");
+            }
+            BetRec orig = deductedBets.get(betId);
+            if (orig == null) {
+                transactions.put(txId, new TxRec("ROLLBACK", fp, true));
+                return makeErrEnvelope(traceId, StatusCode.SC_TRANSACTION_NOT_EXISTS, "Never deducted");
+            }
+            if (!orig.username.equals(username) || !orig.currency.equals(a.currency) || !orig.stake.equals(refund)) {
+                return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "Rollback mismatch");
+            }
+            if (!"DEDUCTED".equals(orig.state)) {
+                return makeErrEnvelope(traceId, StatusCode.SC_TRANSACTION_DUPLICATED, "betId already finalized");
+            }
             a.units = a.units.add(refund);
-            transactions.put(txId, new TxRec(fp, false));
+            orig.state = "ROLLED_BACK";
+            transactions.put(txId, new TxRec("ROLLBACK", fp, false));
             return okResp(traceId, username, a);
         }
     }
 
+    private static String extractTraceHint(byte[] rawBody) {
+        if (rawBody == null || rawBody.length == 0) return "";
+        int len = Math.min(rawBody.length, 1024);
+        String head = new String(rawBody, 0, len, StandardCharsets.UTF_8);
+        Matcher m = TRACE_HINT_RE.matcher(head);
+        return m.find() ? m.group(1) : "";
+    }
+
     public static final class WebhookDispatcher {
         private final Config config;
-        private final InMemoryWallet wallet;
+        private final WalletHandler wallet;
 
-        public WebhookDispatcher(Config config, InMemoryWallet wallet) {
+        public WebhookDispatcher(Config config, WalletHandler wallet) {
+            if (config == null || wallet == null) {
+                throw new SdkException("INVALID_CONFIG", "config and wallet handler are required");
+            }
             this.config = config;
             this.wallet = wallet;
         }
 
         public Map<String, Object> handle(String routePath, String apiKeyHeader, String signatureHeader, byte[] rawBody) {
-            Map<String, Object> parsed = null;
+            byte[] safeBody = rawBody == null ? new byte[0] : rawBody;
+            if (safeBody.length > MAX_WEBHOOK_BODY_BYTES) {
+                return makeErrEnvelope("", StatusCode.SC_INVALID_REQUEST, "Request body exceeds 1 MiB limit");
+            }
+
+            // Verify X-API-Key & X-Signature over raw bytes BEFORE JSON parsing!
+            String auth = verifyWebhookHeaders(apiKeyHeader, signatureHeader, safeBody, config.apiKey, config.hmacSecret);
+            if (!StatusCode.SC_OK.equals(auth)) {
+                return makeErrEnvelope(extractTraceHint(safeBody), auth, "Auth/signature failed");
+            }
+
+            Map<String, Object> parsed;
             String traceId = "";
             try {
-                parsed = JsonCodec.parseObject(new String(rawBody, StandardCharsets.UTF_8));
+                parsed = JsonCodec.parseObject(new String(safeBody, StandardCharsets.UTF_8));
                 traceId = str(parsed, "traceId").trim();
                 if (traceId.length() > 128) traceId = traceId.substring(0, 128);
-            } catch (Exception ignored) {}
+            } catch (Exception e) {
+                return makeErrEnvelope("", StatusCode.SC_INVALID_REQUEST, "Invalid JSON");
+            }
 
-            String auth = verifyWebhookHeaders(apiKeyHeader, signatureHeader, rawBody, config.apiKey, config.hmacSecret);
-            if (!StatusCode.SC_OK.equals(auth)) {
-                return Map.of("traceId", traceId, "status", auth, "message", "Auth/signature failed");
+            String clean = (routePath == null ? "" : routePath).split("\\?", 2)[0].replaceAll("/+$", "");
+            try {
+                if (clean.endsWith("/wallet/balance")) return wallet.onBalance(parsed);
+                if (clean.endsWith("/wallet/bet")) return wallet.onBet(parsed);
+                if (clean.endsWith("/wallet/bet_result")) return wallet.onBetResult(parsed);
+                if (clean.endsWith("/wallet/rollback")) return wallet.onRollback(parsed);
+                return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "Unknown route");
+            } catch (SdkException e) {
+                String st = (e.code != null && e.code.startsWith("SC_")) ? e.code : StatusCode.SC_INVALID_REQUEST;
+                return makeErrEnvelope(traceId, st, e.getMessage());
+            } catch (RuntimeException e) {
+                return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "Wallet handler error");
             }
-            if (parsed == null) {
-                return Map.of("traceId", traceId, "status", StatusCode.SC_INVALID_REQUEST, "message", "Invalid JSON");
-            }
-            String clean = routePath.split("\\?", 2)[0].replaceAll("/+$", "");
-            if (clean.endsWith("/wallet/balance")) return wallet.onBalance(parsed);
-            if (clean.endsWith("/wallet/bet")) return wallet.onBet(parsed);
-            if (clean.endsWith("/wallet/bet_result")) return wallet.onBetResult(parsed);
-            if (clean.endsWith("/wallet/rollback")) return wallet.onRollback(parsed);
-            return Map.of("traceId", traceId, "status", StatusCode.SC_INVALID_REQUEST, "message", "Unknown route");
         }
     }
 }

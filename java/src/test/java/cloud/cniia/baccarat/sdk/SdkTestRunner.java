@@ -210,6 +210,29 @@ public final class SdkTestRunner {
         unknownRb.put("externalTransactionId", "b2btkt000000000000000000000000");
         checkEq(send.apply("/wallet/rollback", unknownRb).get("status"), "SC_TRANSACTION_NOT_EXISTS", "wb:emptyRb");
 
+        // CR-01..CR-10 adversarial regressions:
+        // 1. Pre-auth 20,000-deep nested array does NOT throw StackOverflowError; signed 100-deep array returns SC_INVALID_REQUEST!
+        byte[] deepBytes = "[".repeat(20_000).getBytes(StandardCharsets.UTF_8);
+        checkEq(disp.handle("/wallet/bet", "bad", "bad", deepBytes).get("status"), "SC_AUTHENTICATION_FAILED", "wb:preAuthDeepNoSOE");
+        byte[] signedDeep = ("{\"a\":" + "[".repeat(80) + "]".repeat(80) + "}").getBytes(StandardCharsets.UTF_8);
+        checkEq(disp.handle("/wallet/bet", apiKey, BaccaratSdk.signBody(signedDeep, secret), signedDeep).get("status"), "SC_INVALID_REQUEST", "wb:maxDepth64");
+        // 2. Rollback after settle rejected; malformed decimal caught cleanly as SC_INVALID_REQUEST
+        checkEq(send.apply("/wallet/rollback", (Map<String, Object>) rb.get("initial")).get("status"), "SC_TRANSACTION_DUPLICATED", "wb:rbAfterSettle");
+        wallet.setDisabled("player_9527", false);
+        Map<String, Object> badBet = new LinkedHashMap<>((Map<String, Object>) bet.get("initial"));
+        badBet.put("transactionId", "bet_bad_java");
+        badBet.put("betId", "b2btkt_bad_java");
+        badBet.put("amount", "bad_decimal");
+        checkEq(send.apply("/wallet/bet", badBet).get("status"), "SC_INVALID_REQUEST", "wb:badDecimalCaught");
+        // 3. Surrogate pair parses cleanly while lone surrogate or malformed hex escape fails
+        checkEq(JsonCodec.parseObject("{\"emoji\":\"\\uD83D\\uDFB2\"}").get("emoji"), "\uD83D\uDFB2", "json:surrogatePair");
+        boolean badEscThrew = false;
+        try { JsonCodec.parseObject("{\"bad\":\"\\u+123\"}"); } catch (IllegalArgumentException e) { badEscThrew = true; }
+        check(badEscThrew, "json:badHexSign");
+        boolean loneSurrThrew = false;
+        try { JsonCodec.parseObject("{\"bad\":\"\\uD800\"}"); } catch (IllegalArgumentException e) { loneSurrThrew = true; }
+        check(loneSurrThrew, "json:loneSurrogate");
+
         System.out.println("JAVA 17 SDK: ALL TESTS PASSED");
     }
 }

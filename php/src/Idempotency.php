@@ -49,9 +49,9 @@ final class Idempotency
             (string) ($p['winLoss'] ?? ''),
             (string) ($p['jackpotAmount'] ?? ''),
             (string) ($p['resultType'] ?? ''),
-            (string) ($p['isFreespin'] ?? 0),
-            (string) ($p['isEndRound'] ?? 1),
-            (string) ($p['betTime'] ?? 0),
+            isset($p['isFreespin']) ? (string) $p['isFreespin'] : '',
+            isset($p['isEndRound']) ? (string) $p['isEndRound'] : '',
+            isset($p['betTime']) ? (string) $p['betTime'] : '',
         ]);
     }
 

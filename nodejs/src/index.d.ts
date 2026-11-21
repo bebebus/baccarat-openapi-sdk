@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 export const SANDBOX_BASE_URL: string;
 export const MAX_DETAIL_WINDOW_MS: number;
+export const MAX_PAGE_SIZE: number;
+export const MAX_WEBHOOK_BODY_BYTES: number;
 
 export const Environment: Readonly<{
   SANDBOX: 'SANDBOX';
@@ -114,7 +116,14 @@ export class Client {
   }): Promise<{ traceId: string; status: 'SC_OK'; data: Record<string, unknown> }>;
 }
 
-export class InMemoryWallet {
+export interface WalletHandler {
+  onBalance(req: Record<string, unknown>): Promise<Record<string, unknown>> | Record<string, unknown>;
+  onBet(req: Record<string, unknown>): Promise<Record<string, unknown>> | Record<string, unknown>;
+  onBetResult(req: Record<string, unknown>): Promise<Record<string, unknown>> | Record<string, unknown>;
+  onRollback(req: Record<string, unknown>): Promise<Record<string, unknown>> | Record<string, unknown>;
+}
+
+export class InMemoryWallet implements WalletHandler {
   constructor(initialAccounts?: Record<string, { currency: string; balance: string; exponent?: number; tokens?: string[]; disabled?: boolean }>);
   registerToken(username: string, token: string): void;
   setDisabled(username: string, disabled: boolean): void;
@@ -125,11 +134,11 @@ export class InMemoryWallet {
 }
 
 export class WebhookDispatcher {
-  constructor(config: Config | ConstructorParameters<typeof Config>[0], walletHandler: InMemoryWallet | Record<string, Function>);
+  constructor(config: Config | ConstructorParameters<typeof Config>[0], walletHandler: WalletHandler);
   handle(
     routePath: string,
     apiKeyHeader: string | undefined,
     signatureHeader: string | undefined,
-    rawBody: Buffer | string,
+    rawBody: Buffer | Uint8Array | string,
   ): Promise<{ statusCode: number; body: Record<string, unknown> }>;
 }

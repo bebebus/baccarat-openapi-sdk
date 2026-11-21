@@ -15,6 +15,8 @@ namespace baccarat {
 
 constexpr const char* SANDBOX_BASE_URL = "https://api.lt.cniia.cloud";
 constexpr int64_t MAX_DETAIL_WINDOW_MS = 604800000LL;
+constexpr int MAX_PAGE_SIZE = 20000;
+constexpr size_t MAX_WEBHOOK_BODY_BYTES = 1048576;
 
 enum class Environment { Sandbox, Production };
 
@@ -50,11 +52,19 @@ class ApiError : public SdkError {
 public:
     std::string trace_id;
     std::string status;
+    std::map<std::string, std::string> validation;
     int http_status;
-    ApiError(std::string st, const std::string& msg, std::string tid = "", int http = 200)
+    ApiError(
+        std::string st,
+        const std::string& msg,
+        std::string tid = "",
+        int http = 200,
+        std::map<std::string, std::string> val = {}
+    )
         : SdkError(st, msg.empty() ? ("B2B API error: " + st) : msg),
           trace_id(std::move(tid)),
           status(std::move(st)),
+          validation(std::move(val)),
           http_status(http) {}
 
     bool is_retryable() const { return is_retryable_status(status); }
@@ -111,8 +121,17 @@ private:
     long timeout_ms_;
 };
 
-// 5. Seamless Wallet WebhookDispatcher & InMemoryWallet
-class InMemoryWallet {
+// 5. Seamless Wallet Pluggable WalletHandler, WebhookDispatcher & InMemoryWallet
+class WalletHandler {
+public:
+    virtual ~WalletHandler() = default;
+    virtual Json on_balance(const Json& req) = 0;
+    virtual Json on_bet(const Json& req) = 0;
+    virtual Json on_bet_result(const Json& req) = 0;
+    virtual Json on_rollback(const Json& req) = 0;
+};
+
+class InMemoryWallet : public WalletHandler {
 public:
     void add_account(
         const std::string& username,
@@ -123,10 +142,10 @@ public:
     );
     void set_disabled(const std::string& username, bool disabled);
 
-    Json on_balance(const Json& req);
-    Json on_bet(const Json& req);
-    Json on_bet_result(const Json& req);
-    Json on_rollback(const Json& req);
+    Json on_balance(const Json& req) override;
+    Json on_bet(const Json& req) override;
+    Json on_bet_result(const Json& req) override;
+    Json on_rollback(const Json& req) override;
 
 private:
     struct Account {
@@ -137,14 +156,22 @@ private:
         bool disabled = false;
     };
     struct TxRec {
+        std::string type;
         std::string fp;
         bool empty = false;
+    };
+    struct BetRec {
+        std::string tx_id;
+        std::string username;
+        std::string currency;
+        std::string stake;
+        std::string state = "DEDUCTED";
     };
 
     std::mutex mu_;
     std::map<std::string, Account> accounts_;
     std::map<std::string, TxRec> transactions_;
-    std::map<std::string, std::string> deducted_bets_;
+    std::map<std::string, BetRec> deducted_bets_;
 
     Json ok_envelope(const std::string& trace_id, const std::string& username, const Account& acct) const;
     static Json err_envelope(const std::string& trace_id, const std::string& status, const std::string& msg);
@@ -152,7 +179,7 @@ private:
 
 class WebhookDispatcher {
 public:
-    WebhookDispatcher(const Config& cfg, InMemoryWallet& wallet);
+    WebhookDispatcher(const Config& cfg, WalletHandler& wallet);
     Json handle(
         const std::string& route_path,
         const std::string& api_key_header,
@@ -163,7 +190,7 @@ public:
 private:
     std::string api_key_;
     std::string hmac_secret_;
-    InMemoryWallet& wallet_;
+    WalletHandler& wallet_;
 };
 
 } // namespace baccarat

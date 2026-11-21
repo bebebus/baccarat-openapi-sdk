@@ -12,14 +12,18 @@ import urllib.error
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple, Union
 
 SANDBOX_BASE_URL = "https://api.lt.cniia.cloud"
 MAX_DETAIL_WINDOW_MS = 604_800_000  # 7 days in ms
+MAX_PAGE_SIZE = 20_000
+MAX_WEBHOOK_BODY_BYTES = 1_048_576  # 1 MiB
+MAX_HTTP_RESPONSE_BYTES = 16 * 1024 * 1024  # 16 MiB
 LEDGER_SCALE = 1000
 
 _HEX64_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _DECIMAL_RE = re.compile(r"^(-?)(\d+)(?:\.(\d+))?$")
+_TRACE_HINT_RE = re.compile(rb'"traceId"\s*:\s*"([A-Za-z0-9_.:-]{1,128})"')
 
 
 class Environment:
@@ -202,14 +206,14 @@ def bet_fingerprint(payload: Dict[str, Any]) -> str:
     return encode_tuple_fingerprint(
         "wallet/bet",
         [
-            payload["transactionId"],
-            payload["username"],
-            payload["betId"],
-            payload["externalTransactionId"],
-            payload["roundId"],
-            payload["currency"],
-            payload["gameCode"],
-            payload["amount"],
+            payload.get("transactionId", ""),
+            payload.get("username", ""),
+            payload.get("betId", ""),
+            payload.get("externalTransactionId", ""),
+            payload.get("roundId", ""),
+            payload.get("currency", ""),
+            payload.get("gameCode", ""),
+            payload.get("amount", ""),
         ],
     )
 
@@ -218,22 +222,22 @@ def bet_result_fingerprint(payload: Dict[str, Any]) -> str:
     return encode_tuple_fingerprint(
         "wallet/bet_result",
         [
-            payload["transactionId"],
-            payload["username"],
-            payload["betId"],
-            payload["externalTransactionId"],
-            payload["roundId"],
-            payload["currency"],
-            payload["gameCode"],
-            payload["betAmount"],
-            payload["winAmount"],
-            payload["effectiveTurnover"],
-            payload["winLoss"],
-            payload["jackpotAmount"],
-            payload["resultType"],
-            str(payload["isFreespin"]),
-            str(payload["isEndRound"]),
-            str(payload["betTime"]),
+            payload.get("transactionId", ""),
+            payload.get("username", ""),
+            payload.get("betId", ""),
+            payload.get("externalTransactionId", ""),
+            payload.get("roundId", ""),
+            payload.get("currency", ""),
+            payload.get("gameCode", ""),
+            payload.get("betAmount", ""),
+            payload.get("winAmount", ""),
+            payload.get("effectiveTurnover", ""),
+            payload.get("winLoss", ""),
+            payload.get("jackpotAmount", ""),
+            payload.get("resultType", ""),
+            "" if payload.get("isFreespin") is None else str(payload.get("isFreespin")),
+            "" if payload.get("isEndRound") is None else str(payload.get("isEndRound")),
+            "" if payload.get("betTime") is None else str(payload.get("betTime")),
         ],
     )
 
@@ -242,14 +246,14 @@ def rollback_fingerprint(payload: Dict[str, Any]) -> str:
     return encode_tuple_fingerprint(
         "wallet/rollback",
         [
-            payload["transactionId"],
-            payload["username"],
-            payload["betId"],
-            payload["externalTransactionId"],
-            payload["roundId"],
-            payload["currency"],
-            payload["gameCode"],
-            payload["amount"],
+            payload.get("transactionId", ""),
+            payload.get("username", ""),
+            payload.get("betId", ""),
+            payload.get("externalTransactionId", ""),
+            payload.get("roundId", ""),
+            payload.get("currency", ""),
+            payload.get("gameCode", ""),
+            payload.get("amount", ""),
         ],
     )
 
@@ -267,12 +271,12 @@ class Config:
     resolved_base_url: str = field(init=False)
 
     def __post_init__(self) -> None:
-        trimmed_key = (self.api_key or "").strip()
+        trimmed_key = (self.api_key or "").strip() if isinstance(self.api_key, str) else ""
         if not trimmed_key:
             raise BaccaratSdkError("api_key is required", "INVALID_CONFIG")
-        if not self.hmac_secret:
+        if not isinstance(self.hmac_secret, str) or not self.hmac_secret:
             raise BaccaratSdkError("hmac_secret is required", "INVALID_CONFIG")
-        raw_url = (self.base_url or "").strip()
+        raw_url = (self.base_url or "").strip() if isinstance(self.base_url, str) else ""
         if not raw_url:
             if self.environment == Environment.SANDBOX:
                 raw_url = SANDBOX_BASE_URL
@@ -283,8 +287,8 @@ class Config:
                 )
         if not raw_url.lower().startswith(("http://", "https://")):
             raise BaccaratSdkError(f"base_url must start with http:// or https://: {raw_url}", "INVALID_CONFIG")
-        if self.timeout_ms <= 0:
-            raise BaccaratSdkError("timeout_ms must be positive", "INVALID_CONFIG")
+        if isinstance(self.timeout_ms, bool) or not isinstance(self.timeout_ms, int) or self.timeout_ms <= 0:
+            raise BaccaratSdkError("timeout_ms must be a positive integer", "INVALID_CONFIG")
         object.__setattr__(self, "api_key", trimmed_key)
         object.__setattr__(self, "resolved_base_url", raw_url.rstrip("/"))
 
@@ -296,10 +300,15 @@ def _default_transport(url: str, headers: Dict[str, str], raw_body: bytes, timeo
     req = urllib.request.Request(url, data=raw_body, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout_ms / 1000.0) as resp:
-            return resp.status, resp.read().decode("utf-8", errors="replace")
+            chunk = resp.read(MAX_HTTP_RESPONSE_BYTES + 1)
+            if len(chunk) > MAX_HTTP_RESPONSE_BYTES:
+                raise BaccaratSdkError("Gateway response exceeded 16 MiB limit", StatusCode.SC_INVALID_REQUEST)
+            return resp.status, chunk.decode("utf-8", errors="replace")
     except urllib.error.HTTPError as err:
-        body = err.read().decode("utf-8", errors="replace") if err.fp else ""
+        body = err.read(MAX_HTTP_RESPONSE_BYTES).decode("utf-8", errors="replace") if err.fp else ""
         return err.code, body
+    except BaccaratSdkError:
+        raise
     except Exception as exc:
         raise BaccaratSdkError(f"Network error: {exc}", StatusCode.SC_OPERATOR_TIMEOUT) from exc
 
@@ -311,7 +320,12 @@ class Client:
 
     def _post_signed(self, route_path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         body = dict(payload)
-        trace_id = str(body.get("traceId") or "").strip() or str(uuid.uuid4())
+        raw_trace = body.get("traceId")
+        trace_id = (
+            raw_trace.strip()
+            if isinstance(raw_trace, str) and raw_trace.strip()
+            else (str(raw_trace).strip() if raw_trace is not None and str(raw_trace).strip() else str(uuid.uuid4()))
+        )
         body["traceId"] = trace_id
 
         raw_bytes = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -415,7 +429,7 @@ class Client:
         page_size: Optional[int] = None,
         trace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        if isinstance(from_time, bool) or isinstance(to_time, bool) or from_time < 0 or to_time < from_time:
+        if isinstance(from_time, bool) or isinstance(to_time, bool) or not isinstance(from_time, int) or not isinstance(to_time, int) or from_time < 0 or to_time < from_time:
             raise BaccaratSdkError("Invalid [from_time, to_time] window", "INVALID_ARGUMENT")
         payload: Dict[str, Any] = {"fromTime": from_time, "toTime": to_time}
         if page_no is not None:
@@ -427,6 +441,8 @@ class Client:
         return self._post_signed("/operator/v1/transaction/list", payload)
 
     def list_all_transactions(self, *, from_time: int, to_time: int, page_size: int = 2000) -> List[Dict[str, Any]]:
+        if isinstance(page_size, bool) or not isinstance(page_size, int) or not (1 <= page_size <= MAX_PAGE_SIZE):
+            raise BaccaratSdkError(f"page_size must be in 1..{MAX_PAGE_SIZE}", "INVALID_ARGUMENT")
         rows: List[Dict[str, Any]] = []
         page_no = 1
         while True:
@@ -448,8 +464,10 @@ class Client:
         to_time: int,
         trace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        if not isinstance(bet_id, str) or not bet_id.strip() or isinstance(from_time, bool) or isinstance(to_time, bool) or not isinstance(from_time, int) or not isinstance(to_time, int):
+            raise BaccaratSdkError("bet_id, from_time, and to_time are required", "INVALID_ARGUMENT")
         span = to_time - from_time
-        if not bet_id or isinstance(from_time, bool) or isinstance(to_time, bool) or from_time < 0 or span < 0 or span > MAX_DETAIL_WINDOW_MS:
+        if from_time < 0 or span < 0 or span > MAX_DETAIL_WINDOW_MS:
             raise BaccaratSdkError("Detail query window must satisfy 0 <= to_time - from_time <= 604800000", "INVALID_ARGUMENT")
         payload: Dict[str, Any] = {"betId": bet_id, "fromTime": from_time, "toTime": to_time}
         if trace_id is not None:
@@ -460,11 +478,25 @@ class Client:
 # ── 5. Seamless Wallet Webhook Dispatcher & Reference In-Memory Wallet ──────
 
 
+class WalletHandler(Protocol):
+    def on_balance(self, req: Dict[str, Any]) -> Dict[str, Any]: ...
+    def on_bet(self, req: Dict[str, Any]) -> Dict[str, Any]: ...
+    def on_bet_result(self, req: Dict[str, Any]) -> Dict[str, Any]: ...
+    def on_rollback(self, req: Dict[str, Any]) -> Dict[str, Any]: ...
+
+
+def _non_empty_str(val: Any) -> Optional[str]:
+    if isinstance(val, str):
+        s = val.strip()
+        return s if s else None
+    return None
+
+
 class InMemoryWallet:
     def __init__(self, initial_accounts: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
         self.accounts: Dict[str, Dict[str, Any]] = {}
         self.transactions: Dict[str, Dict[str, Any]] = {}
-        self.deducted_bets: Dict[str, int] = {}
+        self.deducted_bets: Dict[str, Dict[str, Any]] = {}
         for username, info in (initial_accounts or {}).items():
             exponent = int(info.get("exponent", 2))
             self.accounts[username] = {
@@ -495,87 +527,141 @@ class InMemoryWallet:
         acct = self.accounts.get(username)
         if acct is None:
             return None, StatusCode.SC_USER_NOT_EXISTS
-        if acct["currency"] != str(currency or "").strip().upper():
+        if acct["currency"] != currency.strip().upper():
             return None, StatusCode.SC_WRONG_CURRENCY
         return acct, None
 
     def on_balance(self, req: Dict[str, Any]) -> Dict[str, Any]:
-        trace_id = str(req.get("traceId", ""))
-        acct, err = self._check_acct(req.get("username", ""), req.get("currency", ""))
+        trace_id = req.get("traceId") if isinstance(req.get("traceId"), str) else ""
+        username = _non_empty_str(req.get("username"))
+        currency = _non_empty_str(req.get("currency"))
+        if not username or not currency:
+            return {"traceId": trace_id, "status": StatusCode.SC_INVALID_REQUEST, "message": "username and currency are required"}
+        acct, err = self._check_acct(username, currency)
         if err or acct is None:
             return {"traceId": trace_id, "status": err or StatusCode.SC_USER_NOT_EXISTS, "message": "Account/currency check failed"}
         if acct["disabled"]:
             return {"traceId": trace_id, "status": StatusCode.SC_USER_DISABLED, "message": "User disabled"}
         if acct["tokens"] and req.get("token") not in acct["tokens"]:
             return {"traceId": trace_id, "status": StatusCode.SC_INVALID_TOKEN, "message": "Invalid token"}
-        return self._ok(trace_id, req["username"], acct)
+        return self._ok(trace_id, username, acct)
 
     def on_bet(self, req: Dict[str, Any]) -> Dict[str, Any]:
-        trace_id = str(req.get("traceId", ""))
-        acct, err = self._check_acct(req.get("username", ""), req.get("currency", ""))
+        trace_id = req.get("traceId") if isinstance(req.get("traceId"), str) else ""
+        tx_id = _non_empty_str(req.get("transactionId"))
+        bet_id = _non_empty_str(req.get("betId"))
+        username = _non_empty_str(req.get("username"))
+        currency = _non_empty_str(req.get("currency"))
+        if not tx_id or not bet_id or not username or not currency or req.get("amount") is None:
+            return {"traceId": trace_id, "status": StatusCode.SC_INVALID_REQUEST, "message": "Missing required bet fields"}
+        acct, err = self._check_acct(username, currency)
         if err or acct is None:
             return {"traceId": trace_id, "status": err or StatusCode.SC_USER_NOT_EXISTS, "message": "Account/currency check failed"}
         fp = bet_fingerprint(req)
-        prior = self.transactions.get(req["transactionId"])
+        prior = self.transactions.get(tx_id)
         if prior:
-            if prior["fp"] != fp:
+            if prior["type"] != "BET" or prior["fp"] != fp:
                 return {"traceId": trace_id, "status": StatusCode.SC_TRANSACTION_DUPLICATED, "message": "Conflicting bet payload"}
-            return self._ok(trace_id, req["username"], acct)
+            return self._ok(trace_id, username, acct)
+        if bet_id in self.deducted_bets:
+            return {"traceId": trace_id, "status": StatusCode.SC_TRANSACTION_DUPLICATED, "message": "Duplicate betId"}
         if acct["disabled"]:
             return {"traceId": trace_id, "status": StatusCode.SC_USER_DISABLED, "message": "User disabled"}
         if acct["tokens"] and req.get("token") not in acct["tokens"]:
             return {"traceId": trace_id, "status": StatusCode.SC_INVALID_TOKEN, "message": "Invalid token"}
         stake = decimal_to_ledger_units(req["amount"], acct["exponent"])
+        if stake <= 0:
+            return {"traceId": trace_id, "status": StatusCode.SC_INVALID_REQUEST, "message": "Bet amount must be positive"}
         if acct["balance_units"] < stake:
             return {"traceId": trace_id, "status": StatusCode.SC_INSUFFICIENT_FUNDS, "message": "Insufficient funds"}
         acct["balance_units"] -= stake
-        self.transactions[req["transactionId"]] = {"fp": fp, "empty": False}
-        self.deducted_bets[req["betId"]] = stake
-        return self._ok(trace_id, req["username"], acct)
+        self.transactions[tx_id] = {"type": "BET", "fp": fp, "empty": False}
+        self.deducted_bets[bet_id] = {
+            "tx_id": tx_id,
+            "username": username,
+            "currency": acct["currency"],
+            "stake": stake,
+            "state": "DEDUCTED",
+        }
+        return self._ok(trace_id, username, acct)
 
     def on_bet_result(self, req: Dict[str, Any]) -> Dict[str, Any]:
-        trace_id = str(req.get("traceId", ""))
-        acct, err = self._check_acct(req.get("username", ""), req.get("currency", ""))
+        trace_id = req.get("traceId") if isinstance(req.get("traceId"), str) else ""
+        tx_id = _non_empty_str(req.get("transactionId"))
+        bet_id = _non_empty_str(req.get("betId"))
+        username = _non_empty_str(req.get("username"))
+        currency = _non_empty_str(req.get("currency"))
+        if not tx_id or not bet_id or not username or not currency or req.get("winAmount") is None or req.get("betAmount") is None:
+            return {"traceId": trace_id, "status": StatusCode.SC_INVALID_REQUEST, "message": "Missing required bet_result fields"}
+        acct, err = self._check_acct(username, currency)
         if err or acct is None:
             return {"traceId": trace_id, "status": err or StatusCode.SC_USER_NOT_EXISTS, "message": "Account/currency check failed"}
         fp = bet_result_fingerprint(req)
-        prior = self.transactions.get(req["transactionId"])
+        prior = self.transactions.get(tx_id)
         if prior:
-            if prior["fp"] != fp:
+            if prior["type"] != "SETTLE" or prior["fp"] != fp:
                 return {"traceId": trace_id, "status": StatusCode.SC_TRANSACTION_DUPLICATED, "message": "Conflicting bet_result payload"}
-            return self._ok(trace_id, req["username"], acct)
+            return self._ok(trace_id, username, acct)
         # Honor already-deducted betId even if player later logged out or was disabled
-        if req["betId"] not in self.deducted_bets:
+        orig = self.deducted_bets.get(bet_id)
+        if orig is None:
             return {"traceId": trace_id, "status": StatusCode.SC_TRANSACTION_NOT_EXISTS, "message": "Original betId not found"}
+        bet_units = decimal_to_ledger_units(req["betAmount"], acct["exponent"])
         win_units = decimal_to_ledger_units(req["winAmount"], acct["exponent"])
+        if orig["username"] != username or orig["currency"] != acct["currency"] or orig["stake"] != bet_units:
+            return {"traceId": trace_id, "status": StatusCode.SC_INVALID_REQUEST, "message": "bet_result does not match original bet"}
+        if orig["state"] != "DEDUCTED":
+            return {"traceId": trace_id, "status": StatusCode.SC_TRANSACTION_DUPLICATED, "message": f"betId already {orig['state']}"}
         acct["balance_units"] += win_units
-        self.transactions[req["transactionId"]] = {"fp": fp, "empty": False}
-        return self._ok(trace_id, req["username"], acct)
+        orig["state"] = "SETTLED"
+        self.transactions[tx_id] = {"type": "SETTLE", "fp": fp, "empty": False}
+        return self._ok(trace_id, username, acct)
 
     def on_rollback(self, req: Dict[str, Any]) -> Dict[str, Any]:
-        trace_id = str(req.get("traceId", ""))
-        acct, err = self._check_acct(req.get("username", ""), req.get("currency", ""))
+        trace_id = req.get("traceId") if isinstance(req.get("traceId"), str) else ""
+        tx_id = _non_empty_str(req.get("transactionId"))
+        bet_id = _non_empty_str(req.get("betId"))
+        username = _non_empty_str(req.get("username"))
+        currency = _non_empty_str(req.get("currency"))
+        if not tx_id or not bet_id or not username or not currency or req.get("amount") is None:
+            return {"traceId": trace_id, "status": StatusCode.SC_INVALID_REQUEST, "message": "Missing required rollback fields"}
+        acct, err = self._check_acct(username, currency)
         if err or acct is None:
             return {"traceId": trace_id, "status": err or StatusCode.SC_USER_NOT_EXISTS, "message": "Account/currency check failed"}
         fp = rollback_fingerprint(req)
-        prior = self.transactions.get(req["transactionId"])
+        prior = self.transactions.get(tx_id)
         if prior:
-            if prior["fp"] != fp:
+            if prior["type"] != "ROLLBACK" or prior["fp"] != fp:
                 return {"traceId": trace_id, "status": StatusCode.SC_TRANSACTION_DUPLICATED, "message": "Conflicting rollback payload"}
             if prior["empty"]:
                 return {"traceId": trace_id, "status": StatusCode.SC_TRANSACTION_NOT_EXISTS, "message": "Original betId never deducted"}
-            return self._ok(trace_id, req["username"], acct)
-        if req["betId"] not in self.deducted_bets:
-            self.transactions[req["transactionId"]] = {"fp": fp, "empty": True}
-            return {"traceId": trace_id, "status": StatusCode.SC_TRANSACTION_NOT_EXISTS, "message": "Original betId never deducted"}
+            return self._ok(trace_id, username, acct)
         refund = decimal_to_ledger_units(req["amount"], acct["exponent"])
+        if refund <= 0:
+            return {"traceId": trace_id, "status": StatusCode.SC_INVALID_REQUEST, "message": "Rollback amount must be positive"}
+        orig = self.deducted_bets.get(bet_id)
+        if orig is None:
+            self.transactions[tx_id] = {"type": "ROLLBACK", "fp": fp, "empty": True}
+            return {"traceId": trace_id, "status": StatusCode.SC_TRANSACTION_NOT_EXISTS, "message": "Original betId never deducted"}
+        if orig["username"] != username or orig["currency"] != acct["currency"] or orig["stake"] != refund:
+            return {"traceId": trace_id, "status": StatusCode.SC_INVALID_REQUEST, "message": "Rollback does not match original bet"}
+        if orig["state"] != "DEDUCTED":
+            return {"traceId": trace_id, "status": StatusCode.SC_TRANSACTION_DUPLICATED, "message": f"betId already {orig['state']}"}
         acct["balance_units"] += refund
-        self.transactions[req["transactionId"]] = {"fp": fp, "empty": False}
-        return self._ok(trace_id, req["username"], acct)
+        orig["state"] = "ROLLED_BACK"
+        self.transactions[tx_id] = {"type": "ROLLBACK", "fp": fp, "empty": False}
+        return self._ok(trace_id, username, acct)
+
+
+def _extract_trace_hint(raw_bytes: bytes) -> str:
+    m = _TRACE_HINT_RE.search(raw_bytes[:1024])
+    return m.group(1).decode("ascii", errors="ignore") if m else ""
 
 
 class WebhookDispatcher:
-    def __init__(self, config: Config, wallet: InMemoryWallet) -> None:
+    def __init__(self, config: Config, wallet: WalletHandler) -> None:
+        if wallet is None:
+            raise BaccaratSdkError("wallet handler is required", "INVALID_CONFIG")
         self.config = config
         self.wallet = wallet
 
@@ -587,6 +673,24 @@ class WebhookDispatcher:
         raw_body: Union[bytes, bytearray, str],
     ) -> Tuple[int, Dict[str, Any]]:
         raw_bytes = _to_utf8_bytes(raw_body)
+        if len(raw_bytes) > MAX_WEBHOOK_BODY_BYTES:
+            return 200, {"traceId": "", "status": StatusCode.SC_INVALID_REQUEST, "message": "Request body exceeds 1 MiB limit"}
+
+        # Verify X-API-Key & X-Signature over raw bytes BEFORE JSON parsing!
+        auth_status = verify_webhook_headers(
+            api_key_header,
+            signature_header,
+            raw_bytes,
+            self.config.api_key,
+            self.config.hmac_secret,
+        )
+        if auth_status != StatusCode.SC_OK:
+            return 200, {
+                "traceId": _extract_trace_hint(raw_bytes),
+                "status": auth_status,
+                "message": "Authentication/signature check failed",
+            }
+
         trace_id = ""
         parsed: Optional[Dict[str, Any]] = None
         try:
@@ -598,26 +702,22 @@ class WebhookDispatcher:
         except Exception:
             parsed = None
 
-        auth_status = verify_webhook_headers(
-            api_key_header,
-            signature_header,
-            raw_bytes,
-            self.config.api_key,
-            self.config.hmac_secret,
-        )
-        if auth_status != StatusCode.SC_OK:
-            return 200, {"traceId": trace_id, "status": auth_status, "message": "Authentication/signature check failed"}
-
         if parsed is None:
             return 200, {"traceId": trace_id, "status": StatusCode.SC_INVALID_REQUEST, "message": "Malformed JSON object"}
 
-        clean = route_path.split("?", 1)[0].rstrip("/")
-        if clean.endswith("/wallet/balance"):
-            return 200, self.wallet.on_balance(parsed)
-        if clean.endswith("/wallet/bet"):
-            return 200, self.wallet.on_bet(parsed)
-        if clean.endswith("/wallet/bet_result"):
-            return 200, self.wallet.on_bet_result(parsed)
-        if clean.endswith("/wallet/rollback"):
-            return 200, self.wallet.on_rollback(parsed)
-        return 200, {"traceId": trace_id, "status": StatusCode.SC_INVALID_REQUEST, "message": f"Unknown route {clean}"}
+        clean = (route_path or "").split("?", 1)[0].rstrip("/")
+        try:
+            if clean.endswith("/wallet/balance"):
+                return 200, self.wallet.on_balance(parsed)
+            if clean.endswith("/wallet/bet"):
+                return 200, self.wallet.on_bet(parsed)
+            if clean.endswith("/wallet/bet_result"):
+                return 200, self.wallet.on_bet_result(parsed)
+            if clean.endswith("/wallet/rollback"):
+                return 200, self.wallet.on_rollback(parsed)
+            return 200, {"traceId": trace_id, "status": StatusCode.SC_INVALID_REQUEST, "message": f"Unknown route {clean}"}
+        except BaccaratSdkError as exc:
+            st = exc.code if exc.code.startswith("SC_") else StatusCode.SC_INVALID_REQUEST
+            return 200, {"traceId": trace_id, "status": st, "message": str(exc)}
+        except Exception as exc:
+            return 200, {"traceId": trace_id, "status": StatusCode.SC_INVALID_REQUEST, "message": f"Wallet handler error: {exc}"}

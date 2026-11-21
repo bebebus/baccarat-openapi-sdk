@@ -286,4 +286,21 @@ func TestS2SClientAndWebhookHTTPServer(t *testing.T) {
 	if r := postWb("/wallet/rollback", unknownRb); r.Status != SC_TRANSACTION_NOT_EXISTS {
 		t.Fatalf("empty rollback failed: %+v", r)
 	}
+
+	// CR-01..CR-10 regressions: rollback after settle rejected, literal "null" body rejected, zero-stake rejected
+	if r := postWb("/wallet/rollback", doc.IdempotencyVectors.Rollback.Initial); r.Status != SC_TRANSACTION_DUPLICATED {
+		t.Fatalf("expected rollback after settle to be SC_TRANSACTION_DUPLICATED, got %+v", r)
+	}
+	nullSig, _ := SignBody([]byte("null"), secret)
+	if r := disp.HandleRaw(ctx, "/wallet/balance", apiKey, nullSig, []byte("null")); r.Status != SC_INVALID_REQUEST || r.Message != "request body must be a JSON object" {
+		t.Fatalf("expected JSON literal null to be rejected as non-object, got %+v", r)
+	}
+	wallet.SetDisabled("player_9527", false)
+	zeroBet := doc.IdempotencyVectors.Bet.Initial
+	zeroBet.TransactionID = "bet_zero_go"
+	zeroBet.BetID = "b2btkt_zero_go"
+	zeroBet.Amount = "0.00"
+	if r := postWb("/wallet/bet", zeroBet); r.Status != SC_INVALID_REQUEST {
+		t.Fatalf("expected zero stake to fail, got %+v", r)
+	}
 }
