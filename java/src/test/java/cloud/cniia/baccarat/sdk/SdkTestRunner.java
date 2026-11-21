@@ -1,0 +1,215 @@
+// SPDX-License-Identifier: MIT
+package cloud.cniia.baccarat.sdk;
+
+import com.sun.net.httpserver.HttpServer;
+
+import java.math.BigInteger;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+
+public final class SdkTestRunner {
+    private static void check(boolean cond, String msg) {
+        if (!cond) throw new AssertionError("FAIL: " + msg);
+    }
+
+    private static void checkEq(Object actual, Object expected, String msg) {
+        if (!Objects.equals(actual, expected)) {
+            throw new AssertionError("FAIL [" + msg + "]: expected <" + expected + "> but got <" + actual + ">");
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    public static void main(String[] args) throws Exception {
+        String rawJson = Files.readString(Path.of("../test-vectors.json"), StandardCharsets.UTF_8);
+        Map<String, Object> doc = JsonCodec.parseObject(rawJson);
+
+        // 1. HMAC & header vectors
+        for (Object item : (List<Object>) doc.get("hmacVectors")) {
+            Map<String, Object> v = (Map<String, Object>) item;
+            String name = (String) v.get("name");
+            String body = (String) v.get("rawBody");
+            String secret = (String) v.get("secret");
+            String sig = (String) v.get("signature");
+            checkEq(body.getBytes(StandardCharsets.UTF_8).length, ((Number) v.get("utf8ByteLength")).intValue(), name + ":len");
+            checkEq(BaccaratSdk.signBody(body, secret), sig, name + ":sign");
+            check(BaccaratSdk.verifySignature(body.getBytes(StandardCharsets.UTF_8), sig, secret), name + ":verify");
+            if (v.containsKey("wrongBase64DecodedSignature")) {
+                check(!BaccaratSdk.verifySignature(
+                        body.getBytes(StandardCharsets.UTF_8),
+                        (String) v.get("wrongBase64DecodedSignature"),
+                        secret
+                ), name + ":wrongB64");
+            }
+        }
+
+        for (Object item : (List<Object>) doc.get("headerVerificationVectors")) {
+            Map<String, Object> h = (Map<String, Object>) item;
+            String actual = BaccaratSdk.verifyWebhookHeaders(
+                    (String) h.get("apiKeyHeader"),
+                    (String) h.get("signatureHeader"),
+                    ((String) h.get("rawBody")).getBytes(StandardCharsets.UTF_8),
+                    (String) h.get("expectedApiKey"),
+                    (String) h.get("hmacSecret")
+            );
+            checkEq(actual, h.get("expectedStatus"), (String) h.get("name"));
+        }
+
+        // 2. Idempotency vectors
+        Map<String, Object> idem = (Map<String, Object>) doc.get("idempotencyVectors");
+        Map<String, Object> bet = (Map<String, Object>) idem.get("bet");
+        checkEq(BaccaratSdk.betFingerprint((Map<String, Object>) bet.get("initial")), bet.get("expectedFingerprint"), "bet:init");
+        checkEq(BaccaratSdk.betFingerprint((Map<String, Object>) bet.get("retrySameBusiness")), bet.get("expectedFingerprint"), "bet:retry");
+        checkEq(BaccaratSdk.betFingerprint((Map<String, Object>) bet.get("conflictDifferentAmount")), bet.get("conflictFingerprint"), "bet:conflict");
+
+        Map<String, Object> stl = (Map<String, Object>) idem.get("betResult");
+        checkEq(BaccaratSdk.betResultFingerprint((Map<String, Object>) stl.get("initial")), stl.get("expectedFingerprint"), "stl:init");
+        checkEq(BaccaratSdk.betResultFingerprint((Map<String, Object>) stl.get("retrySameBusiness")), stl.get("expectedFingerprint"), "stl:retry");
+        checkEq(BaccaratSdk.betResultFingerprint((Map<String, Object>) stl.get("conflictDifferentWinAmount")), stl.get("conflictFingerprint"), "stl:conflict");
+
+        Map<String, Object> rb = (Map<String, Object>) idem.get("rollback");
+        checkEq(BaccaratSdk.rollbackFingerprint((Map<String, Object>) rb.get("initial")), rb.get("expectedFingerprint"), "rb:init");
+        checkEq(BaccaratSdk.rollbackFingerprint((Map<String, Object>) rb.get("retrySameBusiness")), rb.get("expectedFingerprint"), "rb:retry");
+        checkEq(BaccaratSdk.rollbackFingerprint((Map<String, Object>) rb.get("conflictDifferentAmount")), rb.get("conflictFingerprint"), "rb:conflict");
+
+        // 3. Money & status vectors
+        Map<String, Object> money = (Map<String, Object>) doc.get("moneyVectors");
+        for (Object item : (List<Object>) money.get("valid")) {
+            Map<String, Object> m = (Map<String, Object>) item;
+            int exp = ((Number) m.get("displayExponent")).intValue();
+            BigInteger units = BaccaratSdk.decimalToLedgerUnits((String) m.get("raw"), exp, (Boolean) m.get("allowNegative"));
+            checkEq(units.toString(), m.get("expectedUnits"), m.get("name") + ":units");
+            checkEq(BaccaratSdk.ledgerUnitsToDecimal(units, exp), m.get("expectedFormatted"), m.get("name") + ":fmt");
+        }
+        for (Object item : (List<Object>) money.get("invalid")) {
+            Map<String, Object> inv = (Map<String, Object>) item;
+            boolean threw = false;
+            try {
+                BaccaratSdk.decimalToLedgerUnits((String) inv.get("raw"), ((Number) inv.get("displayExponent")).intValue(), (Boolean) inv.get("allowNegative"));
+            } catch (BaccaratSdk.SdkException e) {
+                threw = true;
+            }
+            check(threw, "money:invalid:" + inv.get("name"));
+        }
+        for (Object item : (List<Object>) doc.get("statusCodes")) {
+            Map<String, Object> sc = (Map<String, Object>) item;
+            checkEq(BaccaratSdk.StatusCode.isRetryable((String) sc.get("code")), sc.get("retryable"), "sc:" + sc.get("code"));
+        }
+
+        // 4. Loopback HTTP Server S2S Client + WebhookDispatcher
+        String apiKey = "ak_0123456789abcdef0123456789abcdef";
+        String secret = "dGVzdF9zZWNyZXRfNDBfY2hhcnNfYmFzZTY0dXJsX2s";
+
+        HttpServer srv = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        srv.createContext("/operator/v1/", ex -> {
+            byte[] reqBytes = ex.getRequestBody().readAllBytes();
+            String st = BaccaratSdk.verifyWebhookHeaders(
+                    ex.getRequestHeaders().getFirst("X-API-Key"),
+                    ex.getRequestHeaders().getFirst("X-Signature"),
+                    reqBytes, apiKey, secret
+            );
+            Map<String, Object> body = JsonCodec.parseObject(new String(reqBytes, StandardCharsets.UTF_8));
+            Map<String, Object> resp = new LinkedHashMap<>();
+            resp.put("traceId", body.get("traceId"));
+            if (!BaccaratSdk.StatusCode.SC_OK.equals(st)) {
+                resp.put("status", st);
+                resp.put("message", "auth failed");
+            } else {
+                String path = ex.getRequestURI().getPath();
+                resp.put("status", "SC_OK");
+                if ("/operator/v1/game/tables".equals(path)) {
+                    resp.put("data", Map.of("tables", List.of(Map.of("tableId", "T-A2", "currency", "USD")), "pageNo", 1, "pageSize", 50, "total", 1));
+                } else if ("/operator/v1/game/url".equals(path)) {
+                    if (!"USD".equals(body.get("currency"))) {
+                        resp.put("status", "SC_WRONG_CURRENCY");
+                        resp.put("message", "USD required");
+                    } else {
+                        String tok = "b2bt_" + "e".repeat(48);
+                        resp.put("data", Map.of("gameUrl", "https://play.lt.cniia.cloud/?token=" + tok, "token", tok));
+                    }
+                } else if ("/operator/v1/game/terminate".equals(path)) {
+                    resp.put("data", Map.of("username", body.get("username"), "terminatedSessions", 1, "revokedLaunchTokens", 0));
+                } else if ("/operator/v1/transaction/list".equals(path)) {
+                    int pNo = ((Number) body.get("pageNo")).intValue();
+                    List<Map<String, Object>> rows = pNo == 1 ? List.of(Map.of("betId", "b2btkt1"), Map.of("betId", "b2btkt2")) : List.of(Map.of("betId", "b2btkt3"));
+                    resp.put("data", Map.of("transactions", rows, "pageNo", pNo, "pageSize", 2, "total", 3));
+                } else {
+                    resp.put("data", Map.of("betId", body.get("betId"), "status", 1, "roundResult", Map.of("outcome", "PLAYER", "playerPoints", 8, "bankerPoints", 5)));
+                }
+            }
+            byte[] out = JsonCodec.stringify(resp).getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().set("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, out.length);
+            ex.getResponseBody().write(out);
+            ex.close();
+        });
+        srv.start();
+        try {
+            int port = srv.getAddress().getPort();
+            BaccaratSdk.Config cfg = new BaccaratSdk.Config(apiKey, secret, BaccaratSdk.Environment.PRODUCTION, "http://127.0.0.1:" + port, 5000);
+            BaccaratSdk.Client client = new BaccaratSdk.Client(cfg);
+
+            Map<String, Object> tablesData = (Map<String, Object>) client.listTables(Map.of("currency", "USD")).get("data");
+            checkEq(((List<Map<String, Object>>) tablesData.get("tables")).get(0).get("tableId"), "T-A2", "s2s:tables");
+
+            Map<String, Object> urlData = (Map<String, Object>) client.createGameUrl(Map.of(
+                    "username", "player_9527", "tableId", "T-A2", "platform", "H5",
+                    "currency", "USD", "lobbyUrl", "https://merchant.example.com/lobby", "ipAddress", "203.0.113.42"
+            )).get("data");
+            check(((String) urlData.get("token")).startsWith("b2bt_"), "s2s:url");
+
+            boolean caughtApi = false;
+            try {
+                client.createGameUrl(Map.of(
+                        "username", "player_9527", "tableId", "T-A2", "platform", "H5",
+                        "currency", "JPY", "lobbyUrl", "https://merchant.example.com/lobby", "ipAddress", "203.0.113.42"
+                ));
+            } catch (BaccaratSdk.ApiException ex) {
+                caughtApi = "SC_WRONG_CURRENCY".equals(ex.status) && !ex.isRetryable();
+            }
+            check(caughtApi, "s2s:wrongCurrency");
+
+            checkEq(client.listAllTransactions(1000L, 2000L, 2).size(), 3, "s2s:txAll");
+            Map<String, Object> detData = (Map<String, Object>) client.getTransactionDetail(Map.of("betId", "b2btkt1", "fromTime", 1000L, "toTime", 2000L)).get("data");
+            checkEq(((Map<String, Object>) detData.get("roundResult")).get("outcome"), "PLAYER", "s2s:detail");
+        } finally {
+            srv.stop(0);
+        }
+
+        // Webhook lifecycle
+        String tok = "b2bt_9f81c204d7e641b8a5309c17e248f6b109d3a4c5e6f70819";
+        BaccaratSdk.InMemoryWallet wallet = new BaccaratSdk.InMemoryWallet();
+        wallet.addAccount("player_9527", "USD", "1000.00", 2, List.of(tok));
+        BaccaratSdk.Config sbCfg = new BaccaratSdk.Config(apiKey, secret, BaccaratSdk.Environment.SANDBOX, null, 5000);
+        BaccaratSdk.WebhookDispatcher disp = new BaccaratSdk.WebhookDispatcher(sbCfg, wallet);
+
+        var send = new java.util.function.BiFunction<String, Map<String, Object>, Map<String, Object>>() {
+            @Override
+            public Map<String, Object> apply(String route, Map<String, Object> payload) {
+                byte[] raw = JsonCodec.stringify(payload).getBytes(StandardCharsets.UTF_8);
+                return disp.handle(route, apiKey, BaccaratSdk.signBody(raw, secret), raw);
+            }
+        };
+
+        checkEq(((Map<String, Object>) send.apply("/wallet/balance", Map.of("traceId", "t1", "username", "player_9527", "currency", "USD", "token", tok)).get("data")).get("balance"), "1000.00", "wb:bal");
+        checkEq(((Map<String, Object>) send.apply("/wallet/bet", (Map<String, Object>) bet.get("initial")).get("data")).get("balance"), "900.00", "wb:bet");
+        checkEq(((Map<String, Object>) send.apply("/wallet/bet", (Map<String, Object>) bet.get("retrySameBusiness")).get("data")).get("balance"), "900.00", "wb:betReplay");
+        checkEq(send.apply("/wallet/bet", (Map<String, Object>) bet.get("conflictDifferentAmount")).get("status"), "SC_TRANSACTION_DUPLICATED", "wb:betConflict");
+
+        wallet.setDisabled("player_9527", true);
+        checkEq(((Map<String, Object>) send.apply("/wallet/bet_result", (Map<String, Object>) stl.get("initial")).get("data")).get("balance"), "1100.00", "wb:settle");
+
+        Map<String, Object> unknownRb = new LinkedHashMap<>((Map<String, Object>) rb.get("initial"));
+        unknownRb.put("transactionId", "rb_b2btkt000000000000000000000000");
+        unknownRb.put("betId", "b2btkt000000000000000000000000");
+        unknownRb.put("externalTransactionId", "b2btkt000000000000000000000000");
+        checkEq(send.apply("/wallet/rollback", unknownRb).get("status"), "SC_TRANSACTION_NOT_EXISTS", "wb:emptyRb");
+
+        System.out.println("JAVA 17 SDK: ALL TESTS PASSED");
+    }
+}
