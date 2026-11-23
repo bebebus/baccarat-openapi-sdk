@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Package baccarat provides a zero-dependency Go SDK for the Baccarat Live Platform
-// B2B Operator Seamless Wallet API (v1.2.0).
+// B2B Operator Seamless Wallet API (v1.4.0).
 package baccarat
 
 import (
@@ -51,6 +51,7 @@ const (
 	SC_OPERATOR_TIMEOUT             = "SC_OPERATOR_TIMEOUT"
 	SC_UNDER_MAINTENANCE            = "SC_UNDER_MAINTENANCE"
 	SC_GAME_DISABLED                = "SC_GAME_DISABLED"
+	SC_RATE_LIMITED                 = "SC_RATE_LIMITED"
 )
 
 var (
@@ -61,7 +62,7 @@ var (
 
 func IsRetryableStatus(status string) bool {
 	s := strings.TrimSpace(status)
-	return s == SC_TRANSACTION_STILL_PROCESSING || s == SC_OPERATOR_TIMEOUT
+	return s == SC_TRANSACTION_STILL_PROCESSING || s == SC_OPERATOR_TIMEOUT || s == SC_RATE_LIMITED
 }
 
 type SdkError struct {
@@ -284,6 +285,24 @@ type WalletRollbackRequest struct {
 	Timestamp             int64  `json:"timestamp"`
 }
 
+type WalletAdjustmentRequest struct {
+	TraceID               string `json:"traceId"`
+	Username              string `json:"username"`
+	TransactionID         string `json:"transactionId"`
+	BetID                 string `json:"betId"`
+	ExternalTransactionID string `json:"externalTransactionId"`
+	RoundID               string `json:"roundId"`
+	Direction             string `json:"direction"`
+	Amount                string `json:"amount"`
+	Currency              string `json:"currency"`
+	ReasonCode            string `json:"reasonCode"`
+	ReferenceNo           string `json:"referenceNo,omitempty"`
+	Memo                  string `json:"memo,omitempty"`
+	Token                 string `json:"token,omitempty"`
+	GameCode              string `json:"gameCode"`
+	Timestamp             int64  `json:"timestamp"`
+}
+
 func BetFingerprint(p WalletBetRequest) string {
 	return EncodeTupleFingerprint("wallet/bet", []string{
 		p.TransactionID, p.Username, p.BetID, p.ExternalTransactionID,
@@ -304,6 +323,13 @@ func RollbackFingerprint(p WalletRollbackRequest) string {
 	return EncodeTupleFingerprint("wallet/rollback", []string{
 		p.TransactionID, p.Username, p.BetID, p.ExternalTransactionID,
 		p.RoundID, p.Currency, p.GameCode, p.Amount,
+	})
+}
+
+func AdjustmentFingerprint(p WalletAdjustmentRequest) string {
+	return EncodeTupleFingerprint("wallet/adjustment", []string{
+		p.TransactionID, p.Username, p.BetID, p.ExternalTransactionID,
+		p.RoundID, p.Currency, p.GameCode, p.Direction, p.Amount, p.ReasonCode,
 	})
 }
 
@@ -463,10 +489,35 @@ func (c *Client) postSigned(ctx context.Context, route string, reqBody any, trac
 	return effTrace, nil
 }
 
+type PingRequest struct {
+	TraceID string `json:"traceId"`
+}
+
+type PingData struct {
+	OperatorID        string   `json:"operatorId"`
+	Status            string   `json:"status"`
+	ServerTime        int64    `json:"serverTime"`
+	AllowedCurrencies []string `json:"allowedCurrencies"`
+	AllowedTableCount int      `json:"allowedTableCount"`
+}
+
+func (c *Client) Ping(ctx context.Context, req PingRequest) (*PingData, string, error) {
+	if strings.TrimSpace(req.TraceID) == "" {
+		req.TraceID = newUUIDv4()
+	}
+	var data PingData
+	traceID, err := c.postSigned(ctx, "/operator/v1/ping", req, req.TraceID, &data)
+	if err != nil {
+		return nil, traceID, err
+	}
+	return &data, traceID, nil
+}
+
 type CreateGameUrlRequest struct {
 	TraceID   string `json:"traceId"`
 	Username  string `json:"username"`
-	TableID   string `json:"tableId"`
+	TableID   string `json:"tableId,omitempty"`
+	EntryMode string `json:"entryMode,omitempty"`
 	Language  string `json:"language,omitempty"`
 	Platform  string `json:"platform"`
 	Currency  string `json:"currency"`
@@ -475,8 +526,10 @@ type CreateGameUrlRequest struct {
 }
 
 type CreateGameUrlData struct {
-	GameURL string `json:"gameUrl"`
-	Token   string `json:"token"`
+	GameURL   string  `json:"gameUrl"`
+	Token     string  `json:"token"`
+	EntryMode string  `json:"entryMode,omitempty"`
+	TableID   *string `json:"tableId,omitempty"`
 }
 
 func (c *Client) CreateGameUrl(ctx context.Context, req CreateGameUrlRequest) (*CreateGameUrlData, string, error) {
@@ -534,11 +587,13 @@ func (c *Client) ListTables(ctx context.Context, req ListTablesRequest) (*ListTa
 
 type TerminateSessionsRequest struct {
 	TraceID  string `json:"traceId"`
-	Username string `json:"username"`
+	Username string `json:"username,omitempty"`
+	Scope    string `json:"scope,omitempty"`
 }
 
 type TerminateSessionsData struct {
-	Username            string `json:"username"`
+	Scope               string `json:"scope,omitempty"`
+	Username            string `json:"username,omitempty"`
 	TerminatedSessions  int    `json:"terminatedSessions"`
 	RevokedLaunchTokens int    `json:"revokedLaunchTokens"`
 }
@@ -555,10 +610,59 @@ func (c *Client) TerminateSessions(ctx context.Context, req TerminateSessionsReq
 	return &data, traceID, nil
 }
 
+type UpdatePlayerStatusRequest struct {
+	TraceID        string `json:"traceId"`
+	Username       string `json:"username"`
+	Status         string `json:"status,omitempty"`
+	BettingEnabled *bool  `json:"bettingEnabled,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+}
+
+func (c *Client) UpdatePlayerStatus(ctx context.Context, req UpdatePlayerStatusRequest) (map[string]any, string, error) {
+	if strings.TrimSpace(req.TraceID) == "" {
+		req.TraceID = newUUIDv4()
+	}
+	var data map[string]any
+	traceID, err := c.postSigned(ctx, "/operator/v1/player/status", req, req.TraceID, &data)
+	if err != nil {
+		return nil, traceID, err
+	}
+	return data, traceID, nil
+}
+
+type UpdatePlayerLimitsRequest struct {
+	TraceID       string   `json:"traceId"`
+	Username      string   `json:"username"`
+	Currency      string   `json:"currency"`
+	MinBet        *string  `json:"minBet,omitempty"`
+	MaxBet        *string  `json:"maxBet,omitempty"`
+	MaxTableRound *string  `json:"maxTableRound,omitempty"`
+	MaxUserDay    *string  `json:"maxUserDay,omitempty"`
+	MaxLossPerDay *string  `json:"maxLossPerDay,omitempty"`
+	CustomChips   []string `json:"customChips,omitempty"`
+}
+
+func (c *Client) UpdatePlayerLimits(ctx context.Context, req UpdatePlayerLimitsRequest) (map[string]any, string, error) {
+	if strings.TrimSpace(req.TraceID) == "" {
+		req.TraceID = newUUIDv4()
+	}
+	var data map[string]any
+	traceID, err := c.postSigned(ctx, "/operator/v1/player/limits", req, req.TraceID, &data)
+	if err != nil {
+		return nil, traceID, err
+	}
+	return data, traceID, nil
+}
+
 type ListTransactionsRequest struct {
 	TraceID  string `json:"traceId"`
 	FromTime int64  `json:"fromTime"`
 	ToTime   int64  `json:"toTime"`
+	TimeType string `json:"timeType,omitempty"`
+	Status   *int   `json:"status,omitempty"`
+	Username string `json:"username,omitempty"`
+	TableID  string `json:"tableId,omitempty"`
+	RoundID  string `json:"roundId,omitempty"`
 	PageNo   int    `json:"pageNo,omitempty"`
 	PageSize int    `json:"pageSize,omitempty"`
 }
@@ -649,11 +753,17 @@ type VerifiedRoundResult struct {
 type TransactionDetailData struct {
 	ReconcileTransactionRow
 	RoundResult *VerifiedRoundResult `json:"roundResult"`
+	Adjustments []map[string]any     `json:"adjustments,omitempty"`
 }
 
 func (c *Client) GetTransactionDetail(ctx context.Context, req TransactionDetailRequest) (*TransactionDetailData, string, error) {
-	if strings.TrimSpace(req.BetID) == "" || req.FromTime < 0 || req.ToTime < req.FromTime || (req.ToTime-req.FromTime) > MaxDetailWindowMs {
-		return nil, "", &SdkError{Code: "INVALID_ARGUMENT", Message: "detail window must satisfy 0 <= ToTime - FromTime <= 604800000"}
+	if strings.TrimSpace(req.BetID) == "" {
+		return nil, "", &SdkError{Code: "INVALID_ARGUMENT", Message: "betId is required"}
+	}
+	if req.FromTime != 0 || req.ToTime != 0 {
+		if req.FromTime < 0 || req.ToTime < req.FromTime || (req.ToTime-req.FromTime) > MaxDetailWindowMs {
+			return nil, "", &SdkError{Code: "INVALID_ARGUMENT", Message: "detail window must satisfy 0 <= ToTime - FromTime <= 604800000"}
+		}
 	}
 	if strings.TrimSpace(req.TraceID) == "" {
 		req.TraceID = newUUIDv4()
@@ -664,6 +774,49 @@ func (c *Client) GetTransactionDetail(ctx context.Context, req TransactionDetail
 		return nil, traceID, err
 	}
 	return &data, traceID, nil
+}
+
+type ListUnsettledRequest struct {
+	TraceID  string `json:"traceId"`
+	FromTime int64  `json:"fromTime,omitempty"`
+	ToTime   int64  `json:"toTime,omitempty"`
+	Username string `json:"username,omitempty"`
+	TableID  string `json:"tableId,omitempty"`
+	PageNo   int    `json:"pageNo,omitempty"`
+	PageSize int    `json:"pageSize,omitempty"`
+}
+
+func (c *Client) ListUnsettledTransactions(ctx context.Context, req ListUnsettledRequest) (map[string]any, string, error) {
+	if strings.TrimSpace(req.TraceID) == "" {
+		req.TraceID = newUUIDv4()
+	}
+	var data map[string]any
+	traceID, err := c.postSigned(ctx, "/operator/v1/transaction/unsettled", req, req.TraceID, &data)
+	if err != nil {
+		return nil, traceID, err
+	}
+	return data, traceID, nil
+}
+
+type WalletTransactionStatusRequest struct {
+	TraceID       string `json:"traceId"`
+	TransactionID string `json:"transactionId,omitempty"`
+	BetID         string `json:"betId,omitempty"`
+}
+
+func (c *Client) GetWalletTransactionStatus(ctx context.Context, req WalletTransactionStatusRequest) (map[string]any, string, error) {
+	if strings.TrimSpace(req.TransactionID) == "" && strings.TrimSpace(req.BetID) == "" {
+		return nil, "", &SdkError{Code: "INVALID_ARGUMENT", Message: "transactionId or betId is required"}
+	}
+	if strings.TrimSpace(req.TraceID) == "" {
+		req.TraceID = newUUIDv4()
+	}
+	var data map[string]any
+	traceID, err := c.postSigned(ctx, "/operator/v1/wallet/transaction-status", req, req.TraceID, &data)
+	if err != nil {
+		return nil, traceID, err
+	}
+	return data, traceID, nil
 }
 
 // ── 5. Seamless Wallet Webhook Dispatcher & Thread-Safe InMemoryWallet ──────
@@ -680,6 +833,10 @@ type WalletResponse struct {
 	Status  string              `json:"status"`
 	Message string              `json:"message,omitempty"`
 	Data    *WalletResponseData `json:"data,omitempty"`
+}
+
+type WalletAdjustmentHandler interface {
+	OnAdjustment(ctx context.Context, req WalletAdjustmentRequest) WalletResponse
 }
 
 type WalletHandler interface {
@@ -948,6 +1105,55 @@ func (w *InMemoryWallet) OnRollback(_ context.Context, req WalletRollbackRequest
 	return w.okResp(req.TraceID, username, a)
 }
 
+func (w *InMemoryWallet) OnAdjustment(_ context.Context, req WalletAdjustmentRequest) WalletResponse {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	txID := strings.TrimSpace(req.TransactionID)
+	betID := strings.TrimSpace(req.BetID)
+	username := strings.TrimSpace(req.Username)
+	currency := strings.ToUpper(strings.TrimSpace(req.Currency))
+	direction := strings.ToUpper(strings.TrimSpace(req.Direction))
+	reasonCode := strings.TrimSpace(req.ReasonCode)
+	if txID == "" || betID == "" || username == "" || currency == "" || reasonCode == "" || strings.TrimSpace(req.Amount) == "" || (direction != "CREDIT" && direction != "DEBIT") {
+		return WalletResponse{TraceID: req.TraceID, Status: SC_INVALID_REQUEST, Message: "missing or invalid adjustment fields"}
+	}
+	a, ok := w.accounts[username]
+	if !ok {
+		return WalletResponse{TraceID: req.TraceID, Status: SC_USER_NOT_EXISTS}
+	}
+	if a.currency != currency {
+		return WalletResponse{TraceID: req.TraceID, Status: SC_WRONG_CURRENCY}
+	}
+	fp := AdjustmentFingerprint(req)
+	if prior, exists := w.transactions[txID]; exists {
+		if prior.kind != "ADJUSTMENT" || prior.fp != fp {
+			return WalletResponse{TraceID: req.TraceID, Status: SC_TRANSACTION_DUPLICATED, Message: "conflicting adjustment"}
+		}
+		return w.okResp(req.TraceID, username, a)
+	}
+	orig, existed := w.deductedBets[betID]
+	if !existed {
+		return WalletResponse{TraceID: req.TraceID, Status: SC_TRANSACTION_NOT_EXISTS}
+	}
+	if orig.username != username || orig.currency != a.currency {
+		return WalletResponse{TraceID: req.TraceID, Status: SC_INVALID_REQUEST, Message: "adjustment mismatch"}
+	}
+	adjUnits, err := DecimalToLedgerUnits(req.Amount, a.exponent, false)
+	if err != nil || adjUnits.Sign() <= 0 {
+		return WalletResponse{TraceID: req.TraceID, Status: SC_INVALID_REQUEST, Message: "invalid adjustment amount"}
+	}
+	if direction == "DEBIT" {
+		if a.units.Cmp(adjUnits) < 0 {
+			return WalletResponse{TraceID: req.TraceID, Status: SC_INSUFFICIENT_FUNDS, Message: "insufficient funds"}
+		}
+		a.units.Sub(a.units, adjUnits)
+	} else {
+		a.units.Add(a.units, adjUnits)
+	}
+	w.transactions[txID] = txRecord{kind: "ADJUSTMENT", fp: fp}
+	return w.okResp(req.TraceID, username, a)
+}
+
 type WebhookDispatcher struct {
 	apiKey     string
 	hmacSecret string
@@ -1025,6 +1231,16 @@ func (d *WebhookDispatcher) HandleRaw(ctx context.Context, routePath, apiKeyHead
 			return WalletResponse{TraceID: traceID, Status: SC_INVALID_REQUEST, Message: "invalid JSON"}
 		}
 		return d.wallet.OnRollback(ctx, req)
+	case strings.HasSuffix(clean, "/wallet/adjustment"):
+		adjHandler, ok := d.wallet.(WalletAdjustmentHandler)
+		if !ok {
+			return WalletResponse{TraceID: traceID, Status: SC_INVALID_REQUEST, Message: "OnAdjustment not implemented"}
+		}
+		var req WalletAdjustmentRequest
+		if err := json.Unmarshal(rawBody, &req); err != nil {
+			return WalletResponse{TraceID: traceID, Status: SC_INVALID_REQUEST, Message: "invalid JSON"}
+		}
+		return adjHandler.OnAdjustment(ctx, req)
 	default:
 		return WalletResponse{TraceID: traceID, Status: SC_INVALID_REQUEST, Message: "unknown wallet route"}
 	}

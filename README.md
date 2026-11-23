@@ -1,11 +1,11 @@
 > 中文 | [English](./README.en.md)
 
-# 真人视讯百家乐 · B2B 商户对接多语言 SDK（v1.2.0）
+# 真人视讯百家乐 · B2B 商户对接多语言 SDK（v1.4.0）
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
-[![OpenAPI 3.1](https://img.shields.io/badge/OpenAPI_3.1-v1.2.0-e3b15a)](https://openapi.lt.cniia.cloud)
+[![OpenAPI 3.1](https://img.shields.io/badge/OpenAPI_3.1-v1.4.0-e3b15a)](https://openapi.lt.cniia.cloud)
 
-为接入真人视讯百家乐平台（B2B 单一无缝钱包模式，OpenAPI `v1.2.0`）的商户研发团队提供 **Node.js、Python、PHP、Go、Java、C++、Rust** 七套生产级双向对接 SDK。
+为接入真人视讯百家乐平台（B2B 单一无缝钱包模式，OpenAPI `v1.4.0`）的商户研发团队提供 **Node.js、Python、PHP、Go、Java、C++、Rust** 七套生产级双向对接 SDK。
 
 - 在线契约门户与验签台：`https://openapi.lt.cniia.cloud`
 - OpenAPI 3.1 规范下载：`https://openapi.lt.cniia.cloud/openapi.yaml` | `https://openapi.lt.cniia.cloud/openapi.json`
@@ -16,11 +16,11 @@
 1. **极简 / 零第三方包依赖**：
    - **Node.js / Python / PHP / Go / Java / Rust** 全部为 **零第三方运行时包依赖**（仅用语言标准库或系统原生 `libcurl`）；
    - **C++** 仅依赖标准 CMake + 系统 `OpenSSL` 与 `libcurl`（内置单头文件 RFC-8259 JSON 解析/序列化器，无需拉取任何第三方源码包）。
-2. **完整双向契约闭环**：
-   - **S2S 客户端**：覆盖 `/operator/v1/game/url`、`/game/tables`、`/game/terminate`、`/transaction/list`（含自动翻页器）、`/transaction/detail`（含 7 天窗口前置校验）；
-   - **无缝钱包回调路由与幂等防线**：内置 `WebhookDispatcher`（原始字节验签 → JSON 解析 → 4 路由分发）与重试安全业务指纹（自动排除重试可变字段 `traceId`、`timestamp`、`settledTime`），附带可直接联调的 `InMemoryWallet` 参考实现（含会话超时仍放行已扣款注单结算、`SC_TRANSACTION_NOT_EXISTS` 空成功收敛）。
+2. **完整双向契约闭环（10 入站 S2S + 5 出站无缝钱包回调）**：
+   - **S2S 客户端**：覆盖 `/operator/v1/ping`、`/game/tables`、`/game/url`（支持大厅/进桌/锁桌 `entryMode`）、`/game/terminate`（单人或全商户 `scope`）、`/player/status`（账号启停与只看不投 `bettingEnabled`）、`/player/limits`（受母盘口约束的动态个人限红与筹码）、`/transaction/list`（含 `VOID` 闭环与自动翻页器）、`/transaction/detail`（默认近 7 天窗口 + 亮牌牌面与调账轨迹）、`/transaction/unsettled`、`/wallet/transaction-status`；
+   - **无缝钱包回调路由与幂等防线**：内置 `WebhookDispatcher`（原始字节验签 → JSON 解析 → 5 路由分发：`balance` / `bet` / `bet_result` / `rollback` / `adjustment`）与重试安全业务指纹（自动排除重试可变字段 `traceId`、`timestamp`、`settledTime`、`memo`、`referenceNo`），附带可直接联调的 `InMemoryWallet` 参考实现（含会话超时仍放行已扣款注单结算与申诉补差、`SC_TRANSACTION_NOT_EXISTS` 空成功收敛）。
 3. **跨语言逐字节黄金向量护栏**：
-   七套语言单测共享并逐字节断言根目录同一份 [`test-vectors.json`](./test-vectors.json)（原始字节 UTF-8 `hmacSecret` 不做 Base64 解码、CJK/Emoji 多字节报文、高精度 `displayExponent=18` 金额换算、幂等重放与冲突指纹、17 个 `SC_*` 状态码）。
+   七套语言单测共享并逐字节断言根目录同一份 [`test-vectors.json`](./test-vectors.json)（原始字节 UTF-8 `hmacSecret` 不做 Base64 解码、CJK/Emoji 多字节报文、高精度 `displayExponent=18` 金额换算、4 组幂等重放与冲突指纹、18 个 `SC_*` 状态码）。
 
 ## 目录结构
 
@@ -28,7 +28,7 @@
 baccarat-openapi-sdk/
 ├── README.md / README.en.md       # 总览与快速开始
 ├── SIGNING.md / SIGNING.en.md     # 原始字节 HMAC-SHA256 与幂等冲突指纹权威规范
-├── INTERFACES.md / INTERFACES.en.md # 5 入站 S2S + 4 出站钱包回调 + 17 状态码字典
+├── INTERFACES.md / INTERFACES.en.md # 10 入站 S2S + 5 出站钱包回调 + 18 状态码字典
 ├── test-vectors.json              # 七语言共享标准答案测试向量
 ├── _tooling/
 │   ├── generate-vectors.mjs       # 标准答案向量生成器

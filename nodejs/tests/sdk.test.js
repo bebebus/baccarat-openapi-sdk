@@ -14,6 +14,7 @@ import {
   InMemoryWallet,
   StatusCode,
   WebhookDispatcher,
+  adjustmentFingerprint,
   betFingerprint,
   betResultFingerprint,
   decimalToLedgerUnits,
@@ -57,6 +58,11 @@ test('cross-language retry-safe idempotency fingerprints', () => {
   assert.equal(rollbackFingerprint(rollback.initial), rollback.expectedFingerprint);
   assert.equal(rollbackFingerprint(rollback.retrySameBusiness), rollback.expectedFingerprint);
   assert.equal(rollbackFingerprint(rollback.conflictDifferentAmount), rollback.conflictFingerprint);
+
+  const { adjustment } = VECTORS.idempotencyVectors;
+  assert.equal(adjustmentFingerprint(adjustment.initial), adjustment.expectedFingerprint);
+  assert.equal(adjustmentFingerprint(adjustment.retrySameBusiness), adjustment.expectedFingerprint);
+  assert.equal(adjustmentFingerprint(adjustment.conflictDifferentDirection), adjustment.conflictFingerprint);
 });
 
 test('cross-language exact decimal & ledger unit vectors', () => {
@@ -116,6 +122,16 @@ test('end-to-end S2S Client over real loopback HTTP server + auto-pagination + e
         res.end(JSON.stringify({ traceId: body.traceId, status: 'SC_OK', data: { transactions: rows, pageNo: body.pageNo, pageSize: 2, total: 3 } }));
       } else if (req.url === '/operator/v1/transaction/detail') {
         res.end(JSON.stringify({ traceId: body.traceId, status: 'SC_OK', data: { betId: body.betId, status: 1, roundResult: { outcome: 'PLAYER', playerPoints: 8, bankerPoints: 5, playerPair: false, bankerPair: false, natural: true } } }));
+      } else if (req.url === '/operator/v1/ping') {
+        res.end(JSON.stringify({ traceId: body.traceId, status: 'SC_OK', data: { operatorId: 'OP_DEMO', status: 'ACTIVE', serverTime: 1763612000000, allowedCurrencies: ['USD'], allowedTableCount: 1 } }));
+      } else if (req.url === '/operator/v1/player/status') {
+        res.end(JSON.stringify({ traceId: body.traceId, status: 'SC_OK', data: { username: body.username, status: body.status ?? 'ACTIVE', bettingEnabled: body.bettingEnabled ?? false, terminatedSessions: 0, revokedLaunchTokens: 0 } }));
+      } else if (req.url === '/operator/v1/player/limits') {
+        res.end(JSON.stringify({ traceId: body.traceId, status: 'SC_OK', data: { username: body.username, currency: body.currency, maxBet: body.maxBet } }));
+      } else if (req.url === '/operator/v1/transaction/unsettled') {
+        res.end(JSON.stringify({ traceId: body.traceId, status: 'SC_OK', data: { transactions: [], pageNo: 1, pageSize: 200, total: 0 } }));
+      } else if (req.url === '/operator/v1/wallet/transaction-status') {
+        res.end(JSON.stringify({ traceId: body.traceId, status: 'SC_OK', data: { transactions: [{ transactionId: body.transactionId, status: 'COMPLETED' }] } }));
       }
     });
   });
@@ -158,6 +174,19 @@ test('end-to-end S2S Client over real loopback HTTP server + auto-pagination + e
 
     const detailRes = await client.getTransactionDetail({ betId: 'b2btkt1', fromTime: 1000, toTime: 2000 });
     assert.equal(detailRes.data.roundResult.outcome, 'PLAYER');
+    const detailNoWindow = await client.getTransactionDetail({ betId: 'b2btkt1' });
+    assert.equal(detailNoWindow.data.betId, 'b2btkt1');
+
+    const pingRes = await client.ping();
+    assert.equal(pingRes.data.operatorId, 'OP_DEMO');
+    const psRes = await client.updatePlayerStatus({ username: 'player_9527', bettingEnabled: false });
+    assert.equal(psRes.data.bettingEnabled, false);
+    const plRes = await client.updatePlayerLimits({ username: 'player_9527', currency: 'USD', maxBet: '500.00' });
+    assert.equal(plRes.data.maxBet, '500.00');
+    const unRes = await client.listUnsettledTransactions({ username: 'player_9527' });
+    assert.equal(unRes.data.total, 0);
+    const wtsRes = await client.getWalletTransactionStatus({ transactionId: 'bet_1' });
+    assert.equal(wtsRes.data.transactions[0].status, 'COMPLETED');
 
     assert.throws(() => client.getTransactionDetail({ betId: 'b2btkt1', fromTime: 0, toTime: 604_800_001 }), BaccaratSdkError);
   } finally {
@@ -207,6 +236,31 @@ test('WebhookDispatcher & InMemoryWallet full seamless wallet lifecycle', async 
   const stlReplay = await send('/wallet/bet_result', VECTORS.idempotencyVectors.betResult.retrySameBusiness);
   assert.equal(stlReplay.body.status, 'SC_OK');
   assert.equal(stlReplay.body.data.balance, '1100.00');
+
+  // 3b. Post-settlement adjustment (/wallet/adjustment): CREDIT + replay + conflict + DEBIT insufficient + DEBIT ok
+  const adj1 = await send('/wallet/adjustment', VECTORS.idempotencyVectors.adjustment.initial);
+  assert.equal(adj1.body.status, 'SC_OK');
+  assert.equal(adj1.body.data.balance, '1120.00');
+  const adjReplay = await send('/wallet/adjustment', VECTORS.idempotencyVectors.adjustment.retrySameBusiness);
+  assert.equal(adjReplay.body.status, 'SC_OK');
+  assert.equal(adjReplay.body.data.balance, '1120.00');
+  const adjConf = await send('/wallet/adjustment', VECTORS.idempotencyVectors.adjustment.conflictDifferentDirection);
+  assert.equal(adjConf.body.status, 'SC_TRANSACTION_DUPLICATED');
+  const adjDebitOver = await send('/wallet/adjustment', {
+    ...VECTORS.idempotencyVectors.adjustment.initial,
+    transactionId: 'adj_debit_over',
+    direction: 'DEBIT',
+    amount: '5000.00',
+  });
+  assert.equal(adjDebitOver.body.status, 'SC_INSUFFICIENT_FUNDS');
+  const adjDebitOk = await send('/wallet/adjustment', {
+    ...VECTORS.idempotencyVectors.adjustment.initial,
+    transactionId: 'adj_debit_20',
+    direction: 'DEBIT',
+    amount: '20.00',
+  });
+  assert.equal(adjDebitOk.body.status, 'SC_OK');
+  assert.equal(adjDebitOk.body.data.balance, '1100.00');
 
   // 4. Rollback on never-deducted betId -> SC_TRANSACTION_NOT_EXISTS empty-success
   const unknownRb = {

@@ -215,7 +215,9 @@ Json make_err_json(const std::string& trace_id, const std::string& status, const
 
 bool is_retryable_status(const std::string& status) {
     std::string s = trim(status);
-    return s == StatusCode::SC_TRANSACTION_STILL_PROCESSING || s == StatusCode::SC_OPERATOR_TIMEOUT;
+    return s == StatusCode::SC_TRANSACTION_STILL_PROCESSING
+        || s == StatusCode::SC_OPERATOR_TIMEOUT
+        || s == StatusCode::SC_RATE_LIMITED;
 }
 
 std::string sign_body(const std::string& raw_body, const std::string& hmac_secret) {
@@ -395,6 +397,21 @@ std::string rollback_fingerprint(const Json& p) {
     });
 }
 
+std::string adjustment_fingerprint(const Json& p) {
+    return encode_tuple_fingerprint("wallet/adjustment", {
+        p.at("transactionId").to_scalar_string(),
+        p.at("username").to_scalar_string(),
+        p.at("betId").to_scalar_string(),
+        p.at("externalTransactionId").to_scalar_string(),
+        p.at("roundId").to_scalar_string(),
+        p.at("currency").to_scalar_string(),
+        p.at("gameCode").to_scalar_string(),
+        p.at("direction").to_scalar_string(),
+        p.at("amount").to_scalar_string(),
+        p.at("reasonCode").to_scalar_string(),
+    });
+}
+
 std::string Config::resolved_base_url() const {
     if (trim(api_key).empty()) throw SdkError("INVALID_CONFIG", "api_key is required");
     if (hmac_secret.empty()) throw SdkError("INVALID_CONFIG", "hmac_secret is required");
@@ -499,9 +516,12 @@ Json Client::post_signed(const std::string& route_path, Json payload) const {
     return out;
 }
 
+Json Client::ping(Json params) const { return post_signed("/operator/v1/ping", std::move(params)); }
 Json Client::create_game_url(Json params) const { return post_signed("/operator/v1/game/url", std::move(params)); }
 Json Client::list_tables(Json params) const { return post_signed("/operator/v1/game/tables", std::move(params)); }
 Json Client::terminate_sessions(Json params) const { return post_signed("/operator/v1/game/terminate", std::move(params)); }
+Json Client::update_player_status(Json params) const { return post_signed("/operator/v1/player/status", std::move(params)); }
+Json Client::update_player_limits(Json params) const { return post_signed("/operator/v1/player/limits", std::move(params)); }
 
 Json Client::list_transactions(Json params) const {
     if (!params.at("fromTime").is_int() || !params.at("toTime").is_int()) {
@@ -538,15 +558,37 @@ std::vector<Json> Client::list_all_transactions(int64_t from_time, int64_t to_ti
 
 Json Client::get_transaction_detail(Json params) const {
     std::string bet_id = trim(params.at("betId").as_string());
-    if (bet_id.empty() || !params.at("fromTime").is_int() || !params.at("toTime").is_int()) {
-        throw SdkError("INVALID_ARGUMENT", "betId, fromTime, and toTime are required");
+    if (bet_id.empty()) {
+        throw SdkError("INVALID_ARGUMENT", "betId is required");
     }
-    int64_t from = params.at("fromTime").as_int(-1);
-    int64_t to = params.at("toTime").as_int(-1);
-    if (from < 0 || to < from || (to - from) > MAX_DETAIL_WINDOW_MS) {
-        throw SdkError("INVALID_ARGUMENT", "detail window must satisfy 0 <= toTime - fromTime <= 604800000");
+    if (params.contains("fromTime") || params.contains("toTime")) {
+        if (!params.at("fromTime").is_int() || !params.at("toTime").is_int()) {
+            throw SdkError("INVALID_ARGUMENT", "fromTime and toTime must both be integers when specified");
+        }
+        int64_t from = params.at("fromTime").as_int(-1);
+        int64_t to = params.at("toTime").as_int(-1);
+        if (from < 0 || to < from || (to - from) > MAX_DETAIL_WINDOW_MS) {
+            throw SdkError("INVALID_ARGUMENT", "detail window must satisfy 0 <= toTime - fromTime <= 604800000");
+        }
     }
     return post_signed("/operator/v1/transaction/detail", std::move(params));
+}
+
+Json Client::list_unsettled_transactions(Json params) const {
+    return post_signed("/operator/v1/transaction/unsettled", std::move(params));
+}
+
+Json Client::get_wallet_transaction_status(Json params) const {
+    std::string tx_id = trim(params.at("transactionId").as_string());
+    std::string bet_id = trim(params.at("betId").as_string());
+    if (tx_id.empty() && bet_id.empty()) {
+        throw SdkError("INVALID_ARGUMENT", "Either transactionId or betId is required");
+    }
+    return post_signed("/operator/v1/wallet/transaction-status", std::move(params));
+}
+
+Json WalletHandler::on_adjustment(const Json& req) {
+    return make_err_json(req.at("traceId").as_string(), StatusCode::SC_INVALID_REQUEST, "on_adjustment not implemented");
 }
 
 void InMemoryWallet::add_account(
@@ -738,6 +780,54 @@ Json InMemoryWallet::on_rollback(const Json& req) {
     return ok_envelope(tid, u, it->second);
 }
 
+Json InMemoryWallet::on_adjustment(const Json& req) {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::string tid = req.at("traceId").as_string();
+    std::string tx_id = trim(req.at("transactionId").as_string());
+    std::string bet_id = trim(req.at("betId").as_string());
+    std::string u = trim(req.at("username").as_string());
+    std::string cur = to_upper(trim(req.at("currency").as_string()));
+    std::string dir = to_upper(trim(req.at("direction").as_string()));
+    std::string reason = trim(req.at("reasonCode").as_string());
+    std::string amt_str = req.at("amount").as_string();
+    if (tx_id.empty() || bet_id.empty() || u.empty() || cur.empty() || reason.empty() || amt_str.empty() || (dir != "CREDIT" && dir != "DEBIT")) {
+        return err_envelope(tid, StatusCode::SC_INVALID_REQUEST, "Missing or invalid adjustment fields");
+    }
+    auto it = accounts_.find(u);
+    if (it == accounts_.end()) return err_envelope(tid, StatusCode::SC_USER_NOT_EXISTS, "User missing");
+    if (it->second.currency != cur) return err_envelope(tid, StatusCode::SC_WRONG_CURRENCY, "Wrong currency");
+
+    std::string fp = adjustment_fingerprint(req);
+    auto tx_it = transactions_.find(tx_id);
+    if (tx_it != transactions_.end()) {
+        if (tx_it->second.type != "ADJUSTMENT" || tx_it->second.fp != fp) {
+            return err_envelope(tid, StatusCode::SC_TRANSACTION_DUPLICATED, "Conflict");
+        }
+        return ok_envelope(tid, u, it->second);
+    }
+    auto bet_it = deducted_bets_.find(bet_id);
+    if (bet_it == deducted_bets_.end()) {
+        return err_envelope(tid, StatusCode::SC_TRANSACTION_NOT_EXISTS, "Original betId missing");
+    }
+    if (bet_it->second.username != u || bet_it->second.currency != it->second.currency) {
+        return err_envelope(tid, StatusCode::SC_INVALID_REQUEST, "Adjustment mismatch");
+    }
+    std::string adj_units = decimal_to_ledger_units(amt_str, it->second.exponent, false);
+    if (compare_unsigned(adj_units, "0") <= 0) {
+        return err_envelope(tid, StatusCode::SC_INVALID_REQUEST, "Adjustment amount must be positive");
+    }
+    if (dir == "DEBIT") {
+        if (compare_unsigned(it->second.units, adj_units) < 0) {
+            return err_envelope(tid, StatusCode::SC_INSUFFICIENT_FUNDS, "Insufficient funds");
+        }
+        it->second.units = sub_unsigned(it->second.units, adj_units);
+    } else {
+        it->second.units = add_unsigned(it->second.units, adj_units);
+    }
+    transactions_[tx_id] = TxRec{"ADJUSTMENT", fp, false};
+    return ok_envelope(tid, u, it->second);
+}
+
 WebhookDispatcher::WebhookDispatcher(const Config& cfg, WalletHandler& wallet)
     : api_key_(trim(cfg.api_key)), hmac_secret_(cfg.hmac_secret), wallet_(wallet) {
     if (api_key_.empty()) throw SdkError("INVALID_CONFIG", "api_key is required");
@@ -781,6 +871,7 @@ Json WebhookDispatcher::handle(
         if (ends_with(clean, "/wallet/bet")) return wallet_.on_bet(parsed);
         if (ends_with(clean, "/wallet/bet_result")) return wallet_.on_bet_result(parsed);
         if (ends_with(clean, "/wallet/rollback")) return wallet_.on_rollback(parsed);
+        if (ends_with(clean, "/wallet/adjustment")) return wallet_.on_adjustment(parsed);
         return make_err_json(trace_id, StatusCode::SC_INVALID_REQUEST, "Unknown route");
     } catch (const SdkError& e) {
         std::string st = (e.code.rfind("SC_", 0) == 0) ? e.code : StatusCode::SC_INVALID_REQUEST;

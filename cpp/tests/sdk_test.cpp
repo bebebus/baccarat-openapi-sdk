@@ -90,6 +90,11 @@ int main() {
     require_eq(rollback_fingerprint(rb.at("retrySameBusiness")), rb.at("expectedFingerprint").as_string(), "rb:retry");
     require_eq(rollback_fingerprint(rb.at("conflictDifferentAmount")), rb.at("conflictFingerprint").as_string(), "rb:conflict");
 
+    const Json& adj = idem.at("adjustment");
+    require_eq(adjustment_fingerprint(adj.at("initial")), adj.at("expectedFingerprint").as_string(), "adj:init");
+    require_eq(adjustment_fingerprint(adj.at("retrySameBusiness")), adj.at("expectedFingerprint").as_string(), "adj:retry");
+    require_eq(adjustment_fingerprint(adj.at("conflictDifferentDirection")), adj.at("conflictFingerprint").as_string(), "adj:conflict");
+
     // 3. Money & status vectors
     for (const auto& m : doc.at("moneyVectors").at("valid").as_array()) {
         int exp = static_cast<int>(m.at("displayExponent").as_int());
@@ -315,6 +320,13 @@ int main() {
 
     wallet.set_disabled("player_9527", true);
     require_eq(send_wb("/wallet/bet_result", stl.at("initial")).at("data").at("balance").as_string(), "1100.00", "wb:settle");
+    require_eq(send_wb("/wallet/adjustment", adj.at("initial")).at("data").at("balance").as_string(), "1120.00", "wb:adjCredit");
+    require_eq(send_wb("/wallet/adjustment", adj.at("retrySameBusiness")).at("data").at("balance").as_string(), "1120.00", "wb:adjReplay");
+    require_eq(send_wb("/wallet/adjustment", adj.at("conflictDifferentDirection")).at("status").as_string(), "SC_TRANSACTION_DUPLICATED", "wb:adjConflict");
+    Json debit_adj = adj.at("initial");
+    debit_adj.set("transactionId", Json("adj_debit_cpp"));
+    debit_adj.set("direction", Json("DEBIT"));
+    require_eq(send_wb("/wallet/adjustment", debit_adj).at("data").at("balance").as_string(), "1100.00", "wb:adjDebit");
 
     Json unknown_rb = rb.at("initial");
     unknown_rb.set("transactionId", Json("rb_b2btkt000000000000000000000000"));

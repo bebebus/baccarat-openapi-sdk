@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.2.0)."""
+"""Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.4.0)."""
 
 from __future__ import annotations
 
@@ -49,10 +49,15 @@ class StatusCode:
     SC_OPERATOR_TIMEOUT = "SC_OPERATOR_TIMEOUT"
     SC_UNDER_MAINTENANCE = "SC_UNDER_MAINTENANCE"
     SC_GAME_DISABLED = "SC_GAME_DISABLED"
+    SC_RATE_LIMITED = "SC_RATE_LIMITED"
 
 
 _RETRYABLE_STATUSES = frozenset(
-    {StatusCode.SC_TRANSACTION_STILL_PROCESSING, StatusCode.SC_OPERATOR_TIMEOUT}
+    {
+        StatusCode.SC_TRANSACTION_STILL_PROCESSING,
+        StatusCode.SC_OPERATOR_TIMEOUT,
+        StatusCode.SC_RATE_LIMITED,
+    }
 )
 
 
@@ -258,6 +263,24 @@ def rollback_fingerprint(payload: Dict[str, Any]) -> str:
     )
 
 
+def adjustment_fingerprint(payload: Dict[str, Any]) -> str:
+    return encode_tuple_fingerprint(
+        "wallet/adjustment",
+        [
+            payload.get("transactionId", ""),
+            payload.get("username", ""),
+            payload.get("betId", ""),
+            payload.get("externalTransactionId", ""),
+            payload.get("roundId", ""),
+            payload.get("currency", ""),
+            payload.get("gameCode", ""),
+            payload.get("direction", ""),
+            payload.get("amount", ""),
+            payload.get("reasonCode", ""),
+        ],
+    )
+
+
 # ── 4. Configuration & S2S Client (/operator/v1/*) ──────────────────────────
 
 
@@ -369,26 +392,36 @@ class Client:
             "data": parsed.get("data"),
         }
 
+    def ping(self, *, trace_id: Optional[str] = None) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        if trace_id is not None:
+            payload["traceId"] = trace_id
+        return self._post_signed("/operator/v1/ping", payload)
+
     def create_game_url(
         self,
         *,
         username: str,
-        table_id: str,
         platform: str,
         currency: str,
         lobby_url: str,
         ip_address: str,
+        table_id: Optional[str] = None,
+        entry_mode: Optional[str] = None,
         language: Optional[str] = None,
         trace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "username": username,
-            "tableId": table_id,
             "platform": platform,
             "currency": currency,
             "lobbyUrl": lobby_url,
             "ipAddress": ip_address,
         }
+        if table_id is not None:
+            payload["tableId"] = table_id
+        if entry_mode is not None:
+            payload["entryMode"] = entry_mode
         if language is not None:
             payload["language"] = language
         if trace_id is not None:
@@ -414,17 +447,82 @@ class Client:
             payload["traceId"] = trace_id
         return self._post_signed("/operator/v1/game/tables", payload)
 
-    def terminate_sessions(self, *, username: str, trace_id: Optional[str] = None) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {"username": username}
+    def terminate_sessions(
+        self,
+        *,
+        username: Optional[str] = None,
+        scope: Optional[str] = None,
+        trace_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        if username is not None:
+            payload["username"] = username
+        if scope is not None:
+            payload["scope"] = scope
         if trace_id is not None:
             payload["traceId"] = trace_id
         return self._post_signed("/operator/v1/game/terminate", payload)
+
+    def update_player_status(
+        self,
+        *,
+        username: str,
+        status: Optional[str] = None,
+        betting_enabled: Optional[bool] = None,
+        reason: Optional[str] = None,
+        trace_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"username": username}
+        if status is not None:
+            payload["status"] = status
+        if betting_enabled is not None:
+            payload["bettingEnabled"] = betting_enabled
+        if reason is not None:
+            payload["reason"] = reason
+        if trace_id is not None:
+            payload["traceId"] = trace_id
+        return self._post_signed("/operator/v1/player/status", payload)
+
+    def update_player_limits(
+        self,
+        *,
+        username: str,
+        currency: str,
+        min_bet: Optional[str] = None,
+        max_bet: Optional[str] = None,
+        max_table_round: Optional[str] = None,
+        max_user_day: Optional[str] = None,
+        max_loss_per_day: Optional[str] = None,
+        custom_chips: Optional[List[str]] = None,
+        trace_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"username": username, "currency": currency}
+        if min_bet is not None:
+            payload["minBet"] = min_bet
+        if max_bet is not None:
+            payload["maxBet"] = max_bet
+        if max_table_round is not None:
+            payload["maxTableRound"] = max_table_round
+        if max_user_day is not None:
+            payload["maxUserDay"] = max_user_day
+        if max_loss_per_day is not None:
+            payload["maxLossPerDay"] = max_loss_per_day
+        if custom_chips is not None:
+            payload["customChips"] = custom_chips
+        if trace_id is not None:
+            payload["traceId"] = trace_id
+        return self._post_signed("/operator/v1/player/limits", payload)
 
     def list_transactions(
         self,
         *,
         from_time: int,
         to_time: int,
+        time_type: Optional[str] = None,
+        status: Optional[Union[int, str]] = None,
+        username: Optional[str] = None,
+        table_id: Optional[str] = None,
+        round_id: Optional[str] = None,
         page_no: Optional[int] = None,
         page_size: Optional[int] = None,
         trace_id: Optional[str] = None,
@@ -432,6 +530,16 @@ class Client:
         if isinstance(from_time, bool) or isinstance(to_time, bool) or not isinstance(from_time, int) or not isinstance(to_time, int) or from_time < 0 or to_time < from_time:
             raise BaccaratSdkError("Invalid [from_time, to_time] window", "INVALID_ARGUMENT")
         payload: Dict[str, Any] = {"fromTime": from_time, "toTime": to_time}
+        if time_type is not None:
+            payload["timeType"] = time_type
+        if status is not None:
+            payload["status"] = status
+        if username is not None:
+            payload["username"] = username
+        if table_id is not None:
+            payload["tableId"] = table_id
+        if round_id is not None:
+            payload["roundId"] = round_id
         if page_no is not None:
             payload["pageNo"] = page_no
         if page_size is not None:
@@ -460,19 +568,72 @@ class Client:
         self,
         *,
         bet_id: str,
-        from_time: int,
-        to_time: int,
+        from_time: Optional[int] = None,
+        to_time: Optional[int] = None,
         trace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        if not isinstance(bet_id, str) or not bet_id.strip() or isinstance(from_time, bool) or isinstance(to_time, bool) or not isinstance(from_time, int) or not isinstance(to_time, int):
-            raise BaccaratSdkError("bet_id, from_time, and to_time are required", "INVALID_ARGUMENT")
-        span = to_time - from_time
-        if from_time < 0 or span < 0 or span > MAX_DETAIL_WINDOW_MS:
-            raise BaccaratSdkError("Detail query window must satisfy 0 <= to_time - from_time <= 604800000", "INVALID_ARGUMENT")
-        payload: Dict[str, Any] = {"betId": bet_id, "fromTime": from_time, "toTime": to_time}
+        if not isinstance(bet_id, str) or not bet_id.strip():
+            raise BaccaratSdkError("bet_id is required", "INVALID_ARGUMENT")
+        payload: Dict[str, Any] = {"betId": bet_id}
+        if from_time is not None or to_time is not None:
+            if isinstance(from_time, bool) or isinstance(to_time, bool) or not isinstance(from_time, int) or not isinstance(to_time, int):
+                raise BaccaratSdkError("from_time and to_time must both be ints when specified", "INVALID_ARGUMENT")
+            span = to_time - from_time
+            if from_time < 0 or span < 0 or span > MAX_DETAIL_WINDOW_MS:
+                raise BaccaratSdkError("Detail query window must satisfy 0 <= to_time - from_time <= 604800000", "INVALID_ARGUMENT")
+            payload["fromTime"] = from_time
+            payload["toTime"] = to_time
         if trace_id is not None:
             payload["traceId"] = trace_id
         return self._post_signed("/operator/v1/transaction/detail", payload)
+
+    def list_unsettled_transactions(
+        self,
+        *,
+        from_time: Optional[int] = None,
+        to_time: Optional[int] = None,
+        username: Optional[str] = None,
+        table_id: Optional[str] = None,
+        page_no: Optional[int] = None,
+        page_size: Optional[int] = None,
+        trace_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        if from_time is not None:
+            payload["fromTime"] = from_time
+        if to_time is not None:
+            payload["toTime"] = to_time
+        if username is not None:
+            payload["username"] = username
+        if table_id is not None:
+            payload["tableId"] = table_id
+        if page_no is not None:
+            payload["pageNo"] = page_no
+        if page_size is not None:
+            payload["pageSize"] = page_size
+        if trace_id is not None:
+            payload["traceId"] = trace_id
+        return self._post_signed("/operator/v1/transaction/unsettled", payload)
+
+    def get_wallet_transaction_status(
+        self,
+        *,
+        transaction_id: Optional[str] = None,
+        bet_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        tx_s = (transaction_id or "").strip() if isinstance(transaction_id, str) else ""
+        bet_s = (bet_id or "").strip() if isinstance(bet_id, str) else ""
+        if not tx_s and not bet_s:
+            raise BaccaratSdkError("Either transaction_id or bet_id is required", "INVALID_ARGUMENT")
+        payload: Dict[str, Any] = {}
+        if tx_s:
+            payload["transactionId"] = tx_s
+        if bet_s:
+            payload["betId"] = bet_s
+        if trace_id is not None:
+            payload["traceId"] = trace_id
+        return self._post_signed("/operator/v1/wallet/transaction-status", payload)
 
 
 # ── 5. Seamless Wallet Webhook Dispatcher & Reference In-Memory Wallet ──────
@@ -652,6 +813,43 @@ class InMemoryWallet:
         self.transactions[tx_id] = {"type": "ROLLBACK", "fp": fp, "empty": False}
         return self._ok(trace_id, username, acct)
 
+    def on_adjustment(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        trace_id = req.get("traceId") if isinstance(req.get("traceId"), str) else ""
+        tx_id = _non_empty_str(req.get("transactionId"))
+        bet_id = _non_empty_str(req.get("betId"))
+        username = _non_empty_str(req.get("username"))
+        currency = _non_empty_str(req.get("currency"))
+        direction_raw = _non_empty_str(req.get("direction"))
+        direction = direction_raw.upper() if direction_raw else ""
+        reason_code = _non_empty_str(req.get("reasonCode"))
+        if not tx_id or not bet_id or not username or not currency or not reason_code or req.get("amount") is None or direction not in ("CREDIT", "DEBIT"):
+            return {"traceId": trace_id, "status": StatusCode.SC_INVALID_REQUEST, "message": "Missing or invalid adjustment fields"}
+        acct, err = self._check_acct(username, currency)
+        if err or acct is None:
+            return {"traceId": trace_id, "status": err or StatusCode.SC_USER_NOT_EXISTS, "message": "Account/currency check failed"}
+        fp = adjustment_fingerprint(req)
+        prior = self.transactions.get(tx_id)
+        if prior:
+            if prior["type"] != "ADJUSTMENT" or prior["fp"] != fp:
+                return {"traceId": trace_id, "status": StatusCode.SC_TRANSACTION_DUPLICATED, "message": "Conflicting adjustment payload"}
+            return self._ok(trace_id, username, acct)
+        orig = self.deducted_bets.get(bet_id)
+        if orig is None:
+            return {"traceId": trace_id, "status": StatusCode.SC_TRANSACTION_NOT_EXISTS, "message": "Original betId not found"}
+        if orig["username"] != username or orig["currency"] != acct["currency"]:
+            return {"traceId": trace_id, "status": StatusCode.SC_INVALID_REQUEST, "message": "Adjustment does not match original bet"}
+        adj_units = decimal_to_ledger_units(req["amount"], acct["exponent"])
+        if adj_units <= 0:
+            return {"traceId": trace_id, "status": StatusCode.SC_INVALID_REQUEST, "message": "Adjustment amount must be positive"}
+        if direction == "DEBIT":
+            if acct["balance_units"] < adj_units:
+                return {"traceId": trace_id, "status": StatusCode.SC_INSUFFICIENT_FUNDS, "message": "Insufficient funds"}
+            acct["balance_units"] -= adj_units
+        else:
+            acct["balance_units"] += adj_units
+        self.transactions[tx_id] = {"type": "ADJUSTMENT", "fp": fp, "empty": False}
+        return self._ok(trace_id, username, acct)
+
 
 def _extract_trace_hint(raw_bytes: bytes) -> str:
     m = _TRACE_HINT_RE.search(raw_bytes[:1024])
@@ -715,6 +913,11 @@ class WebhookDispatcher:
                 return 200, self.wallet.on_bet_result(parsed)
             if clean.endswith("/wallet/rollback"):
                 return 200, self.wallet.on_rollback(parsed)
+            if clean.endswith("/wallet/adjustment"):
+                adj_fn = getattr(self.wallet, "on_adjustment", None)
+                if not callable(adj_fn):
+                    return 200, {"traceId": trace_id, "status": StatusCode.SC_INVALID_REQUEST, "message": "on_adjustment not implemented"}
+                return 200, adj_fn(parsed)
             return 200, {"traceId": trace_id, "status": StatusCode.SC_INVALID_REQUEST, "message": f"Unknown route {clean}"}
         except BaccaratSdkError as exc:
             st = exc.code if exc.code.startswith("SC_") else StatusCode.SC_INVALID_REQUEST

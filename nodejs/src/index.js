@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Zero-dependency Node.js SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.2.0).
+// Zero-dependency Node.js SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.4.0).
 
 import crypto from 'node:crypto';
 import http from 'node:http';
@@ -34,11 +34,13 @@ export const StatusCode = Object.freeze({
   SC_OPERATOR_TIMEOUT: 'SC_OPERATOR_TIMEOUT',
   SC_UNDER_MAINTENANCE: 'SC_UNDER_MAINTENANCE',
   SC_GAME_DISABLED: 'SC_GAME_DISABLED',
+  SC_RATE_LIMITED: 'SC_RATE_LIMITED',
 });
 
 const RETRYABLE_STATUSES = new Set([
   StatusCode.SC_TRANSACTION_STILL_PROCESSING,
   StatusCode.SC_OPERATOR_TIMEOUT,
+  StatusCode.SC_RATE_LIMITED,
 ]);
 
 export function isRetryableStatus(status) {
@@ -246,6 +248,21 @@ export function rollbackFingerprint(payload) {
   ]);
 }
 
+export function adjustmentFingerprint(payload) {
+  return encodeTupleFingerprint('wallet/adjustment', [
+    payload?.transactionId ?? '',
+    payload?.username ?? '',
+    payload?.betId ?? '',
+    payload?.externalTransactionId ?? '',
+    payload?.roundId ?? '',
+    payload?.currency ?? '',
+    payload?.gameCode ?? '',
+    payload?.direction ?? '',
+    payload?.amount ?? '',
+    payload?.reasonCode ?? '',
+  ]);
+}
+
 // ── 4. Client Configuration & S2S Client (/operator/v1/*) ───────────────────
 
 export class Config {
@@ -414,6 +431,10 @@ export class Client {
     };
   }
 
+  ping(params = {}) {
+    return this.postSigned('/operator/v1/ping', params);
+  }
+
   createGameUrl(params) {
     return this.postSigned('/operator/v1/game/url', params);
   }
@@ -422,8 +443,16 @@ export class Client {
     return this.postSigned('/operator/v1/game/tables', params);
   }
 
-  terminateSessions(params) {
+  terminateSessions(params = {}) {
     return this.postSigned('/operator/v1/game/terminate', params);
+  }
+
+  updatePlayerStatus(params) {
+    return this.postSigned('/operator/v1/player/status', params);
+  }
+
+  updatePlayerLimits(params) {
+    return this.postSigned('/operator/v1/player/limits', params);
   }
 
   listTransactions(params) {
@@ -436,14 +465,14 @@ export class Client {
     return this.postSigned('/operator/v1/transaction/list', params);
   }
 
-  async listAllTransactions({ fromTime, toTime, pageSize = 2000 }) {
+  async listAllTransactions({ fromTime, toTime, pageSize = 2000, ...rest }) {
     if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > MAX_PAGE_SIZE) {
       throw new BaccaratSdkError(`pageSize must be an integer in 1..${MAX_PAGE_SIZE}`, 'INVALID_ARGUMENT');
     }
     const all = [];
     let pageNo = 1;
     while (true) {
-      const res = await this.listTransactions({ fromTime, toTime, pageNo, pageSize });
+      const res = await this.listTransactions({ ...rest, fromTime, toTime, pageNo, pageSize });
       const rows = Array.isArray(res.data?.transactions) ? res.data.transactions : [];
       all.push(...rows);
       const total = Number(res.data?.total ?? all.length);
@@ -454,14 +483,32 @@ export class Client {
   }
 
   getTransactionDetail(params) {
-    if (params == null || typeof params.betId !== 'string' || !params.betId.trim() || typeof params.fromTime !== 'number' || typeof params.toTime !== 'number') {
-      throw new BaccaratSdkError('betId, fromTime, and toTime are required', 'INVALID_ARGUMENT');
+    if (params == null || typeof params.betId !== 'string' || !params.betId.trim()) {
+      throw new BaccaratSdkError('betId is required', 'INVALID_ARGUMENT');
     }
-    const span = params.toTime - params.fromTime;
-    if (!Number.isInteger(params.fromTime) || !Number.isInteger(params.toTime) || params.fromTime < 0 || span < 0 || span > MAX_DETAIL_WINDOW_MS) {
-      throw new BaccaratSdkError('Detail query window must satisfy 0 <= toTime - fromTime <= 604800000 (7 days)', 'INVALID_ARGUMENT');
+    if (params.fromTime != null || params.toTime != null) {
+      if (typeof params.fromTime !== 'number' || typeof params.toTime !== 'number') {
+        throw new BaccaratSdkError('fromTime and toTime must both be epoch ms integers when specified', 'INVALID_ARGUMENT');
+      }
+      const span = params.toTime - params.fromTime;
+      if (!Number.isInteger(params.fromTime) || !Number.isInteger(params.toTime) || params.fromTime < 0 || span < 0 || span > MAX_DETAIL_WINDOW_MS) {
+        throw new BaccaratSdkError('Detail query window must satisfy 0 <= toTime - fromTime <= 604800000 (7 days)', 'INVALID_ARGUMENT');
+      }
     }
     return this.postSigned('/operator/v1/transaction/detail', params);
+  }
+
+  listUnsettledTransactions(params = {}) {
+    return this.postSigned('/operator/v1/transaction/unsettled', params);
+  }
+
+  getWalletTransactionStatus(params) {
+    const txId = typeof params?.transactionId === 'string' ? params.transactionId.trim() : '';
+    const betId = typeof params?.betId === 'string' ? params.betId.trim() : '';
+    if (!txId && !betId) {
+      throw new BaccaratSdkError('Either transactionId or betId is required', 'INVALID_ARGUMENT');
+    }
+    return this.postSigned('/operator/v1/wallet/transaction-status', params);
   }
 }
 
@@ -662,6 +709,51 @@ export class InMemoryWallet {
     this.transactions.set(txId, { fingerprint: fp, betId, type: 'ROLLBACK', emptyRollback: false });
     return this._okEnvelope(traceId, username, acct);
   }
+
+  async onAdjustment(req) {
+    const traceId = typeof req?.traceId === 'string' ? req.traceId : '';
+    const txId = requireNonEmptyStr(req?.transactionId);
+    const betId = requireNonEmptyStr(req?.betId);
+    const username = requireNonEmptyStr(req?.username);
+    const currency = requireNonEmptyStr(req?.currency);
+    const direction = requireNonEmptyStr(req?.direction)?.toUpperCase();
+    const reasonCode = requireNonEmptyStr(req?.reasonCode);
+    if (!txId || !betId || !username || !currency || !reasonCode || req?.amount == null || (direction !== 'CREDIT' && direction !== 'DEBIT')) {
+      return { traceId, status: StatusCode.SC_INVALID_REQUEST, message: 'Missing or invalid adjustment fields' };
+    }
+    const check = this._requireAccountAndCurrency(username, currency);
+    if (check.error) return { traceId, status: check.error, message: check.message };
+    const { acct } = check;
+    const fp = adjustmentFingerprint(req);
+    const prior = this.transactions.get(txId);
+    if (prior) {
+      if (prior.type !== 'ADJUSTMENT' || prior.fingerprint !== fp) {
+        return { traceId, status: StatusCode.SC_TRANSACTION_DUPLICATED, message: 'Conflicting adjustment payload' };
+      }
+      return this._okEnvelope(traceId, username, acct);
+    }
+    const origBet = this.deductedBets.get(betId);
+    if (!origBet) {
+      return { traceId, status: StatusCode.SC_TRANSACTION_NOT_EXISTS, message: 'Original betId not found' };
+    }
+    if (origBet.username !== username || origBet.currency !== acct.currency) {
+      return { traceId, status: StatusCode.SC_INVALID_REQUEST, message: 'Adjustment does not match original bet account' };
+    }
+    const adjUnits = decimalToLedgerUnits(req.amount, acct.exponent);
+    if (adjUnits <= 0n) {
+      return { traceId, status: StatusCode.SC_INVALID_REQUEST, message: 'Adjustment amount must be positive' };
+    }
+    if (direction === 'DEBIT') {
+      if (acct.balanceUnits < adjUnits) {
+        return { traceId, status: StatusCode.SC_INSUFFICIENT_FUNDS, message: 'Insufficient funds for debit adjustment' };
+      }
+      acct.balanceUnits -= adjUnits;
+    } else {
+      acct.balanceUnits += adjUnits;
+    }
+    this.transactions.set(txId, { fingerprint: fp, betId, type: 'ADJUSTMENT', emptyRollback: false });
+    return this._okEnvelope(traceId, username, acct);
+  }
 }
 
 function extractSafeTraceHint(rawBuf) {
@@ -742,6 +834,12 @@ export class WebhookDispatcher {
         responseBody = await this.wallet.onBetResult(parsed);
       } else if (cleanPath.endsWith('/wallet/rollback')) {
         responseBody = await this.wallet.onRollback(parsed);
+      } else if (cleanPath.endsWith('/wallet/adjustment')) {
+        if (typeof this.wallet.onAdjustment !== 'function') {
+          responseBody = { traceId, status: StatusCode.SC_INVALID_REQUEST, message: 'Wallet handler does not implement onAdjustment' };
+        } else {
+          responseBody = await this.wallet.onAdjustment(parsed);
+        }
       } else {
         responseBody = { traceId, status: StatusCode.SC_INVALID_REQUEST, message: `Unsupported wallet route: ${cleanPath}` };
       }

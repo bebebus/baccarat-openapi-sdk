@@ -55,6 +55,13 @@ type testVectorsDoc struct {
 			ExpectedFingerprint     string                `json:"expectedFingerprint"`
 			ConflictFingerprint     string                `json:"conflictFingerprint"`
 		} `json:"rollback"`
+		Adjustment struct {
+			Initial                    WalletAdjustmentRequest `json:"initial"`
+			RetrySameBusiness          WalletAdjustmentRequest `json:"retrySameBusiness"`
+			ConflictDifferentDirection WalletAdjustmentRequest `json:"conflictDifferentDirection"`
+			ExpectedFingerprint        string                  `json:"expectedFingerprint"`
+			ConflictFingerprint        string                  `json:"conflictFingerprint"`
+		} `json:"adjustment"`
 	} `json:"idempotencyVectors"`
 	MoneyVectors struct {
 		Valid []struct {
@@ -130,6 +137,11 @@ func TestCrossLanguageGoldenVectors(t *testing.T) {
 		RollbackFingerprint(idem.Rollback.RetrySameBusiness) != idem.Rollback.ExpectedFingerprint ||
 		RollbackFingerprint(idem.Rollback.ConflictDifferentAmount) != idem.Rollback.ConflictFingerprint {
 		t.Fatal("rollback fingerprint mismatch")
+	}
+	if AdjustmentFingerprint(idem.Adjustment.Initial) != idem.Adjustment.ExpectedFingerprint ||
+		AdjustmentFingerprint(idem.Adjustment.RetrySameBusiness) != idem.Adjustment.ExpectedFingerprint ||
+		AdjustmentFingerprint(idem.Adjustment.ConflictDifferentDirection) != idem.Adjustment.ConflictFingerprint {
+		t.Fatal("adjustment fingerprint mismatch")
 	}
 
 	for _, m := range doc.MoneyVectors.Valid {
@@ -278,6 +290,21 @@ func TestS2SClientAndWebhookHTTPServer(t *testing.T) {
 	wallet.SetDisabled("player_9527", true)
 	if r := postWb("/wallet/bet_result", doc.IdempotencyVectors.BetResult.Initial); r.Status != SC_OK || r.Data.Balance != "1100.00" {
 		t.Fatalf("settle after disable failed: %+v", r)
+	}
+	if r := postWb("/wallet/adjustment", doc.IdempotencyVectors.Adjustment.Initial); r.Status != SC_OK || r.Data.Balance != "1120.00" {
+		t.Fatalf("adjustment credit failed: %+v", r)
+	}
+	if r := postWb("/wallet/adjustment", doc.IdempotencyVectors.Adjustment.RetrySameBusiness); r.Status != SC_OK || r.Data.Balance != "1120.00" {
+		t.Fatalf("adjustment replay failed: %+v", r)
+	}
+	if r := postWb("/wallet/adjustment", doc.IdempotencyVectors.Adjustment.ConflictDifferentDirection); r.Status != SC_TRANSACTION_DUPLICATED {
+		t.Fatalf("adjustment conflict failed: %+v", r)
+	}
+	debitAdj := doc.IdempotencyVectors.Adjustment.Initial
+	debitAdj.TransactionID = "adj_debit_go"
+	debitAdj.Direction = "DEBIT"
+	if r := postWb("/wallet/adjustment", debitAdj); r.Status != SC_OK || r.Data.Balance != "1100.00" {
+		t.Fatalf("adjustment debit failed: %+v", r)
 	}
 	unknownRb := doc.IdempotencyVectors.Rollback.Initial
 	unknownRb.TransactionID = "rb_b2btkt000000000000000000000000"

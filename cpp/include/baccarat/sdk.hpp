@@ -38,6 +38,7 @@ constexpr const char* SC_TRANSACTION_STILL_PROCESSING = "SC_TRANSACTION_STILL_PR
 constexpr const char* SC_OPERATOR_TIMEOUT = "SC_OPERATOR_TIMEOUT";
 constexpr const char* SC_UNDER_MAINTENANCE = "SC_UNDER_MAINTENANCE";
 constexpr const char* SC_GAME_DISABLED = "SC_GAME_DISABLED";
+constexpr const char* SC_RATE_LIMITED = "SC_RATE_LIMITED";
 } // namespace StatusCode
 
 bool is_retryable_status(const std::string& status);
@@ -90,6 +91,7 @@ std::string encode_tuple_fingerprint(const std::string& domain, const std::vecto
 std::string bet_fingerprint(const Json& payload);
 std::string bet_result_fingerprint(const Json& payload);
 std::string rollback_fingerprint(const Json& payload);
+std::string adjustment_fingerprint(const Json& payload);
 
 // 4. Config & S2S Client
 struct Config {
@@ -107,12 +109,17 @@ public:
     explicit Client(const Config& cfg);
 
     Json post_signed(const std::string& route_path, Json payload) const;
+    Json ping(Json params = Json::object()) const;
     Json create_game_url(Json params) const;
     Json list_tables(Json params = Json::object()) const;
-    Json terminate_sessions(Json params) const;
+    Json terminate_sessions(Json params = Json::object()) const;
+    Json update_player_status(Json params) const;
+    Json update_player_limits(Json params) const;
     Json list_transactions(Json params) const;
     std::vector<Json> list_all_transactions(int64_t from_time, int64_t to_time, int page_size = 2000) const;
     Json get_transaction_detail(Json params) const;
+    Json list_unsettled_transactions(Json params = Json::object()) const;
+    Json get_wallet_transaction_status(Json params) const;
 
 private:
     std::string api_key_;
@@ -129,6 +136,7 @@ public:
     virtual Json on_bet(const Json& req) = 0;
     virtual Json on_bet_result(const Json& req) = 0;
     virtual Json on_rollback(const Json& req) = 0;
+    virtual Json on_adjustment(const Json& req);
 };
 
 class InMemoryWallet : public WalletHandler {
@@ -146,6 +154,7 @@ public:
     Json on_bet(const Json& req) override;
     Json on_bet_result(const Json& req) override;
     Json on_rollback(const Json& req) override;
+    Json on_adjustment(const Json& req) override;
 
 private:
     struct Account {

@@ -120,6 +120,12 @@ final class Client
     }
 
     /** @param array<string, mixed> $params @return array<string, mixed> */
+    public function ping(array $params = []): array
+    {
+        return $this->postSigned('/operator/v1/ping', $params);
+    }
+
+    /** @param array<string, mixed> $params @return array<string, mixed> */
     public function createGameUrl(array $params): array
     {
         return $this->postSigned('/operator/v1/game/url', $params);
@@ -132,9 +138,21 @@ final class Client
     }
 
     /** @param array<string, mixed> $params @return array<string, mixed> */
-    public function terminateSessions(array $params): array
+    public function terminateSessions(array $params = []): array
     {
         return $this->postSigned('/operator/v1/game/terminate', $params);
+    }
+
+    /** @param array<string, mixed> $params @return array<string, mixed> */
+    public function updatePlayerStatus(array $params): array
+    {
+        return $this->postSigned('/operator/v1/player/status', $params);
+    }
+
+    /** @param array<string, mixed> $params @return array<string, mixed> */
+    public function updatePlayerLimits(array $params): array
+    {
+        return $this->postSigned('/operator/v1/player/limits', $params);
     }
 
     /** @param array<string, mixed> $params @return array<string, mixed> */
@@ -182,15 +200,37 @@ final class Client
     public function getTransactionDetail(array $params): array
     {
         $betId = trim((string) ($params['betId'] ?? ''));
+        if ($betId === '') {
+            throw new BaccaratSdkException('betId is required', 'INVALID_ARGUMENT');
+        }
         $from = $params['fromTime'] ?? null;
         $to = $params['toTime'] ?? null;
-        if ($betId === '' || !is_int($from) || !is_int($to)) {
-            throw new BaccaratSdkException('betId, fromTime, and toTime are required', 'INVALID_ARGUMENT');
-        }
-        $span = $to - $from;
-        if ($from < 0 || $span < 0 || $span > self::MAX_DETAIL_WINDOW_MS) {
-            throw new BaccaratSdkException('Detail window must satisfy 0 <= toTime - fromTime <= 604800000', 'INVALID_ARGUMENT');
+        if ($from !== null || $to !== null) {
+            if (!is_int($from) || !is_int($to)) {
+                throw new BaccaratSdkException('fromTime and toTime must both be integers when specified', 'INVALID_ARGUMENT');
+            }
+            $span = $to - $from;
+            if ($from < 0 || $span < 0 || $span > self::MAX_DETAIL_WINDOW_MS) {
+                throw new BaccaratSdkException('Detail window must satisfy 0 <= toTime - fromTime <= 604800000', 'INVALID_ARGUMENT');
+            }
         }
         return $this->postSigned('/operator/v1/transaction/detail', $params);
+    }
+
+    /** @param array<string, mixed> $params @return array<string, mixed> */
+    public function listUnsettledTransactions(array $params = []): array
+    {
+        return $this->postSigned('/operator/v1/transaction/unsettled', $params);
+    }
+
+    /** @param array<string, mixed> $params @return array<string, mixed> */
+    public function getWalletTransactionStatus(array $params): array
+    {
+        $txId = trim((string) ($params['transactionId'] ?? ''));
+        $betId = trim((string) ($params['betId'] ?? ''));
+        if ($txId === '' && $betId === '') {
+            throw new BaccaratSdkException('Either transactionId or betId is required', 'INVALID_ARGUMENT');
+        }
+        return $this->postSigned('/operator/v1/wallet/transaction-status', $params);
     }
 }

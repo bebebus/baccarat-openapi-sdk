@@ -53,6 +53,10 @@ assertEq(Idempotency::rollbackFingerprint($idem['rollback']['initial']), $idem['
 assertEq(Idempotency::rollbackFingerprint($idem['rollback']['retrySameBusiness']), $idem['rollback']['expectedFingerprint'], 'rb:retry');
 assertEq(Idempotency::rollbackFingerprint($idem['rollback']['conflictDifferentAmount']), $idem['rollback']['conflictFingerprint'], 'rb:conflict');
 
+assertEq(Idempotency::adjustmentFingerprint($idem['adjustment']['initial']), $idem['adjustment']['expectedFingerprint'], 'adj:init');
+assertEq(Idempotency::adjustmentFingerprint($idem['adjustment']['retrySameBusiness']), $idem['adjustment']['expectedFingerprint'], 'adj:retry');
+assertEq(Idempotency::adjustmentFingerprint($idem['adjustment']['conflictDifferentDirection']), $idem['adjustment']['conflictFingerprint'], 'adj:conflict');
+
 // 3. Money & status vectors
 foreach ($vectors['moneyVectors']['valid'] as $m) {
     $units = Money::decimalToLedgerUnits($m['raw'], $m['displayExponent'], $m['allowNegative']);
@@ -150,6 +154,10 @@ assertEq($send('/wallet/bet', $idem['bet']['conflictDifferentAmount'])['status']
 
 $wallet->setDisabled('player_9527', true);
 assertEq($send('/wallet/bet_result', $idem['betResult']['initial'])['data']['balance'], '1100.00', 'wb:settle');
+assertEq($send('/wallet/adjustment', $idem['adjustment']['initial'])['data']['balance'], '1120.00', 'wb:adjCredit');
+assertEq($send('/wallet/adjustment', $idem['adjustment']['retrySameBusiness'])['data']['balance'], '1120.00', 'wb:adjReplay');
+assertEq($send('/wallet/adjustment', $idem['adjustment']['conflictDifferentDirection'])['status'], 'SC_TRANSACTION_DUPLICATED', 'wb:adjConflict');
+assertEq($send('/wallet/adjustment', array_merge($idem['adjustment']['initial'], ['transactionId' => 'adj_debit_php', 'direction' => 'DEBIT', 'amount' => '20.00']))['data']['balance'], '1100.00', 'wb:adjDebit');
 $unknownRb = array_merge($idem['rollback']['initial'], [
     'transactionId' => 'rb_b2btkt000000000000000000000000',
     'betId' => 'b2btkt000000000000000000000000',

@@ -60,11 +60,14 @@ public final class BaccaratSdk {
         public static final String SC_OPERATOR_TIMEOUT = "SC_OPERATOR_TIMEOUT";
         public static final String SC_UNDER_MAINTENANCE = "SC_UNDER_MAINTENANCE";
         public static final String SC_GAME_DISABLED = "SC_GAME_DISABLED";
+        public static final String SC_RATE_LIMITED = "SC_RATE_LIMITED";
 
         public static boolean isRetryable(String status) {
             if (status == null) return false;
             String s = status.trim();
-            return SC_TRANSACTION_STILL_PROCESSING.equals(s) || SC_OPERATOR_TIMEOUT.equals(s);
+            return SC_TRANSACTION_STILL_PROCESSING.equals(s)
+                    || SC_OPERATOR_TIMEOUT.equals(s)
+                    || SC_RATE_LIMITED.equals(s);
         }
     }
 
@@ -260,6 +263,14 @@ public final class BaccaratSdk {
         ));
     }
 
+    public static String adjustmentFingerprint(Map<String, Object> p) {
+        return encodeTupleFingerprint("wallet/adjustment", List.of(
+                str(p, "transactionId"), str(p, "username"), str(p, "betId"), str(p, "externalTransactionId"),
+                str(p, "roundId"), str(p, "currency"), str(p, "gameCode"), str(p, "direction"),
+                str(p, "amount"), str(p, "reasonCode")
+        ));
+    }
+
     // ── 4. Config & S2S Client (/operator/v1/*) ─────────────────────────────
 
     public static final class Config {
@@ -367,6 +378,10 @@ public final class BaccaratSdk {
             return out;
         }
 
+        public Map<String, Object> ping(Map<String, Object> params) {
+            return postSigned("/operator/v1/ping", params);
+        }
+
         public Map<String, Object> createGameUrl(Map<String, Object> params) {
             return postSigned("/operator/v1/game/url", params);
         }
@@ -377,6 +392,14 @@ public final class BaccaratSdk {
 
         public Map<String, Object> terminateSessions(Map<String, Object> params) {
             return postSigned("/operator/v1/game/terminate", params);
+        }
+
+        public Map<String, Object> updatePlayerStatus(Map<String, Object> params) {
+            return postSigned("/operator/v1/player/status", params);
+        }
+
+        public Map<String, Object> updatePlayerLimits(Map<String, Object> params) {
+            return postSigned("/operator/v1/player/limits", params);
         }
 
         public Map<String, Object> listTransactions(Map<String, Object> params) {
@@ -412,12 +435,30 @@ public final class BaccaratSdk {
 
         public Map<String, Object> getTransactionDetail(Map<String, Object> params) {
             String betId = str(params, "betId").trim();
-            long from = requireLong(params, "fromTime");
-            long to = requireLong(params, "toTime");
-            if (betId.isEmpty() || from < 0 || to < from || (to - from) > MAX_DETAIL_WINDOW_MS) {
-                throw new SdkException("INVALID_ARGUMENT", "Detail window must satisfy 0 <= toTime - fromTime <= 604800000");
+            if (betId.isEmpty()) {
+                throw new SdkException("INVALID_ARGUMENT", "betId is required");
+            }
+            if (params != null && (params.get("fromTime") != null || params.get("toTime") != null)) {
+                long from = requireLong(params, "fromTime");
+                long to = requireLong(params, "toTime");
+                if (from < 0 || to < from || (to - from) > MAX_DETAIL_WINDOW_MS) {
+                    throw new SdkException("INVALID_ARGUMENT", "Detail window must satisfy 0 <= toTime - fromTime <= 604800000");
+                }
             }
             return postSigned("/operator/v1/transaction/detail", params);
+        }
+
+        public Map<String, Object> listUnsettledTransactions(Map<String, Object> params) {
+            return postSigned("/operator/v1/transaction/unsettled", params);
+        }
+
+        public Map<String, Object> getWalletTransactionStatus(Map<String, Object> params) {
+            String txId = str(params, "transactionId").trim();
+            String betId = str(params, "betId").trim();
+            if (txId.isEmpty() && betId.isEmpty()) {
+                throw new SdkException("INVALID_ARGUMENT", "Either transactionId or betId is required");
+            }
+            return postSigned("/operator/v1/wallet/transaction-status", params);
         }
     }
 
@@ -428,6 +469,9 @@ public final class BaccaratSdk {
         Map<String, Object> onBet(Map<String, Object> req);
         Map<String, Object> onBetResult(Map<String, Object> req);
         Map<String, Object> onRollback(Map<String, Object> req);
+        default Map<String, Object> onAdjustment(Map<String, Object> req) {
+            return makeErrEnvelope(str(req, "traceId"), StatusCode.SC_INVALID_REQUEST, "onAdjustment not implemented");
+        }
     }
 
     private static Map<String, Object> makeErrEnvelope(String traceId, String status, String msg) {
@@ -642,6 +686,55 @@ public final class BaccaratSdk {
             transactions.put(txId, new TxRec("ROLLBACK", fp, false));
             return okResp(traceId, username, a);
         }
+
+        @Override
+        public synchronized Map<String, Object> onAdjustment(Map<String, Object> req) {
+            String traceId = str(req, "traceId");
+            String txId = str(req, "transactionId").trim();
+            String betId = str(req, "betId").trim();
+            String username = str(req, "username").trim();
+            String currency = str(req, "currency").trim().toUpperCase(Locale.ROOT);
+            String direction = str(req, "direction").trim().toUpperCase(Locale.ROOT);
+            String reasonCode = str(req, "reasonCode").trim();
+            if (txId.isEmpty() || betId.isEmpty() || username.isEmpty() || currency.isEmpty()
+                    || reasonCode.isEmpty() || str(req, "amount").isEmpty()
+                    || (!"CREDIT".equals(direction) && !"DEBIT".equals(direction))) {
+                return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "Missing or invalid adjustment fields");
+            }
+            Acct a = accounts.get(username);
+            if (a == null) return makeErrEnvelope(traceId, StatusCode.SC_USER_NOT_EXISTS, "User not exists");
+            if (!a.currency.equals(currency)) return makeErrEnvelope(traceId, StatusCode.SC_WRONG_CURRENCY, "Wrong currency");
+
+            String fp = adjustmentFingerprint(req);
+            TxRec prior = transactions.get(txId);
+            if (prior != null) {
+                if (!"ADJUSTMENT".equals(prior.type) || !prior.fp.equals(fp)) {
+                    return makeErrEnvelope(traceId, StatusCode.SC_TRANSACTION_DUPLICATED, "Conflict");
+                }
+                return okResp(traceId, username, a);
+            }
+            BetRec orig = deductedBets.get(betId);
+            if (orig == null) {
+                return makeErrEnvelope(traceId, StatusCode.SC_TRANSACTION_NOT_EXISTS, "Original betId missing");
+            }
+            if (!orig.username.equals(username) || !orig.currency.equals(a.currency)) {
+                return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "Adjustment mismatch");
+            }
+            BigInteger adjUnits = decimalToLedgerUnits(str(req, "amount"), a.exponent, false);
+            if (adjUnits.signum() <= 0) {
+                return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "Adjustment amount must be positive");
+            }
+            if ("DEBIT".equals(direction)) {
+                if (a.units.compareTo(adjUnits) < 0) {
+                    return makeErrEnvelope(traceId, StatusCode.SC_INSUFFICIENT_FUNDS, "Insufficient funds");
+                }
+                a.units = a.units.subtract(adjUnits);
+            } else {
+                a.units = a.units.add(adjUnits);
+            }
+            transactions.put(txId, new TxRec("ADJUSTMENT", fp, false));
+            return okResp(traceId, username, a);
+        }
     }
 
     private static String extractTraceHint(byte[] rawBody) {
@@ -692,6 +785,7 @@ public final class BaccaratSdk {
                 if (clean.endsWith("/wallet/bet")) return wallet.onBet(parsed);
                 if (clean.endsWith("/wallet/bet_result")) return wallet.onBetResult(parsed);
                 if (clean.endsWith("/wallet/rollback")) return wallet.onRollback(parsed);
+                if (clean.endsWith("/wallet/adjustment")) return wallet.onAdjustment(parsed);
                 return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "Unknown route");
             } catch (SdkException e) {
                 String st = (e.code != null && e.code.startsWith("SC_")) ? e.code : StatusCode.SC_INVALID_REQUEST;

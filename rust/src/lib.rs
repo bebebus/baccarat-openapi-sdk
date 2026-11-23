@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.2.0).
+//! Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.4.0).
 
 pub mod crypto;
 mod curl_ffi;
@@ -46,12 +46,15 @@ pub mod status_code {
     pub const SC_OPERATOR_TIMEOUT: &str = "SC_OPERATOR_TIMEOUT";
     pub const SC_UNDER_MAINTENANCE: &str = "SC_UNDER_MAINTENANCE";
     pub const SC_GAME_DISABLED: &str = "SC_GAME_DISABLED";
+    pub const SC_RATE_LIMITED: &str = "SC_RATE_LIMITED";
 }
 
 pub fn is_retryable_status(status: &str) -> bool {
     matches!(
         status.trim(),
-        status_code::SC_TRANSACTION_STILL_PROCESSING | status_code::SC_OPERATOR_TIMEOUT
+        status_code::SC_TRANSACTION_STILL_PROCESSING
+            | status_code::SC_OPERATOR_TIMEOUT
+            | status_code::SC_RATE_LIMITED
     )
 }
 
@@ -278,6 +281,23 @@ pub fn rollback_fingerprint(p: &Json) -> String {
     encode_tuple_fingerprint("wallet/rollback", &[&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7])
 }
 
+pub fn adjustment_fingerprint(p: &Json) -> String {
+    let vals = [
+        p.get("transactionId").to_scalar_string(),
+        p.get("username").to_scalar_string(),
+        p.get("betId").to_scalar_string(),
+        p.get("externalTransactionId").to_scalar_string(),
+        p.get("roundId").to_scalar_string(),
+        p.get("currency").to_scalar_string(),
+        p.get("gameCode").to_scalar_string(),
+        p.get("direction").to_scalar_string(),
+        p.get("amount").to_scalar_string(),
+        p.get("reasonCode").to_scalar_string(),
+    ];
+    let refs: Vec<&str> = vals.iter().map(String::as_str).collect();
+    encode_tuple_fingerprint("wallet/adjustment", &refs)
+}
+
 // ── 4. Config, Pluggable HttpTransport & S2S Client ─────────────────────────
 
 pub trait HttpTransport: Send + Sync {
@@ -480,6 +500,10 @@ impl Client {
         Ok(out)
     }
 
+    pub fn ping(&self, params: Json) -> Result<Json, SdkError> {
+        self.post_signed("/operator/v1/ping", params)
+    }
+
     pub fn create_game_url(&self, params: Json) -> Result<Json, SdkError> {
         self.post_signed("/operator/v1/game/url", params)
     }
@@ -490,6 +514,14 @@ impl Client {
 
     pub fn terminate_sessions(&self, params: Json) -> Result<Json, SdkError> {
         self.post_signed("/operator/v1/game/terminate", params)
+    }
+
+    pub fn update_player_status(&self, params: Json) -> Result<Json, SdkError> {
+        self.post_signed("/operator/v1/player/status", params)
+    }
+
+    pub fn update_player_limits(&self, params: Json) -> Result<Json, SdkError> {
+        self.post_signed("/operator/v1/player/limits", params)
     }
 
     pub fn list_transactions(&self, params: Json) -> Result<Json, SdkError> {
@@ -532,18 +564,36 @@ impl Client {
 
     pub fn get_transaction_detail(&self, params: Json) -> Result<Json, SdkError> {
         let bet_id = params.get("betId").as_str().unwrap_or("").trim();
-        let Some(from) = params.get("fromTime").as_i64() else {
-            return Err(SdkError::Argument("fromTime integer is required".into()));
-        };
-        let Some(to) = params.get("toTime").as_i64() else {
-            return Err(SdkError::Argument("toTime integer is required".into()));
-        };
-        if bet_id.is_empty() || from < 0 || to < from || (to - from) > MAX_DETAIL_WINDOW_MS {
-            return Err(SdkError::Argument(
-                "detail window must satisfy 0 <= toTime - fromTime <= 604800000".into(),
-            ));
+        if bet_id.is_empty() {
+            return Err(SdkError::Argument("betId is required".into()));
+        }
+        if params.contains("fromTime") || params.contains("toTime") {
+            let Some(from) = params.get("fromTime").as_i64() else {
+                return Err(SdkError::Argument("fromTime integer is required when specified".into()));
+            };
+            let Some(to) = params.get("toTime").as_i64() else {
+                return Err(SdkError::Argument("toTime integer is required when specified".into()));
+            };
+            if from < 0 || to < from || (to - from) > MAX_DETAIL_WINDOW_MS {
+                return Err(SdkError::Argument(
+                    "detail window must satisfy 0 <= toTime - fromTime <= 604800000".into(),
+                ));
+            }
         }
         self.post_signed("/operator/v1/transaction/detail", params)
+    }
+
+    pub fn list_unsettled_transactions(&self, params: Json) -> Result<Json, SdkError> {
+        self.post_signed("/operator/v1/transaction/unsettled", params)
+    }
+
+    pub fn get_wallet_transaction_status(&self, params: Json) -> Result<Json, SdkError> {
+        let tx_id = params.get("transactionId").as_str().unwrap_or("").trim();
+        let bet_id = params.get("betId").as_str().unwrap_or("").trim();
+        if tx_id.is_empty() && bet_id.is_empty() {
+            return Err(SdkError::Argument("transactionId or betId is required".into()));
+        }
+        self.post_signed("/operator/v1/wallet/transaction-status", params)
     }
 }
 
@@ -554,6 +604,13 @@ pub trait WalletHandler: Send + Sync {
     fn on_bet(&self, req: &Json) -> Json;
     fn on_bet_result(&self, req: &Json) -> Json;
     fn on_rollback(&self, req: &Json) -> Json;
+    fn on_adjustment(&self, req: &Json) -> Json {
+        InMemoryWallet::err_env(
+            req.get("traceId").as_str().unwrap_or(""),
+            status_code::SC_INVALID_REQUEST,
+            "on_adjustment not implemented",
+        )
+    }
 }
 
 struct Acct {
@@ -892,6 +949,74 @@ impl WalletHandler for InMemoryWallet {
         );
         Self::ok_env(tid, u, st.accounts.get(u).unwrap())
     }
+
+    fn on_adjustment(&self, req: &Json) -> Json {
+        let mut st = self.inner.lock().unwrap();
+        let tid = req.get("traceId").as_str().unwrap_or("");
+        let tx_id = req.get("transactionId").as_str().unwrap_or("").trim().to_string();
+        let bet_id = req.get("betId").as_str().unwrap_or("").trim().to_string();
+        let u = req.get("username").as_str().unwrap_or("").trim();
+        let cur = req.get("currency").as_str().unwrap_or("").trim().to_ascii_uppercase();
+        let dir = req.get("direction").as_str().unwrap_or("").trim().to_ascii_uppercase();
+        let reason = req.get("reasonCode").as_str().unwrap_or("").trim();
+        let amt_str = req.get("amount").as_str().unwrap_or("");
+        if tx_id.is_empty()
+            || bet_id.is_empty()
+            || u.is_empty()
+            || cur.is_empty()
+            || reason.is_empty()
+            || amt_str.is_empty()
+            || (dir != "CREDIT" && dir != "DEBIT")
+        {
+            return Self::err_env(tid, status_code::SC_INVALID_REQUEST, "Missing or invalid adjustment fields");
+        }
+        let fp = adjustment_fingerprint(req);
+
+        let exp = match st.accounts.get(u) {
+            None => return Self::err_env(tid, status_code::SC_USER_NOT_EXISTS, "User missing"),
+            Some(a) if a.currency != cur => return Self::err_env(tid, status_code::SC_WRONG_CURRENCY, "Wrong currency"),
+            Some(a) => a.exponent,
+        };
+        if let Some(prior) = st.transactions.get(&tx_id) {
+            if prior.kind != "ADJUSTMENT" || prior.fp != fp {
+                return Self::err_env(tid, status_code::SC_TRANSACTION_DUPLICATED, "Conflict");
+            }
+            return Self::ok_env(tid, u, st.accounts.get(u).unwrap());
+        }
+        let Ok(adj_units) = decimal_to_ledger_units(amt_str, exp, false) else {
+            return Self::err_env(tid, status_code::SC_INVALID_REQUEST, "Bad amount");
+        };
+        if adj_units <= 0 {
+            return Self::err_env(tid, status_code::SC_INVALID_REQUEST, "Adjustment amount must be positive");
+        }
+        let Some(orig) = st.deducted_bets.get(&bet_id) else {
+            return Self::err_env(tid, status_code::SC_TRANSACTION_NOT_EXISTS, "Original betId missing");
+        };
+        if orig.username != u || orig.currency != cur {
+            return Self::err_env(tid, status_code::SC_INVALID_REQUEST, "Adjustment mismatch");
+        }
+        let acct = st.accounts.get_mut(u).unwrap();
+        if dir == "DEBIT" {
+            if acct.units < adj_units {
+                return Self::err_env(tid, status_code::SC_INSUFFICIENT_FUNDS, "Insufficient funds");
+            }
+            acct.units -= adj_units;
+        } else {
+            let Some(next_units) = acct.units.checked_add(adj_units) else {
+                return Self::err_env(tid, status_code::SC_INVALID_REQUEST, "Balance overflow");
+            };
+            acct.units = next_units;
+        }
+        st.transactions.insert(
+            tx_id,
+            TxRec {
+                kind: "ADJUSTMENT",
+                fp,
+                empty: false,
+            },
+        );
+        Self::ok_env(tid, u, st.accounts.get(u).unwrap())
+    }
 }
 
 impl InMemoryWallet {
@@ -909,6 +1034,10 @@ impl InMemoryWallet {
 
     pub fn on_rollback(&self, req: &Json) -> Json {
         <Self as WalletHandler>::on_rollback(self, req)
+    }
+
+    pub fn on_adjustment(&self, req: &Json) -> Json {
+        <Self as WalletHandler>::on_adjustment(self, req)
     }
 }
 
@@ -1005,6 +1134,8 @@ impl<'a> WebhookDispatcher<'a> {
             self.wallet.on_bet_result(&body_obj)
         } else if clean.ends_with("/wallet/rollback") {
             self.wallet.on_rollback(&body_obj)
+        } else if clean.ends_with("/wallet/adjustment") {
+            self.wallet.on_adjustment(&body_obj)
         } else {
             InMemoryWallet::err_env(&trace_id, status_code::SC_INVALID_REQUEST, "Unknown route")
         }
@@ -1068,6 +1199,11 @@ mod tests {
         assert_eq!(rollback_fingerprint(rb.get("initial")), rb.get("expectedFingerprint").as_str().unwrap());
         assert_eq!(rollback_fingerprint(rb.get("retrySameBusiness")), rb.get("expectedFingerprint").as_str().unwrap());
         assert_eq!(rollback_fingerprint(rb.get("conflictDifferentAmount")), rb.get("conflictFingerprint").as_str().unwrap());
+
+        let adj = idem.get("adjustment");
+        assert_eq!(adjustment_fingerprint(adj.get("initial")), adj.get("expectedFingerprint").as_str().unwrap());
+        assert_eq!(adjustment_fingerprint(adj.get("retrySameBusiness")), adj.get("expectedFingerprint").as_str().unwrap());
+        assert_eq!(adjustment_fingerprint(adj.get("conflictDifferentDirection")), adj.get("conflictFingerprint").as_str().unwrap());
 
         for m in doc.get("moneyVectors").get("valid").as_array().unwrap() {
             let exp = m.get("displayExponent").as_i64().unwrap() as i32;
@@ -1312,6 +1448,13 @@ mod tests {
 
         wallet.set_disabled("player_9527", true);
         assert_eq!(send("/wallet/bet_result", idem.get("betResult").get("initial")).get("data").get("balance").as_str(), Some("1100.00"));
+        assert_eq!(send("/wallet/adjustment", idem.get("adjustment").get("initial")).get("data").get("balance").as_str(), Some("1120.00"));
+        assert_eq!(send("/wallet/adjustment", idem.get("adjustment").get("retrySameBusiness")).get("data").get("balance").as_str(), Some("1120.00"));
+        assert_eq!(send("/wallet/adjustment", idem.get("adjustment").get("conflictDifferentDirection")).get("status").as_str(), Some("SC_TRANSACTION_DUPLICATED"));
+        let mut debit_adj = idem.get("adjustment").get("initial").clone();
+        debit_adj.set("transactionId", Json::Str("adj_debit_rs".into()));
+        debit_adj.set("direction", Json::Str("DEBIT".into()));
+        assert_eq!(send("/wallet/adjustment", &debit_adj).get("data").get("balance").as_str(), Some("1100.00"));
 
         // CR-03: Rollback after already-settled betId rejected!
         assert_eq!(send("/wallet/rollback", idem.get("rollback").get("initial")).get("status").as_str(), Some("SC_TRANSACTION_DUPLICATED"));

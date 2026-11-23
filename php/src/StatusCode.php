@@ -23,11 +23,13 @@ final class StatusCode
     public const SC_OPERATOR_TIMEOUT = 'SC_OPERATOR_TIMEOUT';
     public const SC_UNDER_MAINTENANCE = 'SC_UNDER_MAINTENANCE';
     public const SC_GAME_DISABLED = 'SC_GAME_DISABLED';
+    public const SC_RATE_LIMITED = 'SC_RATE_LIMITED';
 
     public static function isRetryable(string $status): bool
     {
         $trimmed = trim($status);
         return $trimmed === self::SC_TRANSACTION_STILL_PROCESSING
-            || $trimmed === self::SC_OPERATOR_TIMEOUT;
+            || $trimmed === self::SC_OPERATOR_TIMEOUT
+            || $trimmed === self::SC_RATE_LIMITED;
     }
 }

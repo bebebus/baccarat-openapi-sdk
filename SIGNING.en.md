@@ -1,6 +1,6 @@
 > [中文](./SIGNING.md) | English
 
-# Raw-Byte HMAC-SHA256 Signing & Idempotency Fingerprint Specification (v1.2.0)
+# Raw-Byte HMAC-SHA256 Signing & Idempotency Fingerprint Specification (v1.4.0)
 
 This document is the authoritative cryptographic and idempotency specification shared across all 7 SDKs in `bebebus/baccarat-openapi-sdk` (Node.js, Python, PHP, Go, Java, C++, and Rust), aligned 100% with `https://openapi.lt.cniia.cloud/openapi.yaml`.
 
@@ -37,5 +37,6 @@ fingerprint = lowercase_hex( SHA256( UTF8(canonical) ) )
 - **`wallet/bet`**: `transactionId, username, betId, externalTransactionId, roundId, currency, gameCode, amount` *(excludes `traceId, timestamp`)*
 - **`wallet/bet_result`**: `transactionId, username, betId, externalTransactionId, roundId, currency, gameCode, betAmount, winAmount, effectiveTurnover, winLoss, jackpotAmount, resultType, String(isFreespin), String(isEndRound), String(betTime)` *(excludes `traceId, settledTime`)*
 - **`wallet/rollback`**: `transactionId, username, betId, externalTransactionId, roundId, currency, gameCode, amount` *(excludes `traceId, timestamp`)*
+- **`wallet/adjustment`**: `transactionId, username, betId, externalTransactionId, roundId, currency, gameCode, direction, amount, reasonCode` *(excludes `traceId, timestamp, memo, referenceNo`)*
 
 Same `transactionId` + matching `fingerprint` -> return `HTTP 200` + `SC_OK` + current `data.balance` without mutating funds twice. Same `transactionId` + different `fingerprint` -> return `SC_TRANSACTION_DUPLICATED`.

@@ -69,4 +69,21 @@ final class Idempotency
             (string) ($p['amount'] ?? ''),
         ]);
     }
+
+    /** @param array<string, mixed> $p */
+    public static function adjustmentFingerprint(array $p): string
+    {
+        return self::encodeTupleFingerprint('wallet/adjustment', [
+            (string) ($p['transactionId'] ?? ''),
+            (string) ($p['username'] ?? ''),
+            (string) ($p['betId'] ?? ''),
+            (string) ($p['externalTransactionId'] ?? ''),
+            (string) ($p['roundId'] ?? ''),
+            (string) ($p['currency'] ?? ''),
+            (string) ($p['gameCode'] ?? ''),
+            (string) ($p['direction'] ?? ''),
+            (string) ($p['amount'] ?? ''),
+            (string) ($p['reasonCode'] ?? ''),
+        ]);
+    }
 }

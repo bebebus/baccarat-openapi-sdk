@@ -77,6 +77,11 @@ public final class SdkTestRunner {
         checkEq(BaccaratSdk.rollbackFingerprint((Map<String, Object>) rb.get("retrySameBusiness")), rb.get("expectedFingerprint"), "rb:retry");
         checkEq(BaccaratSdk.rollbackFingerprint((Map<String, Object>) rb.get("conflictDifferentAmount")), rb.get("conflictFingerprint"), "rb:conflict");
 
+        Map<String, Object> adj = (Map<String, Object>) idem.get("adjustment");
+        checkEq(BaccaratSdk.adjustmentFingerprint((Map<String, Object>) adj.get("initial")), adj.get("expectedFingerprint"), "adj:init");
+        checkEq(BaccaratSdk.adjustmentFingerprint((Map<String, Object>) adj.get("retrySameBusiness")), adj.get("expectedFingerprint"), "adj:retry");
+        checkEq(BaccaratSdk.adjustmentFingerprint((Map<String, Object>) adj.get("conflictDifferentDirection")), adj.get("conflictFingerprint"), "adj:conflict");
+
         // 3. Money & status vectors
         Map<String, Object> money = (Map<String, Object>) doc.get("moneyVectors");
         for (Object item : (List<Object>) money.get("valid")) {
@@ -203,6 +208,13 @@ public final class SdkTestRunner {
 
         wallet.setDisabled("player_9527", true);
         checkEq(((Map<String, Object>) send.apply("/wallet/bet_result", (Map<String, Object>) stl.get("initial")).get("data")).get("balance"), "1100.00", "wb:settle");
+        checkEq(((Map<String, Object>) send.apply("/wallet/adjustment", (Map<String, Object>) adj.get("initial")).get("data")).get("balance"), "1120.00", "wb:adjCredit");
+        checkEq(((Map<String, Object>) send.apply("/wallet/adjustment", (Map<String, Object>) adj.get("retrySameBusiness")).get("data")).get("balance"), "1120.00", "wb:adjReplay");
+        checkEq(send.apply("/wallet/adjustment", (Map<String, Object>) adj.get("conflictDifferentDirection")).get("status"), "SC_TRANSACTION_DUPLICATED", "wb:adjConflict");
+        Map<String, Object> debitAdj = new LinkedHashMap<>((Map<String, Object>) adj.get("initial"));
+        debitAdj.put("transactionId", "adj_debit_java");
+        debitAdj.put("direction", "DEBIT");
+        checkEq(((Map<String, Object>) send.apply("/wallet/adjustment", debitAdj).get("data")).get("balance"), "1100.00", "wb:adjDebit");
 
         Map<String, Object> unknownRb = new LinkedHashMap<>((Map<String, Object>) rb.get("initial"));
         unknownRb.put("transactionId", "rb_b2btkt000000000000000000000000");

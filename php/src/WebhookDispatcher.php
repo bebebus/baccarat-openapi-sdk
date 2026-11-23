@@ -83,6 +83,14 @@ final class WebhookDispatcher
             if (str_ends_with($clean, '/wallet/rollback')) {
                 return ['statusCode' => 200, 'body' => $this->wallet->onRollback($decoded)];
             }
+            if (str_ends_with($clean, '/wallet/adjustment')) {
+                if (!method_exists($this->wallet, 'onAdjustment')) {
+                    return ['statusCode' => 200, 'body' => ['traceId' => $traceId, 'status' => StatusCode::SC_INVALID_REQUEST, 'message' => 'onAdjustment not implemented']];
+                }
+                /** @var array<string, mixed> $adjRes */
+                $adjRes = $this->wallet->onAdjustment($decoded);
+                return ['statusCode' => 200, 'body' => $adjRes];
+            }
             return [
                 'statusCode' => 200,
                 'body' => ['traceId' => $traceId, 'status' => StatusCode::SC_INVALID_REQUEST, 'message' => "Unknown route {$clean}"],

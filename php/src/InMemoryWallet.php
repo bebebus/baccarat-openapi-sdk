@@ -229,4 +229,52 @@ final class InMemoryWallet implements WalletHandlerInterface
         $this->transactions[$txId] = ['type' => 'ROLLBACK', 'fp' => $fp, 'empty' => false];
         return $this->okEnvelope($traceId, $username);
     }
+
+    /** @param array<string, mixed> $req @return array<string, mixed> */
+    public function onAdjustment(array $req): array
+    {
+        $traceId = is_string($req['traceId'] ?? null) ? $req['traceId'] : '';
+        $txId = trim((string) ($req['transactionId'] ?? ''));
+        $betId = trim((string) ($req['betId'] ?? ''));
+        $username = trim((string) ($req['username'] ?? ''));
+        $currency = trim((string) ($req['currency'] ?? ''));
+        $direction = strtoupper(trim((string) ($req['direction'] ?? '')));
+        $reasonCode = trim((string) ($req['reasonCode'] ?? ''));
+        if ($txId === '' || $betId === '' || $username === '' || $currency === '' || $reasonCode === '' || !isset($req['amount']) || ($direction !== 'CREDIT' && $direction !== 'DEBIT')) {
+            return ['traceId' => $traceId, 'status' => StatusCode::SC_INVALID_REQUEST, 'message' => 'Missing or invalid adjustment fields'];
+        }
+        $err = $this->checkAccount($username, $currency);
+        if ($err !== null) {
+            return ['traceId' => $traceId, 'status' => $err, 'message' => 'Account check failed'];
+        }
+        $fp = Idempotency::adjustmentFingerprint($req);
+        if (isset($this->transactions[$txId])) {
+            if ($this->transactions[$txId]['type'] !== 'ADJUSTMENT' || $this->transactions[$txId]['fp'] !== $fp) {
+                return ['traceId' => $traceId, 'status' => StatusCode::SC_TRANSACTION_DUPLICATED, 'message' => 'Conflict'];
+            }
+            return $this->okEnvelope($traceId, $username);
+        }
+        if (!isset($this->deductedBets[$betId])) {
+            return ['traceId' => $traceId, 'status' => StatusCode::SC_TRANSACTION_NOT_EXISTS, 'message' => 'Original betId missing'];
+        }
+        $acct = $this->accounts[$username];
+        $orig = $this->deductedBets[$betId];
+        if ($orig['username'] !== $username || $orig['currency'] !== $acct['currency']) {
+            return ['traceId' => $traceId, 'status' => StatusCode::SC_INVALID_REQUEST, 'message' => 'Adjustment mismatch'];
+        }
+        $adjUnits = Money::decimalToLedgerUnits((string) $req['amount'], $acct['exponent']);
+        if (Money::compareUnsignedUnits($adjUnits, '0') <= 0) {
+            return ['traceId' => $traceId, 'status' => StatusCode::SC_INVALID_REQUEST, 'message' => 'Adjustment amount must be positive'];
+        }
+        if ($direction === 'DEBIT') {
+            if (Money::compareUnsignedUnits($acct['balanceUnits'], $adjUnits) < 0) {
+                return ['traceId' => $traceId, 'status' => StatusCode::SC_INSUFFICIENT_FUNDS, 'message' => 'Insufficient funds'];
+            }
+            $this->accounts[$username]['balanceUnits'] = Money::subUnsignedUnits($acct['balanceUnits'], $adjUnits);
+        } else {
+            $this->accounts[$username]['balanceUnits'] = Money::addUnsignedUnits($acct['balanceUnits'], $adjUnits);
+        }
+        $this->transactions[$txId] = ['type' => 'ADJUSTMENT', 'fp' => $fp, 'empty' => false];
+        return $this->okEnvelope($traceId, $username);
+    }
 }

@@ -4,10 +4,10 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>cloud.cniia.baccarat</groupId>
   <artifactId>baccarat-openapi-sdk</artifactId>
-  <version>1.2.0</version>
+  <version>1.4.0</version>
   <packaging>jar</packaging>
   <name>Baccarat Live Platform B2B Merchant SDK (Java 17)</name>
-  <description>Zero-dependency Java 17 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.2.0)</description>
+  <description>Zero-dependency Java 17 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.4.0)</description>
   <licenses>
     <license>
       <name>MIT</name>

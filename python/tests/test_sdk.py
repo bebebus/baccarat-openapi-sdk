@@ -17,6 +17,7 @@ from baccarat_sdk import (
     InMemoryWallet,
     StatusCode,
     WebhookDispatcher,
+    adjustment_fingerprint,
     bet_fingerprint,
     bet_result_fingerprint,
     decimal_to_ledger_units,
@@ -65,6 +66,10 @@ class TestBaccaratPythonSdk(unittest.TestCase):
         self.assertEqual(rollback_fingerprint(idem["rollback"]["initial"]), idem["rollback"]["expectedFingerprint"])
         self.assertEqual(rollback_fingerprint(idem["rollback"]["retrySameBusiness"]), idem["rollback"]["expectedFingerprint"])
         self.assertEqual(rollback_fingerprint(idem["rollback"]["conflictDifferentAmount"]), idem["rollback"]["conflictFingerprint"])
+
+        self.assertEqual(adjustment_fingerprint(idem["adjustment"]["initial"]), idem["adjustment"]["expectedFingerprint"])
+        self.assertEqual(adjustment_fingerprint(idem["adjustment"]["retrySameBusiness"]), idem["adjustment"]["expectedFingerprint"])
+        self.assertEqual(adjustment_fingerprint(idem["adjustment"]["conflictDifferentDirection"]), idem["adjustment"]["conflictFingerprint"])
 
     def test_money_and_status_vectors(self) -> None:
         for m in VECTORS["moneyVectors"]["valid"]:
@@ -183,6 +188,11 @@ class TestBaccaratPythonSdk(unittest.TestCase):
 
         wallet.set_disabled("player_9527", True)
         self.assertEqual(call("/wallet/bet_result", VECTORS["idempotencyVectors"]["betResult"]["initial"])["data"]["balance"], "1100.00")
+        self.assertEqual(call("/wallet/adjustment", VECTORS["idempotencyVectors"]["adjustment"]["initial"])["data"]["balance"], "1120.00")
+        self.assertEqual(call("/wallet/adjustment", VECTORS["idempotencyVectors"]["adjustment"]["retrySameBusiness"])["data"]["balance"], "1120.00")
+        self.assertEqual(call("/wallet/adjustment", VECTORS["idempotencyVectors"]["adjustment"]["conflictDifferentDirection"])["status"], "SC_TRANSACTION_DUPLICATED")
+        debit_adj = dict(VECTORS["idempotencyVectors"]["adjustment"]["initial"], transactionId="adj_debit_py", direction="DEBIT", amount="20.00")
+        self.assertEqual(call("/wallet/adjustment", debit_adj)["data"]["balance"], "1100.00")
         unknown_rb = dict(
             VECTORS["idempotencyVectors"]["rollback"]["initial"],
             transactionId="rb_b2btkt000000000000000000000000",
