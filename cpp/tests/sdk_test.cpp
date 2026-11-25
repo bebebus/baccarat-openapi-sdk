@@ -191,6 +191,7 @@ int main() {
             Json body = Json::parse(raw_body);
             Json resp = Json::object();
             resp.set("traceId", body.at("traceId"));
+            std::string status_line = "200 OK";
             if (st != StatusCode::SC_OK) {
                 resp.set("status", Json(st));
                 resp.set("message", Json("bad auth"));
@@ -223,6 +224,33 @@ int main() {
                     data.set("terminatedSessions", Json(1));
                     data.set("revokedLaunchTokens", Json(0));
                     resp.set("data", data);
+                } else if (path == "/operator/v1/player/status") {
+                    if (body.at("username").as_string() == "locked_user") {
+                        status_line = "403 Forbidden";
+                        resp.set("status", Json("SC_USER_DISABLED"));
+                        resp.set("message", Json("PLATFORM_RISK_LOCKED"));
+                    } else if (body.at("username").as_string() == "capped_user" && body.at("bettingEnabled").as_bool(false) && !body.at("resetPnlWindow").as_bool(false)) {
+                        status_line = "409 Conflict";
+                        resp.set("status", Json("SC_INVALID_REQUEST"));
+                        resp.set("message", Json("PNL_CAP_BREACHED_RESET_REQUIRED"));
+                    } else {
+                        Json data = Json::object();
+                        data.set("username", body.at("username"));
+                        data.set("status", Json("ACTIVE"));
+                        data.set("bettingEnabled", Json(true));
+                        data.set("rgRestricted", Json(false));
+                        data.set("revokedSessions", Json(0));
+                        data.set("revokedLaunchTokens", Json(0));
+                        resp.set("data", data);
+                    }
+                } else if (path == "/operator/v1/wallet/transaction-status") {
+                    Json row = Json::object();
+                    row.set("transactionId", Json("bet_cpp_1"));
+                    row.set("username", body.at("username"));
+                    row.set("status", Json("COMPLETED"));
+                    Json data = Json::object();
+                    data.set("transactions", Json(Json::Array{row}));
+                    resp.set("data", data);
                 } else if (path == "/operator/v1/transaction/list") {
                     int64_t pno = body.at("pageNo").as_int(1);
                     Json r1 = Json::object(); r1.set("betId", Json("b2btkt1"));
@@ -247,7 +275,7 @@ int main() {
                 }
             }
             std::string out_json = resp.dump();
-            std::string http_resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: "
+            std::string http_resp = "HTTP/1.1 " + status_line + "\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: "
                 + std::to_string(out_json.size()) + "\r\n\r\n" + out_json;
             (void)::write(cfd, http_resp.data(), http_resp.size());
             ::close(cfd);
@@ -290,6 +318,45 @@ int main() {
     det_req.set("toTime", Json(static_cast<int64_t>(2000)));
     Json det_res = client.get_transaction_detail(det_req);
     require_eq(det_res.at("data").at("roundResult").at("outcome").as_string(), "BANKER", "s2s:detail");
+
+    Json ps_ok_req = Json::object();
+    ps_ok_req.set("username", Json("capped_user"));
+    ps_ok_req.set("action", Json("SET"));
+    ps_ok_req.set("bettingEnabled", Json(true));
+    ps_ok_req.set("resetPnlWindow", Json(true));
+    Json ps_ok_res = client.update_player_status(ps_ok_req);
+    require_true(ps_ok_res.at("data").at("bettingEnabled").as_bool(false), "s2s:playerStatusReset");
+
+    bool caught_403 = false;
+    try {
+        Json ps_lock = Json::object();
+        ps_lock.set("username", Json("locked_user"));
+        ps_lock.set("action", Json("SET"));
+        ps_lock.set("status", Json("ACTIVE"));
+        client.update_player_status(ps_lock);
+    } catch (const ApiError& e) {
+        caught_403 = (e.http_status == 403 && e.status == "SC_USER_DISABLED" && std::string(e.what()) == "PLATFORM_RISK_LOCKED");
+    }
+    require_true(caught_403, "s2s:playerStatus403");
+
+    bool caught_409 = false;
+    try {
+        Json ps_cap = Json::object();
+        ps_cap.set("username", Json("capped_user"));
+        ps_cap.set("action", Json("SET"));
+        ps_cap.set("bettingEnabled", Json(true));
+        client.update_player_status(ps_cap);
+    } catch (const ApiError& e) {
+        caught_409 = (e.http_status == 409 && e.status == "SC_INVALID_REQUEST" && std::string(e.what()) == "PNL_CAP_BREACHED_RESET_REQUIRED");
+    }
+    require_true(caught_409, "s2s:playerStatus409");
+
+    Json wts_req = Json::object();
+    wts_req.set("username", Json("player_9527"));
+    wts_req.set("fromTime", Json(static_cast<int64_t>(1000)));
+    wts_req.set("toTime", Json(static_cast<int64_t>(86401000)));
+    Json wts_res = client.get_wallet_transaction_status(wts_req);
+    require_eq(wts_res.at("data").at("transactions").as_array()[0].at("username").as_string(), "player_9527", "s2s:walletStatusByUser");
 
     stop_srv.store(true);
     ::shutdown(srv_fd, SHUT_RDWR);

@@ -1,17 +1,17 @@
 > [中文](./README.md) | English
 
-# Baccarat Live Platform · Multi-Language B2B Merchant SDKs (v1.4.0)
+# Baccarat Live Platform · Multi-Language B2B Merchant SDKs (v1.5.0)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
-[![OpenAPI 3.1](https://img.shields.io/badge/OpenAPI_3.1-v1.4.0-e3b15a)](https://openapi.lt.cniia.cloud/en/)
+[![OpenAPI 3.1](https://img.shields.io/badge/OpenAPI_3.1-v1.5.0-e3b15a)](https://openapi.lt.cniia.cloud/en/)
 
-Official bidirectional B2B Operator Seamless Wallet SDKs (`bebebus/baccarat-openapi-sdk`) for **Node.js, Python, PHP, Go, Java, C++, and Rust**, aligned 100% with OpenAPI `v1.4.0` (`https://openapi.lt.cniia.cloud/en/`).
+Official bidirectional B2B Operator Seamless Wallet SDKs (`bebebus/baccarat-openapi-sdk`) for **Node.js, Python, PHP, Go, Java, C++, and Rust**, aligned 100% with OpenAPI `v1.5.0` (`https://openapi.lt.cniia.cloud/en/`).
 
 ## Design Highlights
 
 - **Zero External Package Dependencies**: Node.js, Python, PHP, Go, Java, and Rust have **zero third-party package dependencies**; C++ uses only CMake + system `OpenSSL` and `libcurl` with a built-in single-header RFC-8259 JSON parser/serializer.
 - **Full Bidirectional Coverage (10 Inbound S2S + 5 Outbound Webhooks)**:
-  - **S2S Client (`/operator/v1/*`)**: `ping`, `listTables`, `createGameUrl` (with `lobby | table | table_locked` `entryMode`), `terminateSessions` (`USER | ALL` `scope`), `updatePlayerStatus` (`ACTIVE | SUSPENDED` + view-only `bettingEnabled`), `updatePlayerLimits` (dynamic per-player limits & chips bounded by operator template), `listTransactions` (+ `listAllTransactions` auto-paginator), `getTransactionDetail`, `listUnsettledTransactions`, and `getWalletTransactionStatus`.
+  - **S2S Client (`/operator/v1/*`)**: `ping`, `listTables`, `createGameUrl` (with `lobby | table | table_locked` `entryMode`), `terminateSessions` (`USER | ALL` `scope`), `updatePlayerStatus` (`ACTIVE | DISABLED`, view-only `bettingEnabled`, atomic `resetPnlWindow`, and structured `HTTP 403`/`409` risk-guard errors), `updatePlayerLimits` (`GET | SET | CLEAR` dynamic per-player limits & chips bounded by operator template), `listTransactions` (+ `listAllTransactions` auto-paginator), `getTransactionDetail`, `listUnsettledTransactions`, and `getWalletTransactionStatus` (by `transactionId`, `betId`, or `username` + `<= 24h` window).
   - **Seamless Wallet Webhook Router (`{callbackUrl}/wallet/*`)**: Raw-body HMAC-SHA256 verification before JSON parsing across `/wallet/balance`, `/wallet/bet`, `/wallet/bet_result`, `/wallet/rollback`, and `/wallet/adjustment`, retry-safe conflict fingerprinting (excluding mutable `traceId`, `timestamp`, `settledTime`, `memo`, `referenceNo`), and a reference `InMemoryWallet` engine.
 - **Byte-for-Byte Cross-Language Golden Vectors**: All 7 SDK test suites execute against the shared [`test-vectors.json`](./test-vectors.json).
 

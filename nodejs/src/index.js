@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Zero-dependency Node.js SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.4.0).
+// Zero-dependency Node.js SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.0).
 
 import crypto from 'node:crypto';
 import http from 'node:http';
@@ -505,8 +505,18 @@ export class Client {
   getWalletTransactionStatus(params) {
     const txId = typeof params?.transactionId === 'string' ? params.transactionId.trim() : '';
     const betId = typeof params?.betId === 'string' ? params.betId.trim() : '';
-    if (!txId && !betId) {
-      throw new BaccaratSdkError('Either transactionId or betId is required', 'INVALID_ARGUMENT');
+    const username = typeof params?.username === 'string' ? params.username.trim() : '';
+    if (!txId && !betId && !username) {
+      throw new BaccaratSdkError('At least one of transactionId, betId, or username is required', 'INVALID_ARGUMENT');
+    }
+    if (username && !txId && !betId) {
+      if (typeof params?.fromTime !== 'number' || typeof params?.toTime !== 'number') {
+        throw new BaccaratSdkError('fromTime and toTime epoch ms integers are required when querying by username alone', 'INVALID_ARGUMENT');
+      }
+      const span = params.toTime - params.fromTime;
+      if (!Number.isInteger(params.fromTime) || !Number.isInteger(params.toTime) || params.fromTime < 0 || span < 0 || span > 86_400_000) {
+        throw new BaccaratSdkError('Username query window must satisfy 0 <= toTime - fromTime <= 86400000 (24 hours)', 'INVALID_ARGUMENT');
+      }
     }
     return this.postSigned('/operator/v1/wallet/transaction-status', params);
   }

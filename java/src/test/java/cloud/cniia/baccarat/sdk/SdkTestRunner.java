@@ -139,6 +139,30 @@ public final class SdkTestRunner {
                     }
                 } else if ("/operator/v1/game/terminate".equals(path)) {
                     resp.put("data", Map.of("username", body.get("username"), "terminatedSessions", 1, "revokedLaunchTokens", 0));
+                } else if ("/operator/v1/player/status".equals(path)) {
+                    if ("locked_user".equals(body.get("username"))) {
+                        resp.put("status", "SC_USER_DISABLED");
+                        resp.put("message", "PLATFORM_RISK_LOCKED");
+                        byte[] out = JsonCodec.stringify(resp).getBytes(StandardCharsets.UTF_8);
+                        ex.getResponseHeaders().set("Content-Type", "application/json");
+                        ex.sendResponseHeaders(403, out.length);
+                        ex.getResponseBody().write(out);
+                        ex.close();
+                        return;
+                    }
+                    if ("capped_user".equals(body.get("username")) && Boolean.TRUE.equals(body.get("bettingEnabled")) && !Boolean.TRUE.equals(body.get("resetPnlWindow"))) {
+                        resp.put("status", "SC_INVALID_REQUEST");
+                        resp.put("message", "PNL_CAP_BREACHED_RESET_REQUIRED");
+                        byte[] out = JsonCodec.stringify(resp).getBytes(StandardCharsets.UTF_8);
+                        ex.getResponseHeaders().set("Content-Type", "application/json");
+                        ex.sendResponseHeaders(409, out.length);
+                        ex.getResponseBody().write(out);
+                        ex.close();
+                        return;
+                    }
+                    resp.put("data", Map.of("username", body.get("username"), "status", "ACTIVE", "bettingEnabled", true, "rgRestricted", false, "revokedSessions", 0, "revokedLaunchTokens", 0));
+                } else if ("/operator/v1/wallet/transaction-status".equals(path)) {
+                    resp.put("data", Map.of("transactions", List.of(Map.of("transactionId", "bet_java_1", "username", String.valueOf(body.get("username")), "status", "COMPLETED"))));
                 } else if ("/operator/v1/transaction/list".equals(path)) {
                     int pNo = ((Number) body.get("pageNo")).intValue();
                     List<Map<String, Object>> rows = pNo == 1 ? List.of(Map.of("betId", "b2btkt1"), Map.of("betId", "b2btkt2")) : List.of(Map.of("betId", "b2btkt3"));
@@ -182,6 +206,25 @@ public final class SdkTestRunner {
             checkEq(client.listAllTransactions(1000L, 2000L, 2).size(), 3, "s2s:txAll");
             Map<String, Object> detData = (Map<String, Object>) client.getTransactionDetail(Map.of("betId", "b2btkt1", "fromTime", 1000L, "toTime", 2000L)).get("data");
             checkEq(((Map<String, Object>) detData.get("roundResult")).get("outcome"), "PLAYER", "s2s:detail");
+
+            Map<String, Object> psData = (Map<String, Object>) client.updatePlayerStatus(Map.of("username", "capped_user", "action", "SET", "bettingEnabled", true, "resetPnlWindow", true)).get("data");
+            checkEq(psData.get("bettingEnabled"), Boolean.TRUE, "s2s:playerStatusReset");
+            boolean caught403 = false;
+            try {
+                client.updatePlayerStatus(Map.of("username", "locked_user", "action", "SET", "status", "ACTIVE"));
+            } catch (BaccaratSdk.ApiException ex) {
+                caught403 = ex.httpStatus == 403 && "SC_USER_DISABLED".equals(ex.status) && "PLATFORM_RISK_LOCKED".equals(ex.getMessage());
+            }
+            check(caught403, "s2s:playerStatus403");
+            boolean caught409 = false;
+            try {
+                client.updatePlayerStatus(Map.of("username", "capped_user", "action", "SET", "bettingEnabled", true));
+            } catch (BaccaratSdk.ApiException ex) {
+                caught409 = ex.httpStatus == 409 && "SC_INVALID_REQUEST".equals(ex.status) && "PNL_CAP_BREACHED_RESET_REQUIRED".equals(ex.getMessage());
+            }
+            check(caught409, "s2s:playerStatus409");
+            Map<String, Object> wtsData = (Map<String, Object>) client.getWalletTransactionStatus(Map.of("username", "player_9527", "fromTime", 1000L, "toTime", 86_401_000L)).get("data");
+            checkEq(((List<Map<String, Object>>) wtsData.get("transactions")).get(0).get("username"), "player_9527", "s2s:walletStatusByUser");
         } finally {
             srv.stop(0);
         }

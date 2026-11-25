@@ -1,11 +1,11 @@
 > 中文 | [English](./README.en.md)
 
-# 真人视讯百家乐 · B2B 商户对接多语言 SDK（v1.4.0）
+# 真人视讯百家乐 · B2B 商户对接多语言 SDK（v1.5.0）
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
-[![OpenAPI 3.1](https://img.shields.io/badge/OpenAPI_3.1-v1.4.0-e3b15a)](https://openapi.lt.cniia.cloud)
+[![OpenAPI 3.1](https://img.shields.io/badge/OpenAPI_3.1-v1.5.0-e3b15a)](https://openapi.lt.cniia.cloud)
 
-为接入真人视讯百家乐平台（B2B 单一无缝钱包模式，OpenAPI `v1.4.0`）的商户研发团队提供 **Node.js、Python、PHP、Go、Java、C++、Rust** 七套生产级双向对接 SDK。
+为接入真人视讯百家乐平台（B2B 单一无缝钱包模式，OpenAPI `v1.5.0`）的商户研发团队提供 **Node.js、Python、PHP、Go、Java、C++、Rust** 七套生产级双向对接 SDK。
 
 - 在线契约门户与验签台：`https://openapi.lt.cniia.cloud`
 - OpenAPI 3.1 规范下载：`https://openapi.lt.cniia.cloud/openapi.yaml` | `https://openapi.lt.cniia.cloud/openapi.json`

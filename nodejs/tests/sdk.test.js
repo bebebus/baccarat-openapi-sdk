@@ -125,13 +125,23 @@ test('end-to-end S2S Client over real loopback HTTP server + auto-pagination + e
       } else if (req.url === '/operator/v1/ping') {
         res.end(JSON.stringify({ traceId: body.traceId, status: 'SC_OK', data: { operatorId: 'OP_DEMO', status: 'ACTIVE', serverTime: 1763612000000, allowedCurrencies: ['USD'], allowedTableCount: 1 } }));
       } else if (req.url === '/operator/v1/player/status') {
-        res.end(JSON.stringify({ traceId: body.traceId, status: 'SC_OK', data: { username: body.username, status: body.status ?? 'ACTIVE', bettingEnabled: body.bettingEnabled ?? false, terminatedSessions: 0, revokedLaunchTokens: 0 } }));
+        if (body.username === 'locked_user') {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ traceId: body.traceId, status: 'SC_USER_DISABLED', message: 'PLATFORM_RISK_LOCKED' }));
+          return;
+        }
+        if (body.username === 'capped_user' && body.bettingEnabled === true && body.resetPnlWindow !== true) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ traceId: body.traceId, status: 'SC_INVALID_REQUEST', message: 'PNL_CAP_BREACHED_RESET_REQUIRED' }));
+          return;
+        }
+        res.end(JSON.stringify({ traceId: body.traceId, status: 'SC_OK', data: { username: body.username, status: body.status ?? 'ACTIVE', bettingEnabled: body.bettingEnabled ?? false, rgRestricted: false, statusReason: body.resetPnlWindow ? null : (body.reason ?? null), revokedSessions: 0, revokedLaunchTokens: 0 } }));
       } else if (req.url === '/operator/v1/player/limits') {
         res.end(JSON.stringify({ traceId: body.traceId, status: 'SC_OK', data: { username: body.username, currency: body.currency, maxBet: body.maxBet } }));
       } else if (req.url === '/operator/v1/transaction/unsettled') {
         res.end(JSON.stringify({ traceId: body.traceId, status: 'SC_OK', data: { transactions: [], pageNo: 1, pageSize: 200, total: 0 } }));
       } else if (req.url === '/operator/v1/wallet/transaction-status') {
-        res.end(JSON.stringify({ traceId: body.traceId, status: 'SC_OK', data: { transactions: [{ transactionId: body.transactionId, status: 'COMPLETED' }] } }));
+        res.end(JSON.stringify({ traceId: body.traceId, status: 'SC_OK', data: { transactions: [{ transactionId: body.transactionId ?? 'bet_user_1', username: body.username ?? 'player_9527', status: 'COMPLETED' }] } }));
       }
     });
   });
@@ -181,12 +191,26 @@ test('end-to-end S2S Client over real loopback HTTP server + auto-pagination + e
     assert.equal(pingRes.data.operatorId, 'OP_DEMO');
     const psRes = await client.updatePlayerStatus({ username: 'player_9527', bettingEnabled: false });
     assert.equal(psRes.data.bettingEnabled, false);
+    const psResetRes = await client.updatePlayerStatus({ username: 'capped_user', action: 'SET', bettingEnabled: true, resetPnlWindow: true });
+    assert.equal(psResetRes.data.bettingEnabled, true);
+    assert.equal(psResetRes.data.statusReason, null);
+    await assert.rejects(
+      () => client.updatePlayerStatus({ username: 'locked_user', action: 'SET', status: 'ACTIVE' }),
+      (err) => err instanceof BaccaratApiError && err.httpStatus === 403 && err.status === 'SC_USER_DISABLED' && err.message === 'PLATFORM_RISK_LOCKED',
+    );
+    await assert.rejects(
+      () => client.updatePlayerStatus({ username: 'capped_user', action: 'SET', bettingEnabled: true }),
+      (err) => err instanceof BaccaratApiError && err.httpStatus === 409 && err.status === 'SC_INVALID_REQUEST' && err.message === 'PNL_CAP_BREACHED_RESET_REQUIRED',
+    );
     const plRes = await client.updatePlayerLimits({ username: 'player_9527', currency: 'USD', maxBet: '500.00' });
     assert.equal(plRes.data.maxBet, '500.00');
     const unRes = await client.listUnsettledTransactions({ username: 'player_9527' });
     assert.equal(unRes.data.total, 0);
     const wtsRes = await client.getWalletTransactionStatus({ transactionId: 'bet_1' });
     assert.equal(wtsRes.data.transactions[0].status, 'COMPLETED');
+    const wtsUserRes = await client.getWalletTransactionStatus({ username: 'player_9527', fromTime: 1000, toTime: 86_401_000 });
+    assert.equal(wtsUserRes.data.transactions[0].username, 'player_9527');
+    assert.throws(() => client.getWalletTransactionStatus({ username: 'player_9527', fromTime: 0, toTime: 86_400_001 }), BaccaratSdkError);
 
     assert.throws(() => client.getTransactionDetail({ betId: 'b2btkt1', fromTime: 0, toTime: 604_800_001 }), BaccaratSdkError);
   } finally {

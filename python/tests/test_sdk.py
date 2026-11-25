@@ -103,6 +103,7 @@ class TestBaccaratPythonSdk(unittest.TestCase):
                     secret,
                 )
                 body = json.loads(raw.decode("utf-8"))
+                status_code = 200
                 if st != StatusCode.SC_OK:
                     resp = {"traceId": body.get("traceId", ""), "status": st, "message": "auth error"}
                 elif self.path == "/operator/v1/game/tables":
@@ -115,6 +116,17 @@ class TestBaccaratPythonSdk(unittest.TestCase):
                         resp = {"traceId": body["traceId"], "status": "SC_OK", "data": {"gameUrl": f"https://play.lt.cniia.cloud/?token={tok}", "token": tok}}
                 elif self.path == "/operator/v1/game/terminate":
                     resp = {"traceId": body["traceId"], "status": "SC_OK", "data": {"username": body["username"], "terminatedSessions": 1, "revokedLaunchTokens": 0}}
+                elif self.path == "/operator/v1/player/status":
+                    if body.get("username") == "locked_user":
+                        status_code = 403
+                        resp = {"traceId": body["traceId"], "status": "SC_USER_DISABLED", "message": "PLATFORM_RISK_LOCKED"}
+                    elif body.get("username") == "capped_user" and body.get("bettingEnabled") is True and body.get("resetPnlWindow") is not True:
+                        status_code = 409
+                        resp = {"traceId": body["traceId"], "status": "SC_INVALID_REQUEST", "message": "PNL_CAP_BREACHED_RESET_REQUIRED"}
+                    else:
+                        resp = {"traceId": body["traceId"], "status": "SC_OK", "data": {"username": body["username"], "status": body.get("status", "ACTIVE"), "bettingEnabled": body.get("bettingEnabled", True), "rgRestricted": False, "statusReason": None, "revokedSessions": 0, "revokedLaunchTokens": 0}}
+                elif self.path == "/operator/v1/wallet/transaction-status":
+                    resp = {"traceId": body["traceId"], "status": "SC_OK", "data": {"transactions": [{"transactionId": body.get("transactionId", "bet_py_1"), "username": body.get("username", "player_9527"), "status": "COMPLETED"}]}}
                 elif self.path == "/operator/v1/transaction/list":
                     rows = [{"betId": "b2btkt1"}, {"betId": "b2btkt2"}] if body.get("pageNo", 1) == 1 else [{"betId": "b2btkt3"}]
                     resp = {"traceId": body["traceId"], "status": "SC_OK", "data": {"transactions": rows, "pageNo": body.get("pageNo", 1), "pageSize": 2, "total": 3}}
@@ -122,7 +134,7 @@ class TestBaccaratPythonSdk(unittest.TestCase):
                     resp = {"traceId": body["traceId"], "status": "SC_OK", "data": {"betId": body["betId"], "status": 1, "roundResult": {"outcome": "BANKER", "playerPoints": 4, "bankerPoints": 7, "playerPair": False, "bankerPair": False, "natural": False}}}
 
                 out = json.dumps(resp).encode("utf-8")
-                self.send_response(200)
+                self.send_response(status_code)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(out)))
                 self.end_headers()
@@ -164,6 +176,24 @@ class TestBaccaratPythonSdk(unittest.TestCase):
             self.assertEqual(len(all_tx), 3)
             detail = client.get_transaction_detail(bet_id="b2btkt1", from_time=1000, to_time=2000)
             self.assertEqual(detail["data"]["roundResult"]["outcome"], "BANKER")
+
+            ps_ok = client.update_player_status(username="capped_user", action="SET", betting_enabled=True, reset_pnl_window=True)
+            self.assertTrue(ps_ok["data"]["bettingEnabled"])
+            with self.assertRaises(BaccaratApiError) as ctx_403:
+                client.update_player_status(username="locked_user", action="SET", status="ACTIVE")
+            self.assertEqual(ctx_403.exception.http_status, 403)
+            self.assertEqual(ctx_403.exception.status, "SC_USER_DISABLED")
+            self.assertEqual(ctx_403.exception.message, "PLATFORM_RISK_LOCKED")
+            with self.assertRaises(BaccaratApiError) as ctx_409:
+                client.update_player_status(username="capped_user", action="SET", betting_enabled=True)
+            self.assertEqual(ctx_409.exception.http_status, 409)
+            self.assertEqual(ctx_409.exception.status, "SC_INVALID_REQUEST")
+            self.assertEqual(ctx_409.exception.message, "PNL_CAP_BREACHED_RESET_REQUIRED")
+
+            wts_user = client.get_wallet_transaction_status(username="player_9527", from_time=1000, to_time=86_401_000)
+            self.assertEqual(wts_user["data"]["transactions"][0]["username"], "player_9527")
+            with self.assertRaises(BaccaratSdkError):
+                client.get_wallet_transaction_status(username="player_9527", from_time=0, to_time=86_400_001)
 
             with self.assertRaises(BaccaratSdkError):
                 client.get_transaction_detail(bet_id="b2btkt1", from_time=0, to_time=604_800_001)

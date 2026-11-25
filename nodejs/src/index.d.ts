@@ -108,14 +108,29 @@ export class Client {
   updatePlayerStatus(params: {
     traceId?: string;
     username: string;
-    status?: 'ACTIVE' | 'SUSPENDED' | string | null;
+    action?: 'GET' | 'SET' | string | null;
+    status?: 'ACTIVE' | 'DISABLED' | string | null;
     bettingEnabled?: boolean | null;
+    resetPnlWindow?: boolean | null;
     reason?: string | null;
-  }): Promise<{ traceId: string; status: 'SC_OK'; data: Record<string, unknown> }>;
+  }): Promise<{
+    traceId: string;
+    status: 'SC_OK';
+    data: {
+      username: string;
+      status: 'ACTIVE' | 'DISABLED';
+      bettingEnabled: boolean;
+      rgRestricted: boolean;
+      statusReason: string | null;
+      revokedSessions: number;
+      revokedLaunchTokens: number;
+    };
+  }>;
   updatePlayerLimits(params: {
     traceId?: string;
     username: string;
     currency: string;
+    action?: 'GET' | 'SET' | 'CLEAR' | string | null;
     minBet?: string | null;
     maxBet?: string | null;
     maxTableRound?: string | null;
@@ -141,6 +156,8 @@ export class Client {
     betId: string;
     fromTime?: number | null;
     toTime?: number | null;
+    language?: string | null;
+    detailUrlTtlSec?: number | null;
   }): Promise<{ traceId: string; status: 'SC_OK'; data: Record<string, unknown> }>;
   listUnsettledTransactions(params?: {
     traceId?: string;
@@ -155,6 +172,9 @@ export class Client {
     traceId?: string;
     transactionId?: string | null;
     betId?: string | null;
+    username?: string | null;
+    fromTime?: number | null;
+    toTime?: number | null;
   }): Promise<{ traceId: string; status: 'SC_OK'; data: Record<string, unknown> }>;
 }
 

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.4.0)."""
+"""Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.0)."""
 
 from __future__ import annotations
 
@@ -80,7 +80,9 @@ class BaccaratApiError(BaccaratSdkError):
         validation: Optional[Dict[str, str]] = None,
         http_status: int = 200,
     ) -> None:
-        super().__init__(message or f"B2B API error: {status}", status)
+        msg = message or f"B2B API error: {status}"
+        super().__init__(msg, status)
+        self.message = msg
         self.trace_id = trace_id
         self.status = status
         self.validation = validation
@@ -328,7 +330,10 @@ def _default_transport(url: str, headers: Dict[str, str], raw_body: bytes, timeo
                 raise BaccaratSdkError("Gateway response exceeded 16 MiB limit", StatusCode.SC_INVALID_REQUEST)
             return resp.status, chunk.decode("utf-8", errors="replace")
     except urllib.error.HTTPError as err:
-        body = err.read(MAX_HTTP_RESPONSE_BYTES).decode("utf-8", errors="replace") if err.fp else ""
+        try:
+            body = err.read(MAX_HTTP_RESPONSE_BYTES).decode("utf-8", errors="replace") if err.fp else ""
+        finally:
+            err.close()
         return err.code, body
     except BaccaratSdkError:
         raise
@@ -467,16 +472,22 @@ class Client:
         self,
         *,
         username: str,
+        action: Optional[str] = None,
         status: Optional[str] = None,
         betting_enabled: Optional[bool] = None,
+        reset_pnl_window: Optional[bool] = None,
         reason: Optional[str] = None,
         trace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"username": username}
+        if action is not None:
+            payload["action"] = action
         if status is not None:
             payload["status"] = status
         if betting_enabled is not None:
             payload["bettingEnabled"] = betting_enabled
+        if reset_pnl_window is not None:
+            payload["resetPnlWindow"] = reset_pnl_window
         if reason is not None:
             payload["reason"] = reason
         if trace_id is not None:
@@ -488,6 +499,7 @@ class Client:
         *,
         username: str,
         currency: str,
+        action: Optional[str] = None,
         min_bet: Optional[str] = None,
         max_bet: Optional[str] = None,
         max_table_round: Optional[str] = None,
@@ -497,6 +509,8 @@ class Client:
         trace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"username": username, "currency": currency}
+        if action is not None:
+            payload["action"] = action
         if min_bet is not None:
             payload["minBet"] = min_bet
         if max_bet is not None:
@@ -570,6 +584,8 @@ class Client:
         bet_id: str,
         from_time: Optional[int] = None,
         to_time: Optional[int] = None,
+        language: Optional[str] = None,
+        detail_url_ttl_sec: Optional[int] = None,
         trace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         if not isinstance(bet_id, str) or not bet_id.strip():
@@ -583,6 +599,10 @@ class Client:
                 raise BaccaratSdkError("Detail query window must satisfy 0 <= to_time - from_time <= 604800000", "INVALID_ARGUMENT")
             payload["fromTime"] = from_time
             payload["toTime"] = to_time
+        if language is not None:
+            payload["language"] = language
+        if detail_url_ttl_sec is not None:
+            payload["detailUrlTtlSec"] = detail_url_ttl_sec
         if trace_id is not None:
             payload["traceId"] = trace_id
         return self._post_signed("/operator/v1/transaction/detail", payload)
@@ -620,17 +640,33 @@ class Client:
         *,
         transaction_id: Optional[str] = None,
         bet_id: Optional[str] = None,
+        username: Optional[str] = None,
+        from_time: Optional[int] = None,
+        to_time: Optional[int] = None,
         trace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         tx_s = (transaction_id or "").strip() if isinstance(transaction_id, str) else ""
         bet_s = (bet_id or "").strip() if isinstance(bet_id, str) else ""
-        if not tx_s and not bet_s:
-            raise BaccaratSdkError("Either transaction_id or bet_id is required", "INVALID_ARGUMENT")
+        user_s = (username or "").strip() if isinstance(username, str) else ""
+        if not tx_s and not bet_s and not user_s:
+            raise BaccaratSdkError("At least one of transaction_id, bet_id, or username is required", "INVALID_ARGUMENT")
         payload: Dict[str, Any] = {}
         if tx_s:
             payload["transactionId"] = tx_s
         if bet_s:
             payload["betId"] = bet_s
+        if user_s:
+            payload["username"] = user_s
+        if user_s and not tx_s and not bet_s:
+            if isinstance(from_time, bool) or isinstance(to_time, bool) or not isinstance(from_time, int) or not isinstance(to_time, int):
+                raise BaccaratSdkError("from_time and to_time ints are required when querying by username alone", "INVALID_ARGUMENT")
+            span = to_time - from_time
+            if from_time < 0 or span < 0 or span > 86_400_000:
+                raise BaccaratSdkError("Username query window must satisfy 0 <= to_time - from_time <= 86400000 (24 hours)", "INVALID_ARGUMENT")
+        if from_time is not None:
+            payload["fromTime"] = from_time
+        if to_time is not None:
+            payload["toTime"] = to_time
         if trace_id is not None:
             payload["traceId"] = trace_id
         return self._post_signed("/operator/v1/wallet/transaction-status", payload)

@@ -455,8 +455,16 @@ public final class BaccaratSdk {
         public Map<String, Object> getWalletTransactionStatus(Map<String, Object> params) {
             String txId = str(params, "transactionId").trim();
             String betId = str(params, "betId").trim();
-            if (txId.isEmpty() && betId.isEmpty()) {
-                throw new SdkException("INVALID_ARGUMENT", "Either transactionId or betId is required");
+            String username = str(params, "username").trim();
+            if (txId.isEmpty() && betId.isEmpty() && username.isEmpty()) {
+                throw new SdkException("INVALID_ARGUMENT", "At least one of transactionId, betId, or username is required");
+            }
+            if (!username.isEmpty() && txId.isEmpty() && betId.isEmpty()) {
+                long from = requireLong(params, "fromTime");
+                long to = requireLong(params, "toTime");
+                if (from < 0 || to < from || (to - from) > 86_400_000L) {
+                    throw new SdkException("INVALID_ARGUMENT", "Username query window must satisfy 0 <= toTime - fromTime <= 86400000 (24 hours)");
+                }
             }
             return postSigned("/operator/v1/wallet/transaction-status", params);
         }

@@ -200,6 +200,20 @@ func TestS2SClientAndWebhookHTTPServer(t *testing.T) {
 				rows = []map[string]any{{"betId": "b2btkt3"}}
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"traceId": body["traceId"], "status": SC_OK, "data": map[string]any{"transactions": rows, "pageNo": pNo, "pageSize": 2, "total": 3}})
+		case "/operator/v1/player/status":
+			if body["username"] == "locked_user" {
+				w.WriteHeader(http.StatusForbidden)
+				_ = json.NewEncoder(w).Encode(map[string]any{"traceId": body["traceId"], "status": SC_USER_DISABLED, "message": "PLATFORM_RISK_LOCKED"})
+				return
+			}
+			if body["username"] == "capped_user" && body["bettingEnabled"] == true && body["resetPnlWindow"] != true {
+				w.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(w).Encode(map[string]any{"traceId": body["traceId"], "status": SC_INVALID_REQUEST, "message": "PNL_CAP_BREACHED_RESET_REQUIRED"})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"traceId": body["traceId"], "status": SC_OK, "data": map[string]any{"username": body["username"], "status": "ACTIVE", "bettingEnabled": true, "rgRestricted": false, "statusReason": nil, "revokedSessions": 0, "revokedLaunchTokens": 0}})
+		case "/operator/v1/wallet/transaction-status":
+			_ = json.NewEncoder(w).Encode(map[string]any{"traceId": body["traceId"], "status": SC_OK, "data": map[string]any{"transactions": []map[string]any{{"transactionId": "bet_go_1", "username": body["username"], "status": "COMPLETED"}}}})
 		case "/operator/v1/transaction/detail":
 			_ = json.NewEncoder(w).Encode(map[string]any{"traceId": body["traceId"], "status": SC_OK, "data": map[string]any{"betId": body["betId"], "status": 1, "roundResult": map[string]any{"outcome": "PLAYER", "playerPoints": 9, "bankerPoints": 2, "natural": true}}})
 		}
@@ -242,6 +256,28 @@ func TestS2SClientAndWebhookHTTPServer(t *testing.T) {
 	det, _, err := client.GetTransactionDetail(ctx, TransactionDetailRequest{BetID: "b2btkt1", FromTime: 1000, ToTime: 2000})
 	if err != nil || det.RoundResult == nil || det.RoundResult.Outcome != "PLAYER" {
 		t.Fatalf("detail failed: %v", err)
+	}
+	tTrue := true
+	psData, _, err := client.UpdatePlayerStatus(ctx, UpdatePlayerStatusRequest{Username: "capped_user", Action: "SET", BettingEnabled: &tTrue, ResetPnlWindow: &tTrue})
+	if err != nil || psData["bettingEnabled"] != true {
+		t.Fatalf("updatePlayerStatus reset failed: %v", err)
+	}
+	_, _, err = client.UpdatePlayerStatus(ctx, UpdatePlayerStatusRequest{Username: "locked_user", Action: "SET", Status: "ACTIVE"})
+	var apiErr403 *ApiError
+	if !errors.As(err, &apiErr403) || apiErr403.HTTPStatus != 403 || apiErr403.Status != SC_USER_DISABLED || apiErr403.Message != "PLATFORM_RISK_LOCKED" {
+		t.Fatalf("expected 403 PLATFORM_RISK_LOCKED, got %v", err)
+	}
+	_, _, err = client.UpdatePlayerStatus(ctx, UpdatePlayerStatusRequest{Username: "capped_user", Action: "SET", BettingEnabled: &tTrue})
+	var apiErr409 *ApiError
+	if !errors.As(err, &apiErr409) || apiErr409.HTTPStatus != 409 || apiErr409.Status != SC_INVALID_REQUEST || apiErr409.Message != "PNL_CAP_BREACHED_RESET_REQUIRED" {
+		t.Fatalf("expected 409 PNL_CAP_BREACHED_RESET_REQUIRED, got %v", err)
+	}
+	wtsData, _, err := client.GetWalletTransactionStatus(ctx, WalletTransactionStatusRequest{Username: "player_9527", FromTime: 1000, ToTime: 86401000})
+	if err != nil || len(wtsData["transactions"].([]any)) != 1 {
+		t.Fatalf("wallet status by username failed: %v", err)
+	}
+	if _, _, err := client.GetWalletTransactionStatus(ctx, WalletTransactionStatusRequest{Username: "player_9527", FromTime: 0, ToTime: 86400001}); err == nil {
+		t.Fatal("expected >24h username query to fail")
 	}
 
 	// Webhook HTTP server end-to-end

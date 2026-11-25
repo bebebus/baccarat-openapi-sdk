@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.4.0).
+//! Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.0).
 
 pub mod crypto;
 mod curl_ffi;
@@ -590,8 +590,22 @@ impl Client {
     pub fn get_wallet_transaction_status(&self, params: Json) -> Result<Json, SdkError> {
         let tx_id = params.get("transactionId").as_str().unwrap_or("").trim();
         let bet_id = params.get("betId").as_str().unwrap_or("").trim();
-        if tx_id.is_empty() && bet_id.is_empty() {
-            return Err(SdkError::Argument("transactionId or betId is required".into()));
+        let username = params.get("username").as_str().unwrap_or("").trim();
+        if tx_id.is_empty() && bet_id.is_empty() && username.is_empty() {
+            return Err(SdkError::Argument("transactionId, betId, or username is required".into()));
+        }
+        if !username.is_empty() && tx_id.is_empty() && bet_id.is_empty() {
+            let Some(from) = params.get("fromTime").as_i64() else {
+                return Err(SdkError::Argument("fromTime integer is required when querying by username alone".into()));
+            };
+            let Some(to) = params.get("toTime").as_i64() else {
+                return Err(SdkError::Argument("toTime integer is required when querying by username alone".into()));
+            };
+            if from < 0 || to < from || (to - from) > 86_400_000 {
+                return Err(SdkError::Argument(
+                    "username query window must satisfy 0 <= toTime - fromTime <= 86400000".into(),
+                ));
+            }
         }
         self.post_signed("/operator/v1/wallet/transaction-status", params)
     }
@@ -1305,6 +1319,7 @@ mod tests {
                 let body = Json::parse(&String::from_utf8_lossy(raw_body)).unwrap();
                 let mut resp = Json::object();
                 resp.set("traceId", body.get("traceId").clone());
+                let mut status_line = "200 OK";
                 if st != status_code::SC_OK {
                     resp.set("status", Json::Str(st.into()));
                     resp.set("message", Json::Str("bad auth".into()));
@@ -1341,6 +1356,38 @@ mod tests {
                             data.set("revokedLaunchTokens", Json::Int(0));
                             resp.set("data", data);
                         }
+                        "/operator/v1/player/status" => {
+                            if body.get("username").as_str() == Some("locked_user") {
+                                status_line = "403 Forbidden";
+                                resp.set("status", Json::Str("SC_USER_DISABLED".into()));
+                                resp.set("message", Json::Str("PLATFORM_RISK_LOCKED".into()));
+                            } else if body.get("username").as_str() == Some("capped_user")
+                                && body.get("bettingEnabled").as_bool() == Some(true)
+                                && body.get("resetPnlWindow").as_bool() != Some(true)
+                            {
+                                status_line = "409 Conflict";
+                                resp.set("status", Json::Str("SC_INVALID_REQUEST".into()));
+                                resp.set("message", Json::Str("PNL_CAP_BREACHED_RESET_REQUIRED".into()));
+                            } else {
+                                let mut data = Json::object();
+                                data.set("username", body.get("username").clone());
+                                data.set("status", Json::Str("ACTIVE".into()));
+                                data.set("bettingEnabled", Json::Bool(true));
+                                data.set("rgRestricted", Json::Bool(false));
+                                data.set("revokedSessions", Json::Int(0));
+                                data.set("revokedLaunchTokens", Json::Int(0));
+                                resp.set("data", data);
+                            }
+                        }
+                        "/operator/v1/wallet/transaction-status" => {
+                            let mut row = Json::object();
+                            row.set("transactionId", Json::Str("bet_rs_1".into()));
+                            row.set("username", body.get("username").clone());
+                            row.set("status", Json::Str("COMPLETED".into()));
+                            let mut data = Json::object();
+                            data.set("transactions", Json::Arr(vec![row]));
+                            resp.set("data", data);
+                        }
                         "/operator/v1/transaction/list" => {
                             let pno = body.get("pageNo").as_i64().unwrap_or(1);
                             let mut r1 = Json::object();
@@ -1371,7 +1418,8 @@ mod tests {
                 }
                 let out_str = resp.dump();
                 let http_msg = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                    status_line,
                     out_str.len(),
                     out_str
                 );
@@ -1419,6 +1467,35 @@ mod tests {
         det_p.set("toTime", Json::Int(2000));
         let det = client.get_transaction_detail(det_p).unwrap();
         assert_eq!(det.get("data").get("roundResult").get("outcome").as_str(), Some("PLAYER"));
+
+        let mut ps_ok_p = Json::object();
+        ps_ok_p.set("username", Json::Str("capped_user".into()));
+        ps_ok_p.set("action", Json::Str("SET".into()));
+        ps_ok_p.set("bettingEnabled", Json::Bool(true));
+        ps_ok_p.set("resetPnlWindow", Json::Bool(true));
+        let ps_ok = client.update_player_status(ps_ok_p).unwrap();
+        assert_eq!(ps_ok.get("data").get("bettingEnabled").as_bool(), Some(true));
+
+        let mut ps_403 = Json::object();
+        ps_403.set("username", Json::Str("locked_user".into()));
+        ps_403.set("action", Json::Str("SET".into()));
+        ps_403.set("status", Json::Str("ACTIVE".into()));
+        let err_403 = client.update_player_status(ps_403).unwrap_err();
+        assert!(matches!(err_403, SdkError::Api { http_status: 403, ref status, ref message, .. } if status == "SC_USER_DISABLED" && message == "PLATFORM_RISK_LOCKED"));
+
+        let mut ps_409 = Json::object();
+        ps_409.set("username", Json::Str("capped_user".into()));
+        ps_409.set("action", Json::Str("SET".into()));
+        ps_409.set("bettingEnabled", Json::Bool(true));
+        let err_409 = client.update_player_status(ps_409).unwrap_err();
+        assert!(matches!(err_409, SdkError::Api { http_status: 409, ref status, ref message, .. } if status == "SC_INVALID_REQUEST" && message == "PNL_CAP_BREACHED_RESET_REQUIRED"));
+
+        let mut wts_p = Json::object();
+        wts_p.set("username", Json::Str("player_9527".into()));
+        wts_p.set("fromTime", Json::Int(1000));
+        wts_p.set("toTime", Json::Int(86_401_000));
+        let wts = client.get_wallet_transaction_status(wts_p).unwrap();
+        assert_eq!(wts.get("data").get("transactions").as_array().unwrap()[0].get("username").as_str(), Some("player_9527"));
 
         stop.store(true, Ordering::Relaxed);
         let _ = std::net::TcpStream::connect(("127.0.0.1", port));

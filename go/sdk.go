@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Package baccarat provides a zero-dependency Go SDK for the Baccarat Live Platform
-// B2B Operator Seamless Wallet API (v1.4.0).
+// B2B Operator Seamless Wallet API (v1.5.0).
 package baccarat
 
 import (
@@ -494,11 +494,14 @@ type PingRequest struct {
 }
 
 type PingData struct {
-	OperatorID        string   `json:"operatorId"`
-	Status            string   `json:"status"`
-	ServerTime        int64    `json:"serverTime"`
-	AllowedCurrencies []string `json:"allowedCurrencies"`
-	AllowedTableCount int      `json:"allowedTableCount"`
+	OperatorID         string   `json:"operatorId"`
+	OperatorName       string   `json:"operatorName,omitempty"`
+	CallerIP           *string  `json:"callerIp,omitempty"`
+	CallbackConfigured bool     `json:"callbackConfigured,omitempty"`
+	Status             string   `json:"status,omitempty"`
+	ServerTime         int64    `json:"serverTime"`
+	AllowedCurrencies  []string `json:"allowedCurrencies,omitempty"`
+	AllowedTableCount  int      `json:"allowedTableCount,omitempty"`
 }
 
 func (c *Client) Ping(ctx context.Context, req PingRequest) (*PingData, string, error) {
@@ -613,8 +616,10 @@ func (c *Client) TerminateSessions(ctx context.Context, req TerminateSessionsReq
 type UpdatePlayerStatusRequest struct {
 	TraceID        string `json:"traceId"`
 	Username       string `json:"username"`
+	Action         string `json:"action,omitempty"`
 	Status         string `json:"status,omitempty"`
 	BettingEnabled *bool  `json:"bettingEnabled,omitempty"`
+	ResetPnlWindow *bool  `json:"resetPnlWindow,omitempty"`
 	Reason         string `json:"reason,omitempty"`
 }
 
@@ -634,6 +639,7 @@ type UpdatePlayerLimitsRequest struct {
 	TraceID       string   `json:"traceId"`
 	Username      string   `json:"username"`
 	Currency      string   `json:"currency"`
+	Action        string   `json:"action,omitempty"`
 	MinBet        *string  `json:"minBet,omitempty"`
 	MaxBet        *string  `json:"maxBet,omitempty"`
 	MaxTableRound *string  `json:"maxTableRound,omitempty"`
@@ -735,23 +741,28 @@ func (c *Client) ListAllTransactions(ctx context.Context, fromTime, toTime int64
 }
 
 type TransactionDetailRequest struct {
-	TraceID  string `json:"traceId"`
-	BetID    string `json:"betId"`
-	FromTime int64  `json:"fromTime"`
-	ToTime   int64  `json:"toTime"`
+	TraceID         string `json:"traceId"`
+	BetID           string `json:"betId"`
+	FromTime        int64  `json:"fromTime,omitempty"`
+	ToTime          int64  `json:"toTime,omitempty"`
+	Language        string `json:"language,omitempty"`
+	DetailURLTTLSec int    `json:"detailUrlTtlSec,omitempty"`
 }
 
 type VerifiedRoundResult struct {
-	Outcome      string `json:"outcome"`
-	PlayerPoints int    `json:"playerPoints"`
-	BankerPoints int    `json:"bankerPoints"`
-	PlayerPair   bool   `json:"playerPair"`
-	BankerPair   bool   `json:"bankerPair"`
-	Natural      bool   `json:"natural"`
+	Outcome      string           `json:"outcome"`
+	PlayerPoints int              `json:"playerPoints"`
+	BankerPoints int              `json:"bankerPoints"`
+	PlayerPair   bool             `json:"playerPair"`
+	BankerPair   bool             `json:"bankerPair"`
+	Natural      bool             `json:"natural"`
+	PlayerCards  []map[string]any `json:"playerCards,omitempty"`
+	BankerCards  []map[string]any `json:"bankerCards,omitempty"`
 }
 
 type TransactionDetailData struct {
 	ReconcileTransactionRow
+	DetailURL   string               `json:"detailUrl,omitempty"`
 	RoundResult *VerifiedRoundResult `json:"roundResult"`
 	Adjustments []map[string]any     `json:"adjustments,omitempty"`
 }
@@ -802,11 +813,22 @@ type WalletTransactionStatusRequest struct {
 	TraceID       string `json:"traceId"`
 	TransactionID string `json:"transactionId,omitempty"`
 	BetID         string `json:"betId,omitempty"`
+	Username      string `json:"username,omitempty"`
+	FromTime      int64  `json:"fromTime,omitempty"`
+	ToTime        int64  `json:"toTime,omitempty"`
 }
 
 func (c *Client) GetWalletTransactionStatus(ctx context.Context, req WalletTransactionStatusRequest) (map[string]any, string, error) {
-	if strings.TrimSpace(req.TransactionID) == "" && strings.TrimSpace(req.BetID) == "" {
-		return nil, "", &SdkError{Code: "INVALID_ARGUMENT", Message: "transactionId or betId is required"}
+	hasTx := strings.TrimSpace(req.TransactionID) != ""
+	hasBet := strings.TrimSpace(req.BetID) != ""
+	hasUser := strings.TrimSpace(req.Username) != ""
+	if !hasTx && !hasBet && !hasUser {
+		return nil, "", &SdkError{Code: "INVALID_ARGUMENT", Message: "at least one of transactionId, betId, or username is required"}
+	}
+	if hasUser && !hasTx && !hasBet {
+		if req.FromTime < 0 || req.ToTime < req.FromTime || (req.ToTime-req.FromTime) > 86400000 || (req.FromTime == 0 && req.ToTime == 0) {
+			return nil, "", &SdkError{Code: "INVALID_ARGUMENT", Message: "username query requires 0 <= ToTime - FromTime <= 86400000 (24 hours)"}
+		}
 	}
 	if strings.TrimSpace(req.TraceID) == "" {
 		req.TraceID = newUUIDv4()

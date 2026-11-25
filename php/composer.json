@@ -1,6 +1,6 @@
 {
   "name": "bebebus/baccarat-openapi-sdk",
-  "description": "Zero-dependency PHP 8 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.4.0)",
+  "description": "Zero-dependency PHP 8 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.0)",
   "type": "library",
   "license": "MIT",
   "require": {

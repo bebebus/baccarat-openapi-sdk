@@ -1,27 +1,27 @@
 > 中文 | [English](./INTERFACES.en.md)
 
-# B2B 运营商单一无缝钱包接口与状态码字典（v1.4.0）
+# B2B 运营商单一无缝钱包接口与状态码字典（v1.5.0）
 
 在线交互式文档与 OpenAPI 3.1 规范：`https://openapi.lt.cniia.cloud`
 
 ## 1. 入站 S2S 接口（商户 → 平台，Base URL：`https://api.lt.cniia.cloud` 或专属正式网关）
 
-所有接口均为 `POST` JSON 请求，平台统一返回 `HTTP 200` 信封：
+所有接口均为 `POST` JSON 请求，常规业务响应返回 `HTTP 200` 结构化信封；其中 `POST /operator/v1/player/status` 针对风控拦截场景额外返回同结构的非 200 HTTP 状态码（`HTTP 403` `SC_USER_DISABLED` / `PLATFORM_RISK_LOCKED`、`HTTP 409` `SC_INVALID_REQUEST` / `PNL_CAP_BREACHED_RESET_REQUIRED`、`HTTP 400` `SC_INVALID_REQUEST`），7 套 SDK 均自动解析为带 `httpStatus` / `status` / `message` 的 API 异常：
 - 成功：`{ "traceId": "...", "status": "SC_OK", "data": { ... } }`
 - 业务/协议拒绝：`{ "traceId": "...", "status": "SC_*", "message": "...", "validation"?: { ... } }`
 
 | SDK 方法名（JS/Java/PHP/C++ 驼峰 \| Python/Rust 蛇形 \| Go 首字母大写） | HTTP 路径 | 必填入参 | 可选入参 | 返回 `data` 核心字段 |
 | --- | --- | --- | --- | --- |
-| `ping` / `ping` / `Ping` | `POST /operator/v1/ping` | —（`traceId` 自动补全） | — | `operatorId, status, serverTime, allowedCurrencies, allowedTableCount` |
+| `ping` / `ping` / `Ping` | `POST /operator/v1/ping` | —（`traceId` 自动补全） | — | `operatorId, operatorName, callerIp, callbackConfigured, serverTime` |
 | `listTables` / `list_tables` / `ListTables` | `POST /operator/v1/game/tables` | —（`traceId` 自动补全） | `currency, pageNo (默认 1), pageSize (1..200, 默认 50)` | `tables[], pageNo, pageSize, total` |
-| `createGameUrl` / `create_game_url` / `CreateGameUrl` | `POST /operator/v1/game/url` | `username, platform ("web"\|"H5"), currency, lobbyUrl, ipAddress` | `tableId, entryMode ("lobby"\|"table"\|"table_locked"), language (默认 "en")` | `gameUrl, token (b2bt_<48hex>), entryMode, tableId` |
+| `createGameUrl` / `create_game_url` / `CreateGameUrl` | `POST /operator/v1/game/url` | `username, platform ("web"\|"H5"), currency, lobbyUrl, ipAddress` | `tableId, entryMode ("lobby"\|"table"\|"table_locked"), language (默认 "en")` | `gameUrl, token (b2bt_<48hex>), entryMode` |
 | `terminateSessions` / `terminate_sessions` / `TerminateSessions` | `POST /operator/v1/game/terminate` | — | `username, scope ("USER"\|"ALL")` | `scope, username, terminatedSessions, revokedLaunchTokens` |
-| `updatePlayerStatus` / `update_player_status` / `UpdatePlayerStatus` | `POST /operator/v1/player/status` | `username` | `status ("ACTIVE"\|"SUSPENDED"), bettingEnabled (boolean), reason` | `username, status, bettingEnabled, terminatedSessions, revokedLaunchTokens` |
-| `updatePlayerLimits` / `update_player_limits` / `UpdatePlayerLimits` | `POST /operator/v1/player/limits` | `username, currency` | `minBet, maxBet, maxTableRound, maxUserDay, maxLossPerDay, customChips[]` | `username, currency, minBet..customChips, updatedAt` |
+| `updatePlayerStatus` / `update_player_status` / `UpdatePlayerStatus` | `POST /operator/v1/player/status` | `username` | `action ("GET"\|"SET"), status ("ACTIVE"\|"DISABLED"), bettingEnabled (boolean), resetPnlWindow (boolean), reason` | `username, status, bettingEnabled, rgRestricted, statusReason, revokedSessions, revokedLaunchTokens` |
+| `updatePlayerLimits` / `update_player_limits` / `UpdatePlayerLimits` | `POST /operator/v1/player/limits` | `username, currency` | `action ("GET"\|"SET"\|"CLEAR"), minBet, maxBet, maxTableRound, maxUserDay, maxLossPerDay, customChips[]` | `username, currency, cleared, hasOverride, minBet..customChips` |
 | `listTransactions` / `list_transactions` / `ListTransactions` | `POST /operator/v1/transaction/list` | `fromTime, toTime`（非负整数毫秒，`toTime >= fromTime`） | `timeType, status, username, tableId, roundId, pageNo, pageSize` | `transactions[], pageNo, pageSize, total` |
-| `getTransactionDetail` / `get_transaction_detail` / `GetTransactionDetail` | `POST /operator/v1/transaction/detail` | `betId` | `fromTime, toTime`（省略默认近 7 天；指定时跨度 `<= 604800000` ms） | 对账字段 + `roundResult` + `detailUrl` + `adjustments[]` |
+| `getTransactionDetail` / `get_transaction_detail` / `GetTransactionDetail` | `POST /operator/v1/transaction/detail` | `betId` | `fromTime, toTime`（省略默认近 7 天；指定时跨度 `<= 604800000` ms）, `language, detailUrlTtlSec` | 对账字段 + `roundResult` + `detailUrl`（含花色牌面与 `opadj` 明细）+ `adjustments[]` |
 | `listUnsettledTransactions` / `list_unsettled_transactions` / `ListUnsettledTransactions` | `POST /operator/v1/transaction/unsettled` | — | `fromTime, toTime, username, tableId, pageNo, pageSize` | `transactions[], pageNo, pageSize, total` |
-| `getWalletTransactionStatus` / `get_wallet_transaction_status` / `GetWalletTransactionStatus` | `POST /operator/v1/wallet/transaction-status` | `transactionId` 或 `betId` 二选一 | — | `transactions[]`（出站回调实时状态与重试计数） |
+| `getWalletTransactionStatus` / `get_wallet_transaction_status` / `GetWalletTransactionStatus` | `POST /operator/v1/wallet/transaction-status` | `transactionId`、`betId` 或 `username` 三选一 | `fromTime, toTime`（仅传 `username` 时必填且跨度 `<= 86400000` ms 即 24 小时） | `transactions[]`（出站回调实时状态、重试计数与牌局状态） |
 
 此外每套 SDK 均提供 `listAllTransactions` / `list_all_transactions` / `ListAllTransactions` 自动翻页拉取器，按 `(settledAt ASC, ticketId ASC)` 拉齐指定时间区间内的全部已结算对账流水。
 

@@ -1,23 +1,23 @@
 > [中文](./INTERFACES.md) | English
 
-# B2B Operator Seamless Wallet Endpoints & Status Codes (v1.4.0)
+# B2B Operator Seamless Wallet Endpoints & Status Codes (v1.5.0)
 
 Interactive Explorer & OpenAPI 3.1 Spec: `https://openapi.lt.cniia.cloud`
 
 ## 1. Inbound S2S Endpoints (Merchant -> Platform)
 
-All endpoints accept `POST` JSON signed with `X-API-Key` and `X-Signature`, returning `HTTP 200` with `{ traceId, status: "SC_OK", data }` or `{ traceId, status: "SC_*", message, validation? }`:
+All endpoints accept `POST` JSON signed with `X-API-Key` and `X-Signature`, returning `{ traceId, status: "SC_OK", data }` on `HTTP 200` or `{ traceId, status: "SC_*", message, validation? }` on error (`HTTP 200` by default; `POST /operator/v1/player/status` additionally returns structured JSON error envelopes with `HTTP 403` `SC_USER_DISABLED` / `PLATFORM_RISK_LOCKED`, `HTTP 409` `SC_INVALID_REQUEST` / `PNL_CAP_BREACHED_RESET_REQUIRED`, or `HTTP 400` `SC_INVALID_REQUEST`, all parsed into typed API errors across all 7 SDKs):
 
-1. **`POST /operator/v1/ping`** (`ping` / `ping` / `Ping`): Authenticated credential & IP allowlist self-test.
+1. **`POST /operator/v1/ping`** (`ping` / `ping` / `Ping`): Authenticated credential & IP allowlist self-test (`operatorId, operatorName, callerIp, callbackConfigured, serverTime`).
 2. **`POST /operator/v1/game/tables`** (`listTables` / `list_tables` / `ListTables`): Lists permitted live tables with operating `currency`, dynamic `minBet`/`maxBet`/`chipUnit`, `status`, and `coverImageUrl`.
 3. **`POST /operator/v1/game/url`** (`createGameUrl` / `create_game_url` / `CreateGameUrl`): Issues a single-use launch URL (`gameUrl`) and 53-char `b2bt_<48hex>` wallet token (`entryMode`: `lobby | table | table_locked`).
 4. **`POST /operator/v1/game/terminate`** (`terminateSessions` / `terminate_sessions` / `TerminateSessions`): Revokes active sessions and unused launch tokens (`scope`: `USER | ALL`).
-5. **`POST /operator/v1/player/status`** (`updatePlayerStatus` / `update_player_status` / `UpdatePlayerStatus`): Updates `ACTIVE | SUSPENDED` status and view-only `bettingEnabled` switch.
-6. **`POST /operator/v1/player/limits`** (`updatePlayerLimits` / `update_player_limits` / `UpdatePlayerLimits`): Configures per-player dynamic bet/loss limits & chips bounded beneath the operator risk template.
+5. **`POST /operator/v1/player/status`** (`updatePlayerStatus` / `update_player_status` / `UpdatePlayerStatus`): Queries (`GET`) or updates (`SET`) `ACTIVE | DISABLED` login status, view-only `bettingEnabled` switch, and atomic `resetPnlWindow: true` PnL auto-stop reset (`revokedSessions`, `rgRestricted`, `statusReason`; HTTP `403` on platform risk lock, HTTP `409` when `resetPnlWindow: true` is required).
+6. **`POST /operator/v1/player/limits`** (`updatePlayerLimits` / `update_player_limits` / `UpdatePlayerLimits`): Queries (`GET`), sets (`SET`), or clears (`CLEAR`) per-player dynamic bet/loss limits & chips bounded beneath the operator risk template.
 7. **`POST /operator/v1/transaction/list`** (`listTransactions` / `list_transactions` / `ListTransactions` + `listAllTransactions` auto-paginator): Paginated settled & voided ticket feed (`SETTLE_TIME` or `BET_TIME`).
-8. **`POST /operator/v1/transaction/detail`** (`getTransactionDetail` / `get_transaction_detail` / `GetTransactionDetail`): Single-ticket lookup (defaults to trailing 7 days when `fromTime`/`toTime` omitted) with revealed cards, `detailUrl`, and `adjustments`.
+8. **`POST /operator/v1/transaction/detail`** (`getTransactionDetail` / `get_transaction_detail` / `GetTransactionDetail`): Single-ticket lookup (defaults to trailing 7 days when `fromTime`/`toTime` omitted; supports `language` and `detailUrlTtlSec`) with revealed cards, `detailUrl` (suit-colored cards + `opadj` adjustments), and `adjustments`.
 9. **`POST /operator/v1/transaction/unsettled`** (`listUnsettledTransactions` / `list_unsettled_transactions` / `ListUnsettledTransactions`): Open `ACCEPTED` / `HELD` exposure feed.
-10. **`POST /operator/v1/wallet/transaction-status`** (`getWalletTransactionStatus` / `get_wallet_transaction_status` / `GetWalletTransactionStatus`): Real-time outbound callback delivery & retry inspection.
+10. **`POST /operator/v1/wallet/transaction-status`** (`getWalletTransactionStatus` / `get_wallet_transaction_status` / `GetWalletTransactionStatus`): Real-time outbound callback delivery & retry inspection by `transactionId`, `betId`, or `username` (with `<= 24h` `[fromTime, toTime]` window).
 
 ## 2. Outbound Seamless Wallet Webhooks (Platform -> Merchant `{callbackUrl}/wallet/*`)
 

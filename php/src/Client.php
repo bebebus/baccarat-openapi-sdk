@@ -228,8 +228,20 @@ final class Client
     {
         $txId = trim((string) ($params['transactionId'] ?? ''));
         $betId = trim((string) ($params['betId'] ?? ''));
-        if ($txId === '' && $betId === '') {
-            throw new BaccaratSdkException('Either transactionId or betId is required', 'INVALID_ARGUMENT');
+        $username = trim((string) ($params['username'] ?? ''));
+        if ($txId === '' && $betId === '' && $username === '') {
+            throw new BaccaratSdkException('At least one of transactionId, betId, or username is required', 'INVALID_ARGUMENT');
+        }
+        if ($username !== '' && $txId === '' && $betId === '') {
+            $from = $params['fromTime'] ?? null;
+            $to = $params['toTime'] ?? null;
+            if (!is_int($from) || !is_int($to)) {
+                throw new BaccaratSdkException('fromTime and toTime integers are required when querying by username alone', 'INVALID_ARGUMENT');
+            }
+            $span = $to - $from;
+            if ($from < 0 || $span < 0 || $span > 86400000) {
+                throw new BaccaratSdkException('Username query window must satisfy 0 <= toTime - fromTime <= 86400000 (24 hours)', 'INVALID_ARGUMENT');
+            }
         }
         return $this->postSigned('/operator/v1/wallet/transaction-status', $params);
     }

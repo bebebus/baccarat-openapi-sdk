@@ -100,6 +100,18 @@ $mockTransport = static function (string $url, array $headers, string $rawBody, 
     if (str_ends_with($url, '/operator/v1/game/terminate')) {
         return [200, json_encode(['traceId' => $body['traceId'], 'status' => 'SC_OK', 'data' => ['username' => $body['username'], 'terminatedSessions' => 1, 'revokedLaunchTokens' => 0]])];
     }
+    if (str_ends_with($url, '/operator/v1/player/status')) {
+        if (($body['username'] ?? '') === 'locked_user') {
+            return [403, json_encode(['traceId' => $body['traceId'], 'status' => 'SC_USER_DISABLED', 'message' => 'PLATFORM_RISK_LOCKED'])];
+        }
+        if (($body['username'] ?? '') === 'capped_user' && ($body['bettingEnabled'] ?? false) === true && ($body['resetPnlWindow'] ?? false) !== true) {
+            return [409, json_encode(['traceId' => $body['traceId'], 'status' => 'SC_INVALID_REQUEST', 'message' => 'PNL_CAP_BREACHED_RESET_REQUIRED'])];
+        }
+        return [200, json_encode(['traceId' => $body['traceId'], 'status' => 'SC_OK', 'data' => ['username' => $body['username'], 'status' => $body['status'] ?? 'ACTIVE', 'bettingEnabled' => $body['bettingEnabled'] ?? true, 'rgRestricted' => false, 'statusReason' => null, 'revokedSessions' => 0, 'revokedLaunchTokens' => 0]])];
+    }
+    if (str_ends_with($url, '/operator/v1/wallet/transaction-status')) {
+        return [200, json_encode(['traceId' => $body['traceId'], 'status' => 'SC_OK', 'data' => ['transactions' => [['transactionId' => $body['transactionId'] ?? 'bet_u1', 'username' => $body['username'] ?? 'player_9527', 'status' => 'COMPLETED']]]])];
+    }
     if (str_ends_with($url, '/operator/v1/transaction/list')) {
         $rows = ($body['pageNo'] ?? 1) === 1 ? [['betId' => 'b2btkt1'], ['betId' => 'b2btkt2']] : [['betId' => 'b2btkt3']];
         return [200, json_encode(['traceId' => $body['traceId'], 'status' => 'SC_OK', 'data' => ['transactions' => $rows, 'pageNo' => $body['pageNo'] ?? 1, 'pageSize' => 2, 'total' => 3]])];
@@ -137,6 +149,22 @@ assertEq($caughtApiErr, true, 's2s:wrongCurrency');
 assertEq($client->terminateSessions(['username' => 'player_9527'])['data']['terminatedSessions'], 1, 's2s:terminate');
 assertEq(count($client->listAllTransactions(1000, 2000, 2)), 3, 's2s:txAll');
 assertEq($client->getTransactionDetail(['betId' => 'b2btkt1', 'fromTime' => 1000, 'toTime' => 2000])['data']['roundResult']['outcome'], 'TIE', 's2s:detail');
+assertEq($client->updatePlayerStatus(['username' => 'capped_user', 'action' => 'SET', 'bettingEnabled' => true, 'resetPnlWindow' => true])['data']['bettingEnabled'], true, 's2s:playerStatusReset');
+$caught403 = false;
+try {
+    $client->updatePlayerStatus(['username' => 'locked_user', 'action' => 'SET', 'status' => 'ACTIVE']);
+} catch (BaccaratApiException $e) {
+    $caught403 = ($e->httpStatus === 403 && $e->status === 'SC_USER_DISABLED' && $e->getMessage() === 'PLATFORM_RISK_LOCKED');
+}
+assertEq($caught403, true, 's2s:playerStatus403');
+$caught409 = false;
+try {
+    $client->updatePlayerStatus(['username' => 'capped_user', 'action' => 'SET', 'bettingEnabled' => true]);
+} catch (BaccaratApiException $e) {
+    $caught409 = ($e->httpStatus === 409 && $e->status === 'SC_INVALID_REQUEST' && $e->getMessage() === 'PNL_CAP_BREACHED_RESET_REQUIRED');
+}
+assertEq($caught409, true, 's2s:playerStatus409');
+assertEq($client->getWalletTransactionStatus(['username' => 'player_9527', 'fromTime' => 1000, 'toTime' => 86401000])['data']['transactions'][0]['username'], 'player_9527', 's2s:walletStatusByUser');
 
 // 5. WebhookDispatcher & InMemoryWallet lifecycle
 $tok = 'b2bt_9f81c204d7e641b8a5309c17e248f6b109d3a4c5e6f70819';

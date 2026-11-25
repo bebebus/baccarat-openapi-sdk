@@ -581,8 +581,19 @@ Json Client::list_unsettled_transactions(Json params) const {
 Json Client::get_wallet_transaction_status(Json params) const {
     std::string tx_id = trim(params.at("transactionId").as_string());
     std::string bet_id = trim(params.at("betId").as_string());
-    if (tx_id.empty() && bet_id.empty()) {
-        throw SdkError("INVALID_ARGUMENT", "Either transactionId or betId is required");
+    std::string username = trim(params.at("username").as_string());
+    if (tx_id.empty() && bet_id.empty() && username.empty()) {
+        throw SdkError("INVALID_ARGUMENT", "At least one of transactionId, betId, or username is required");
+    }
+    if (!username.empty() && tx_id.empty() && bet_id.empty()) {
+        if (!params.at("fromTime").is_int() || !params.at("toTime").is_int()) {
+            throw SdkError("INVALID_ARGUMENT", "fromTime and toTime integers are required when querying by username alone");
+        }
+        int64_t from = params.at("fromTime").as_int(-1);
+        int64_t to = params.at("toTime").as_int(-1);
+        if (from < 0 || to < from || (to - from) > 86400000LL) {
+            throw SdkError("INVALID_ARGUMENT", "Username query window must satisfy 0 <= toTime - fromTime <= 86400000");
+        }
     }
     return post_signed("/operator/v1/wallet/transaction-status", std::move(params));
 }
