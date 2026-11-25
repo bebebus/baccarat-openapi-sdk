@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.0).
+//! Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.1).
 
 pub mod crypto;
 mod curl_ffi;
@@ -584,6 +584,19 @@ impl Client {
     }
 
     pub fn list_unsettled_transactions(&self, params: Json) -> Result<Json, SdkError> {
+        if params.contains("fromTime") || params.contains("toTime") {
+            let Some(from) = params.get("fromTime").as_i64() else {
+                return Err(SdkError::Argument("fromTime integer is required when specified".into()));
+            };
+            let Some(to) = params.get("toTime").as_i64() else {
+                return Err(SdkError::Argument("toTime integer is required when specified".into()));
+            };
+            if from < 0 || to < from || (to - from) > MAX_DETAIL_WINDOW_MS {
+                return Err(SdkError::Argument(
+                    "unsettled window must satisfy 0 <= toTime - fromTime <= 604800000".into(),
+                ));
+            }
+        }
         self.post_signed("/operator/v1/transaction/unsettled", params)
     }
 
@@ -594,16 +607,23 @@ impl Client {
         if tx_id.is_empty() && bet_id.is_empty() && username.is_empty() {
             return Err(SdkError::Argument("transactionId, betId, or username is required".into()));
         }
-        if !username.is_empty() && tx_id.is_empty() && bet_id.is_empty() {
+        let user_only = !username.is_empty() && tx_id.is_empty() && bet_id.is_empty();
+        let has_window = params.contains("fromTime") || params.contains("toTime");
+        if user_only || has_window {
             let Some(from) = params.get("fromTime").as_i64() else {
-                return Err(SdkError::Argument("fromTime integer is required when querying by username alone".into()));
+                return Err(SdkError::Argument("fromTime integer is required".into()));
             };
             let Some(to) = params.get("toTime").as_i64() else {
-                return Err(SdkError::Argument("toTime integer is required when querying by username alone".into()));
+                return Err(SdkError::Argument("toTime integer is required".into()));
             };
-            if from < 0 || to < from || (to - from) > 86_400_000 {
+            if from < 0 || to < from || (user_only && (to - from) > 86_400_000) {
                 return Err(SdkError::Argument(
-                    "username query window must satisfy 0 <= toTime - fromTime <= 86400000".into(),
+                    if user_only {
+                        "username query window must satisfy 0 <= toTime - fromTime <= 86400000"
+                    } else {
+                        "invalid [fromTime, toTime] window"
+                    }
+                    .into(),
                 ));
             }
         }
@@ -1482,6 +1502,7 @@ mod tests {
         ps_403.set("status", Json::Str("ACTIVE".into()));
         let err_403 = client.update_player_status(ps_403).unwrap_err();
         assert!(matches!(err_403, SdkError::Api { http_status: 403, ref status, ref message, .. } if status == "SC_USER_DISABLED" && message == "PLATFORM_RISK_LOCKED"));
+        assert!(!err_403.is_retryable());
 
         let mut ps_409 = Json::object();
         ps_409.set("username", Json::Str("capped_user".into()));
@@ -1489,13 +1510,40 @@ mod tests {
         ps_409.set("bettingEnabled", Json::Bool(true));
         let err_409 = client.update_player_status(ps_409).unwrap_err();
         assert!(matches!(err_409, SdkError::Api { http_status: 409, ref status, ref message, .. } if status == "SC_INVALID_REQUEST" && message == "PNL_CAP_BREACHED_RESET_REQUIRED"));
+        assert!(!err_409.is_retryable());
 
         let mut wts_p = Json::object();
         wts_p.set("username", Json::Str("player_9527".into()));
-        wts_p.set("fromTime", Json::Int(1000));
-        wts_p.set("toTime", Json::Int(86_401_000));
+        wts_p.set("fromTime", Json::Int(0));
+        wts_p.set("toTime", Json::Int(86_400_000));
         let wts = client.get_wallet_transaction_status(wts_p).unwrap();
         assert_eq!(wts.get("data").get("transactions").as_array().unwrap()[0].get("username").as_str(), Some("player_9527"));
+
+        assert!(matches!(client.get_wallet_transaction_status(Json::object()), Err(SdkError::Argument(_))));
+        let mut wts_user_no_win = Json::object();
+        wts_user_no_win.set("username", Json::Str("player_9527".into()));
+        assert!(matches!(client.get_wallet_transaction_status(wts_user_no_win), Err(SdkError::Argument(_))));
+        let mut wts_over24 = Json::object();
+        wts_over24.set("username", Json::Str("player_9527".into()));
+        wts_over24.set("fromTime", Json::Int(0));
+        wts_over24.set("toTime", Json::Int(86_400_001));
+        assert!(matches!(client.get_wallet_transaction_status(wts_over24), Err(SdkError::Argument(_))));
+        let mut wts_partial = Json::object();
+        wts_partial.set("transactionId", Json::Str("bet_1".into()));
+        wts_partial.set("fromTime", Json::Int(1000));
+        assert!(matches!(client.get_wallet_transaction_status(wts_partial), Err(SdkError::Argument(_))));
+        let mut wts_inv = Json::object();
+        wts_inv.set("betId", Json::Str("b2btkt1".into()));
+        wts_inv.set("fromTime", Json::Int(2000));
+        wts_inv.set("toTime", Json::Int(1000));
+        assert!(matches!(client.get_wallet_transaction_status(wts_inv), Err(SdkError::Argument(_))));
+        let mut wts_null = Json::object();
+        wts_null.set("transactionId", Json::Str("bet_1".into()));
+        wts_null.set("fromTime", Json::Null);
+        assert!(matches!(client.get_wallet_transaction_status(wts_null), Err(SdkError::Argument(_))));
+        let mut un_null = Json::object();
+        un_null.set("fromTime", Json::Null);
+        assert!(matches!(client.list_unsettled_transactions(un_null), Err(SdkError::Argument(_))));
 
         stop.store(true, Ordering::Relaxed);
         let _ = std::net::TcpStream::connect(("127.0.0.1", port));

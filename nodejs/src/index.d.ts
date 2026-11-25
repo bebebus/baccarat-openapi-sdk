@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 export const SANDBOX_BASE_URL: string;
 export const MAX_DETAIL_WINDOW_MS: number;
+export const MAX_EPOCH_MS: number;
 export const MAX_PAGE_SIZE: number;
 export const MAX_WEBHOOK_BODY_BYTES: number;
 
@@ -82,7 +83,17 @@ export class Config {
 export class Client {
   readonly config: Config;
   constructor(config: Config | ConstructorParameters<typeof Config>[0], opts?: { transport?: Function });
-  ping(params?: { traceId?: string }): Promise<{ traceId: string; status: 'SC_OK'; data: Record<string, unknown> }>;
+  ping(params?: { traceId?: string }): Promise<{
+    traceId: string;
+    status: 'SC_OK';
+    data: {
+      operatorId: string;
+      operatorName: string;
+      callerIp: string | null;
+      callbackConfigured: boolean;
+      serverTime: number;
+    };
+  }>;
   createGameUrl(params: {
     traceId?: string;
     username: string;
@@ -93,7 +104,7 @@ export class Client {
     currency: string;
     lobbyUrl: string;
     ipAddress: string;
-  }): Promise<{ traceId: string; status: 'SC_OK'; data: { gameUrl: string; token: string; entryMode?: string; tableId?: string | null } }>;
+  }): Promise<{ traceId: string; status: 'SC_OK'; data: { gameUrl: string; token: string; entryMode?: string } }>;
   listTables(params?: {
     traceId?: string;
     currency?: string | null;
@@ -154,15 +165,15 @@ export class Client {
   getTransactionDetail(params: {
     traceId?: string;
     betId: string;
-    fromTime?: number | null;
-    toTime?: number | null;
+    fromTime?: number;
+    toTime?: number;
     language?: string | null;
     detailUrlTtlSec?: number | null;
   }): Promise<{ traceId: string; status: 'SC_OK'; data: Record<string, unknown> }>;
   listUnsettledTransactions(params?: {
     traceId?: string;
-    fromTime?: number | null;
-    toTime?: number | null;
+    fromTime?: number;
+    toTime?: number;
     username?: string | null;
     tableId?: string | null;
     pageNo?: number | null;
@@ -173,8 +184,8 @@ export class Client {
     transactionId?: string | null;
     betId?: string | null;
     username?: string | null;
-    fromTime?: number | null;
-    toTime?: number | null;
+    fromTime?: number;
+    toTime?: number;
   }): Promise<{ traceId: string; status: 'SC_OK'; data: Record<string, unknown> }>;
 }
 

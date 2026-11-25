@@ -154,17 +154,35 @@ $caught403 = false;
 try {
     $client->updatePlayerStatus(['username' => 'locked_user', 'action' => 'SET', 'status' => 'ACTIVE']);
 } catch (BaccaratApiException $e) {
-    $caught403 = ($e->httpStatus === 403 && $e->status === 'SC_USER_DISABLED' && $e->getMessage() === 'PLATFORM_RISK_LOCKED');
+    $caught403 = ($e->httpStatus === 403 && $e->status === 'SC_USER_DISABLED' && $e->getMessage() === 'PLATFORM_RISK_LOCKED' && !$e->isRetryable());
 }
 assertEq($caught403, true, 's2s:playerStatus403');
 $caught409 = false;
 try {
     $client->updatePlayerStatus(['username' => 'capped_user', 'action' => 'SET', 'bettingEnabled' => true]);
 } catch (BaccaratApiException $e) {
-    $caught409 = ($e->httpStatus === 409 && $e->status === 'SC_INVALID_REQUEST' && $e->getMessage() === 'PNL_CAP_BREACHED_RESET_REQUIRED');
+    $caught409 = ($e->httpStatus === 409 && $e->status === 'SC_INVALID_REQUEST' && $e->getMessage() === 'PNL_CAP_BREACHED_RESET_REQUIRED' && !$e->isRetryable());
 }
 assertEq($caught409, true, 's2s:playerStatus409');
-assertEq($client->getWalletTransactionStatus(['username' => 'player_9527', 'fromTime' => 1000, 'toTime' => 86401000])['data']['transactions'][0]['username'], 'player_9527', 's2s:walletStatusByUser');
+assertEq($client->getWalletTransactionStatus(['username' => 'player_9527', 'fromTime' => 0, 'toTime' => 86400000])['data']['transactions'][0]['username'], 'player_9527', 's2s:walletStatusByUser');
+
+$expectInvalidArg = static function (callable $fn, string $label): void {
+    $threw = false;
+    try {
+        $fn();
+    } catch (BaccaratSdkException $e) {
+        $threw = ($e->errorCode === 'INVALID_ARGUMENT');
+    }
+    assertEq($threw, true, $label);
+};
+$expectInvalidArg(static fn() => $client->getWalletTransactionStatus([]), 's2s:wtsEmpty');
+$expectInvalidArg(static fn() => $client->getWalletTransactionStatus(['username' => 'player_9527']), 's2s:wtsUserNoWindow');
+$expectInvalidArg(static fn() => $client->getWalletTransactionStatus(['username' => 'player_9527', 'fromTime' => 0, 'toTime' => 86400001]), 's2s:wtsUserOver24h');
+$expectInvalidArg(static fn() => $client->getWalletTransactionStatus(['transactionId' => 'bet_1', 'fromTime' => 1000]), 's2s:wtsPartialWindow');
+$expectInvalidArg(static fn() => $client->getWalletTransactionStatus(['betId' => 'b2btkt1', 'fromTime' => 2000, 'toTime' => 1000]), 's2s:wtsInvertedWindow');
+$expectInvalidArg(static fn() => $client->getWalletTransactionStatus(['transactionId' => 'bet_1', 'fromTime' => null]), 's2s:wtsNullFrom');
+$expectInvalidArg(static fn() => $client->getTransactionDetail(['betId' => 'b2btkt1', 'fromTime' => null]), 's2s:detailNullFrom');
+$expectInvalidArg(static fn() => $client->listUnsettledTransactions(['fromTime' => null]), 's2s:unsettledNullFrom');
 
 // 5. WebhookDispatcher & InMemoryWallet lifecycle
 $tok = 'b2bt_9f81c204d7e641b8a5309c17e248f6b109d3a4c5e6f70819';

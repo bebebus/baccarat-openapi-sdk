@@ -213,18 +213,38 @@ public final class SdkTestRunner {
             try {
                 client.updatePlayerStatus(Map.of("username", "locked_user", "action", "SET", "status", "ACTIVE"));
             } catch (BaccaratSdk.ApiException ex) {
-                caught403 = ex.httpStatus == 403 && "SC_USER_DISABLED".equals(ex.status) && "PLATFORM_RISK_LOCKED".equals(ex.getMessage());
+                caught403 = ex.httpStatus == 403 && "SC_USER_DISABLED".equals(ex.status) && "PLATFORM_RISK_LOCKED".equals(ex.getMessage()) && !ex.isRetryable();
             }
             check(caught403, "s2s:playerStatus403");
             boolean caught409 = false;
             try {
                 client.updatePlayerStatus(Map.of("username", "capped_user", "action", "SET", "bettingEnabled", true));
             } catch (BaccaratSdk.ApiException ex) {
-                caught409 = ex.httpStatus == 409 && "SC_INVALID_REQUEST".equals(ex.status) && "PNL_CAP_BREACHED_RESET_REQUIRED".equals(ex.getMessage());
+                caught409 = ex.httpStatus == 409 && "SC_INVALID_REQUEST".equals(ex.status) && "PNL_CAP_BREACHED_RESET_REQUIRED".equals(ex.getMessage()) && !ex.isRetryable();
             }
             check(caught409, "s2s:playerStatus409");
-            Map<String, Object> wtsData = (Map<String, Object>) client.getWalletTransactionStatus(Map.of("username", "player_9527", "fromTime", 1000L, "toTime", 86_401_000L)).get("data");
+            Map<String, Object> wtsData = (Map<String, Object>) client.getWalletTransactionStatus(Map.of("username", "player_9527", "fromTime", 0L, "toTime", 86_400_000L)).get("data");
             checkEq(((List<Map<String, Object>>) wtsData.get("transactions")).get(0).get("username"), "player_9527", "s2s:walletStatusByUser");
+
+            java.util.function.BiConsumer<Runnable, String> expectInvalidArg = (fn, label) -> {
+                boolean threw = false;
+                try { fn.run(); } catch (BaccaratSdk.SdkException ex) { threw = "INVALID_ARGUMENT".equals(ex.code); }
+                check(threw, label);
+            };
+            expectInvalidArg.accept(() -> client.getWalletTransactionStatus(Map.of()), "s2s:wtsEmpty");
+            expectInvalidArg.accept(() -> client.getWalletTransactionStatus(Map.of("username", "player_9527")), "s2s:wtsUserNoWindow");
+            expectInvalidArg.accept(() -> client.getWalletTransactionStatus(Map.of("username", "player_9527", "fromTime", 0L, "toTime", 86_400_001L)), "s2s:wtsUserOver24h");
+            expectInvalidArg.accept(() -> client.getWalletTransactionStatus(Map.of("transactionId", "bet_1", "fromTime", 1000L)), "s2s:wtsPartialWindow");
+            expectInvalidArg.accept(() -> client.getWalletTransactionStatus(Map.of("betId", "b2btkt1", "fromTime", 2000L, "toTime", 1000L)), "s2s:wtsInvertedWindow");
+            Map<String, Object> nullFromWts = new LinkedHashMap<>();
+            nullFromWts.put("transactionId", "bet_1");
+            nullFromWts.put("fromTime", null);
+            expectInvalidArg.accept(() -> client.getWalletTransactionStatus(nullFromWts), "s2s:wtsNullFrom");
+            Map<String, Object> nullFromDet = new LinkedHashMap<>();
+            nullFromDet.put("betId", "b2btkt1");
+            nullFromDet.put("fromTime", null);
+            expectInvalidArg.accept(() -> client.getTransactionDetail(nullFromDet), "s2s:detailNullFrom");
+            expectInvalidArg.accept(() -> client.listTransactions(Map.of("fromTime", BigInteger.valueOf(Long.MAX_VALUE).add(BigInteger.ONE), "toTime", 2000L)), "s2s:bigIntOverflow");
         } finally {
             srv.stop(0);
         }

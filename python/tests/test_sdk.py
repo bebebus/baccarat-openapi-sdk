@@ -184,16 +184,28 @@ class TestBaccaratPythonSdk(unittest.TestCase):
             self.assertEqual(ctx_403.exception.http_status, 403)
             self.assertEqual(ctx_403.exception.status, "SC_USER_DISABLED")
             self.assertEqual(ctx_403.exception.message, "PLATFORM_RISK_LOCKED")
+            self.assertFalse(ctx_403.exception.is_retryable())
             with self.assertRaises(BaccaratApiError) as ctx_409:
                 client.update_player_status(username="capped_user", action="SET", betting_enabled=True)
             self.assertEqual(ctx_409.exception.http_status, 409)
             self.assertEqual(ctx_409.exception.status, "SC_INVALID_REQUEST")
             self.assertEqual(ctx_409.exception.message, "PNL_CAP_BREACHED_RESET_REQUIRED")
+            self.assertFalse(ctx_409.exception.is_retryable())
 
-            wts_user = client.get_wallet_transaction_status(username="player_9527", from_time=1000, to_time=86_401_000)
+            wts_user = client.get_wallet_transaction_status(username="player_9527", from_time=0, to_time=86_400_000)
             self.assertEqual(wts_user["data"]["transactions"][0]["username"], "player_9527")
             with self.assertRaises(BaccaratSdkError):
+                client.get_wallet_transaction_status()
+            with self.assertRaises(BaccaratSdkError):
+                client.get_wallet_transaction_status(username="player_9527")
+            with self.assertRaises(BaccaratSdkError):
                 client.get_wallet_transaction_status(username="player_9527", from_time=0, to_time=86_400_001)
+            with self.assertRaises(BaccaratSdkError):
+                client.get_wallet_transaction_status(transaction_id="bet_1", from_time=1000)
+            with self.assertRaises(BaccaratSdkError):
+                client.get_wallet_transaction_status(bet_id="b2btkt1", from_time=2000, to_time=1000)
+            with self.assertRaises(BaccaratSdkError):
+                client.list_unsettled_transactions(from_time=1000)
 
             with self.assertRaises(BaccaratSdkError):
                 client.get_transaction_detail(bet_id="b2btkt1", from_time=0, to_time=604_800_001)

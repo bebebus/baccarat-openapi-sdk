@@ -234,8 +234,15 @@ public final class BaccaratSdk {
     private static long requireLong(Map<String, Object> m, String k) {
         if (m == null) throw new SdkException("INVALID_ARGUMENT", k + " is required");
         Object v = m.get(k);
-        if (v instanceof Integer || v instanceof Long || v instanceof BigInteger) {
+        if (v instanceof Integer || v instanceof Long) {
             return ((Number) v).longValue();
+        }
+        if (v instanceof BigInteger bi) {
+            try {
+                return bi.longValueExact();
+            } catch (ArithmeticException e) {
+                throw new SdkException("INVALID_ARGUMENT", k + " is out of 64-bit integer range");
+            }
         }
         throw new SdkException("INVALID_ARGUMENT", k + " must be an integer");
     }
@@ -438,7 +445,7 @@ public final class BaccaratSdk {
             if (betId.isEmpty()) {
                 throw new SdkException("INVALID_ARGUMENT", "betId is required");
             }
-            if (params != null && (params.get("fromTime") != null || params.get("toTime") != null)) {
+            if (params != null && (params.containsKey("fromTime") || params.containsKey("toTime"))) {
                 long from = requireLong(params, "fromTime");
                 long to = requireLong(params, "toTime");
                 if (from < 0 || to < from || (to - from) > MAX_DETAIL_WINDOW_MS) {
@@ -449,6 +456,13 @@ public final class BaccaratSdk {
         }
 
         public Map<String, Object> listUnsettledTransactions(Map<String, Object> params) {
+            if (params != null && (params.containsKey("fromTime") || params.containsKey("toTime"))) {
+                long from = requireLong(params, "fromTime");
+                long to = requireLong(params, "toTime");
+                if (from < 0 || to < from || (to - from) > MAX_DETAIL_WINDOW_MS) {
+                    throw new SdkException("INVALID_ARGUMENT", "Unsettled window must satisfy 0 <= toTime - fromTime <= 604800000");
+                }
+            }
             return postSigned("/operator/v1/transaction/unsettled", params);
         }
 
@@ -459,11 +473,18 @@ public final class BaccaratSdk {
             if (txId.isEmpty() && betId.isEmpty() && username.isEmpty()) {
                 throw new SdkException("INVALID_ARGUMENT", "At least one of transactionId, betId, or username is required");
             }
-            if (!username.isEmpty() && txId.isEmpty() && betId.isEmpty()) {
+            boolean userOnly = !username.isEmpty() && txId.isEmpty() && betId.isEmpty();
+            boolean hasWindow = params != null && (params.containsKey("fromTime") || params.containsKey("toTime"));
+            if (userOnly || hasWindow) {
                 long from = requireLong(params, "fromTime");
                 long to = requireLong(params, "toTime");
-                if (from < 0 || to < from || (to - from) > 86_400_000L) {
-                    throw new SdkException("INVALID_ARGUMENT", "Username query window must satisfy 0 <= toTime - fromTime <= 86400000 (24 hours)");
+                if (from < 0 || to < from || (userOnly && (to - from) > 86_400_000L)) {
+                    throw new SdkException(
+                            "INVALID_ARGUMENT",
+                            userOnly
+                                    ? "Username query window must satisfy 0 <= toTime - fromTime <= 86400000 (24 hours)"
+                                    : "Invalid [fromTime, toTime] window"
+                    );
                 }
             }
             return postSigned("/operator/v1/wallet/transaction-status", params);

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Package baccarat provides a zero-dependency Go SDK for the Baccarat Live Platform
-// B2B Operator Seamless Wallet API (v1.5.0).
+// B2B Operator Seamless Wallet API (v1.5.1).
 package baccarat
 
 import (
@@ -494,14 +494,11 @@ type PingRequest struct {
 }
 
 type PingData struct {
-	OperatorID         string   `json:"operatorId"`
-	OperatorName       string   `json:"operatorName,omitempty"`
-	CallerIP           *string  `json:"callerIp,omitempty"`
-	CallbackConfigured bool     `json:"callbackConfigured,omitempty"`
-	Status             string   `json:"status,omitempty"`
-	ServerTime         int64    `json:"serverTime"`
-	AllowedCurrencies  []string `json:"allowedCurrencies,omitempty"`
-	AllowedTableCount  int      `json:"allowedTableCount,omitempty"`
+	OperatorID         string  `json:"operatorId"`
+	OperatorName       string  `json:"operatorName,omitempty"`
+	CallerIP           *string `json:"callerIp,omitempty"`
+	CallbackConfigured bool    `json:"callbackConfigured,omitempty"`
+	ServerTime         int64   `json:"serverTime"`
 }
 
 func (c *Client) Ping(ctx context.Context, req PingRequest) (*PingData, string, error) {
@@ -529,10 +526,9 @@ type CreateGameUrlRequest struct {
 }
 
 type CreateGameUrlData struct {
-	GameURL   string  `json:"gameUrl"`
-	Token     string  `json:"token"`
-	EntryMode string  `json:"entryMode,omitempty"`
-	TableID   *string `json:"tableId,omitempty"`
+	GameURL   string `json:"gameUrl"`
+	Token     string `json:"token"`
+	EntryMode string `json:"entryMode,omitempty"`
 }
 
 func (c *Client) CreateGameUrl(ctx context.Context, req CreateGameUrlRequest) (*CreateGameUrlData, string, error) {
@@ -614,13 +610,13 @@ func (c *Client) TerminateSessions(ctx context.Context, req TerminateSessionsReq
 }
 
 type UpdatePlayerStatusRequest struct {
-	TraceID        string `json:"traceId"`
-	Username       string `json:"username"`
-	Action         string `json:"action,omitempty"`
-	Status         string `json:"status,omitempty"`
-	BettingEnabled *bool  `json:"bettingEnabled,omitempty"`
-	ResetPnlWindow *bool  `json:"resetPnlWindow,omitempty"`
-	Reason         string `json:"reason,omitempty"`
+	TraceID        string  `json:"traceId"`
+	Username       string  `json:"username"`
+	Action         string  `json:"action,omitempty"`
+	Status         string  `json:"status,omitempty"`
+	BettingEnabled *bool   `json:"bettingEnabled,omitempty"`
+	ResetPnlWindow *bool   `json:"resetPnlWindow,omitempty"`
+	Reason         *string `json:"reason,omitempty"`
 }
 
 func (c *Client) UpdatePlayerStatus(ctx context.Context, req UpdatePlayerStatusRequest) (map[string]any, string, error) {
@@ -674,20 +670,25 @@ type ListTransactionsRequest struct {
 }
 
 type ReconcileTransactionRow struct {
-	BetID                 string `json:"betId"`
-	RoundID               string `json:"roundId"`
-	ExternalTransactionID string `json:"externalTransactionId"`
-	Username              string `json:"username"`
-	CurrencyCode          string `json:"currencyCode"`
-	GameCode              string `json:"gameCode"`
-	BetSide               string `json:"betSide"`
-	BetAmount             string `json:"betAmount"`
-	WinAmount             string `json:"winAmount"`
-	WinLoss               string `json:"winLoss"`
-	EffectiveTurnover     string `json:"effectiveTurnover"`
-	Status                int    `json:"status"`
-	VendorBetTime         int64  `json:"vendorBetTime"`
-	VendorSettleTime      *int64 `json:"vendorSettleTime"`
+	BetID                 string  `json:"betId"`
+	RoundID               string  `json:"roundId"`
+	ExternalTransactionID string  `json:"externalTransactionId"`
+	Username              string  `json:"username"`
+	CurrencyCode          string  `json:"currencyCode"`
+	GameCode              string  `json:"gameCode"`
+	BetSide               string  `json:"betSide"`
+	BetAmount             string  `json:"betAmount"`
+	WinAmount             string  `json:"winAmount"`
+	WinLoss               string  `json:"winLoss"`
+	EffectiveTurnover     string  `json:"effectiveTurnover"`
+	Status                int     `json:"status"`
+	VendorBetTime         int64   `json:"vendorBetTime"`
+	VendorSettleTime      *int64  `json:"vendorSettleTime"`
+	BetTransactionID      *string `json:"betTransactionId"`
+	SettleTransactionID   *string `json:"settleTransactionId"`
+	PayoutVersion         *string `json:"payoutVersion"`
+	IsAdjusted            bool    `json:"isAdjusted"`
+	RoundOutcome          *string `json:"roundOutcome"`
 }
 
 type ListTransactionsData struct {
@@ -743,8 +744,8 @@ func (c *Client) ListAllTransactions(ctx context.Context, fromTime, toTime int64
 type TransactionDetailRequest struct {
 	TraceID         string `json:"traceId"`
 	BetID           string `json:"betId"`
-	FromTime        int64  `json:"fromTime,omitempty"`
-	ToTime          int64  `json:"toTime,omitempty"`
+	FromTime        *int64 `json:"fromTime,omitempty"`
+	ToTime          *int64 `json:"toTime,omitempty"`
 	Language        string `json:"language,omitempty"`
 	DetailURLTTLSec int    `json:"detailUrlTtlSec,omitempty"`
 }
@@ -771,8 +772,11 @@ func (c *Client) GetTransactionDetail(ctx context.Context, req TransactionDetail
 	if strings.TrimSpace(req.BetID) == "" {
 		return nil, "", &SdkError{Code: "INVALID_ARGUMENT", Message: "betId is required"}
 	}
-	if req.FromTime != 0 || req.ToTime != 0 {
-		if req.FromTime < 0 || req.ToTime < req.FromTime || (req.ToTime-req.FromTime) > MaxDetailWindowMs {
+	if req.FromTime != nil || req.ToTime != nil {
+		if req.FromTime == nil || req.ToTime == nil {
+			return nil, "", &SdkError{Code: "INVALID_ARGUMENT", Message: "fromTime and toTime must both be set when specified"}
+		}
+		if *req.FromTime < 0 || *req.ToTime < *req.FromTime || (*req.ToTime-*req.FromTime) > MaxDetailWindowMs {
 			return nil, "", &SdkError{Code: "INVALID_ARGUMENT", Message: "detail window must satisfy 0 <= ToTime - FromTime <= 604800000"}
 		}
 	}
@@ -789,8 +793,8 @@ func (c *Client) GetTransactionDetail(ctx context.Context, req TransactionDetail
 
 type ListUnsettledRequest struct {
 	TraceID  string `json:"traceId"`
-	FromTime int64  `json:"fromTime,omitempty"`
-	ToTime   int64  `json:"toTime,omitempty"`
+	FromTime *int64 `json:"fromTime,omitempty"`
+	ToTime   *int64 `json:"toTime,omitempty"`
 	Username string `json:"username,omitempty"`
 	TableID  string `json:"tableId,omitempty"`
 	PageNo   int    `json:"pageNo,omitempty"`
@@ -798,6 +802,14 @@ type ListUnsettledRequest struct {
 }
 
 func (c *Client) ListUnsettledTransactions(ctx context.Context, req ListUnsettledRequest) (map[string]any, string, error) {
+	if req.FromTime != nil || req.ToTime != nil {
+		if req.FromTime == nil || req.ToTime == nil {
+			return nil, "", &SdkError{Code: "INVALID_ARGUMENT", Message: "fromTime and toTime must both be set when specified"}
+		}
+		if *req.FromTime < 0 || *req.ToTime < *req.FromTime || (*req.ToTime-*req.FromTime) > MaxDetailWindowMs {
+			return nil, "", &SdkError{Code: "INVALID_ARGUMENT", Message: "unsettled window must satisfy 0 <= ToTime - FromTime <= 604800000"}
+		}
+	}
 	if strings.TrimSpace(req.TraceID) == "" {
 		req.TraceID = newUUIDv4()
 	}
@@ -814,8 +826,8 @@ type WalletTransactionStatusRequest struct {
 	TransactionID string `json:"transactionId,omitempty"`
 	BetID         string `json:"betId,omitempty"`
 	Username      string `json:"username,omitempty"`
-	FromTime      int64  `json:"fromTime,omitempty"`
-	ToTime        int64  `json:"toTime,omitempty"`
+	FromTime      *int64 `json:"fromTime,omitempty"`
+	ToTime        *int64 `json:"toTime,omitempty"`
 }
 
 func (c *Client) GetWalletTransactionStatus(ctx context.Context, req WalletTransactionStatusRequest) (map[string]any, string, error) {
@@ -825,9 +837,14 @@ func (c *Client) GetWalletTransactionStatus(ctx context.Context, req WalletTrans
 	if !hasTx && !hasBet && !hasUser {
 		return nil, "", &SdkError{Code: "INVALID_ARGUMENT", Message: "at least one of transactionId, betId, or username is required"}
 	}
-	if hasUser && !hasTx && !hasBet {
-		if req.FromTime < 0 || req.ToTime < req.FromTime || (req.ToTime-req.FromTime) > 86400000 || (req.FromTime == 0 && req.ToTime == 0) {
-			return nil, "", &SdkError{Code: "INVALID_ARGUMENT", Message: "username query requires 0 <= ToTime - FromTime <= 86400000 (24 hours)"}
+	userOnly := hasUser && !hasTx && !hasBet
+	hasWindow := req.FromTime != nil || req.ToTime != nil
+	if userOnly || hasWindow {
+		if req.FromTime == nil || req.ToTime == nil {
+			return nil, "", &SdkError{Code: "INVALID_ARGUMENT", Message: "fromTime and toTime must both be set when querying by username alone or specifying a window"}
+		}
+		if *req.FromTime < 0 || *req.ToTime < *req.FromTime || (userOnly && (*req.ToTime-*req.FromTime) > 86400000) {
+			return nil, "", &SdkError{Code: "INVALID_ARGUMENT", Message: "invalid [FromTime, ToTime] window (username query requires <= 86400000 ms)"}
 		}
 	}
 	if strings.TrimSpace(req.TraceID) == "" {

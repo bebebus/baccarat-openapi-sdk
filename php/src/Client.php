@@ -203,11 +203,11 @@ final class Client
         if ($betId === '') {
             throw new BaccaratSdkException('betId is required', 'INVALID_ARGUMENT');
         }
-        $from = $params['fromTime'] ?? null;
-        $to = $params['toTime'] ?? null;
-        if ($from !== null || $to !== null) {
+        if (array_key_exists('fromTime', $params) || array_key_exists('toTime', $params)) {
+            $from = $params['fromTime'] ?? null;
+            $to = $params['toTime'] ?? null;
             if (!is_int($from) || !is_int($to)) {
-                throw new BaccaratSdkException('fromTime and toTime must both be integers when specified', 'INVALID_ARGUMENT');
+                throw new BaccaratSdkException('fromTime and toTime must both be non-negative integers when specified (null is rejected)', 'INVALID_ARGUMENT');
             }
             $span = $to - $from;
             if ($from < 0 || $span < 0 || $span > self::MAX_DETAIL_WINDOW_MS) {
@@ -220,6 +220,17 @@ final class Client
     /** @param array<string, mixed> $params @return array<string, mixed> */
     public function listUnsettledTransactions(array $params = []): array
     {
+        if (array_key_exists('fromTime', $params) || array_key_exists('toTime', $params)) {
+            $from = $params['fromTime'] ?? null;
+            $to = $params['toTime'] ?? null;
+            if (!is_int($from) || !is_int($to)) {
+                throw new BaccaratSdkException('fromTime and toTime must both be non-negative integers when specified (null is rejected)', 'INVALID_ARGUMENT');
+            }
+            $span = $to - $from;
+            if ($from < 0 || $span < 0 || $span > self::MAX_DETAIL_WINDOW_MS) {
+                throw new BaccaratSdkException('Unsettled window must satisfy 0 <= toTime - fromTime <= 604800000', 'INVALID_ARGUMENT');
+            }
+        }
         return $this->postSigned('/operator/v1/transaction/unsettled', $params);
     }
 
@@ -232,15 +243,22 @@ final class Client
         if ($txId === '' && $betId === '' && $username === '') {
             throw new BaccaratSdkException('At least one of transactionId, betId, or username is required', 'INVALID_ARGUMENT');
         }
-        if ($username !== '' && $txId === '' && $betId === '') {
+        $userOnly = ($username !== '' && $txId === '' && $betId === '');
+        $hasWindow = array_key_exists('fromTime', $params) || array_key_exists('toTime', $params);
+        if ($userOnly || $hasWindow) {
             $from = $params['fromTime'] ?? null;
             $to = $params['toTime'] ?? null;
             if (!is_int($from) || !is_int($to)) {
-                throw new BaccaratSdkException('fromTime and toTime integers are required when querying by username alone', 'INVALID_ARGUMENT');
+                throw new BaccaratSdkException('fromTime and toTime must both be non-negative integers (null is rejected)', 'INVALID_ARGUMENT');
             }
             $span = $to - $from;
-            if ($from < 0 || $span < 0 || $span > 86400000) {
-                throw new BaccaratSdkException('Username query window must satisfy 0 <= toTime - fromTime <= 86400000 (24 hours)', 'INVALID_ARGUMENT');
+            if ($from < 0 || $span < 0 || ($userOnly && $span > 86400000)) {
+                throw new BaccaratSdkException(
+                    $userOnly
+                        ? 'Username query window must satisfy 0 <= toTime - fromTime <= 86400000 (24 hours)'
+                        : 'Invalid [fromTime, toTime] window',
+                    'INVALID_ARGUMENT',
+                );
             }
         }
         return $this->postSigned('/operator/v1/wallet/transaction-status', $params);

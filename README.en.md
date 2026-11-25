@@ -1,11 +1,11 @@
 > [中文](./README.md) | English
 
-# Baccarat Live Platform · Multi-Language B2B Merchant SDKs (v1.5.0)
+# Baccarat Live Platform · Multi-Language B2B Merchant SDKs (v1.5.1)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
-[![OpenAPI 3.1](https://img.shields.io/badge/OpenAPI_3.1-v1.5.0-e3b15a)](https://openapi.lt.cniia.cloud/en/)
+[![OpenAPI 3.1](https://img.shields.io/badge/OpenAPI_3.1-v1.5.1-e3b15a)](https://openapi.lt.cniia.cloud/en/)
 
-Official bidirectional B2B Operator Seamless Wallet SDKs (`bebebus/baccarat-openapi-sdk`) for **Node.js, Python, PHP, Go, Java, C++, and Rust**, aligned 100% with OpenAPI `v1.5.0` (`https://openapi.lt.cniia.cloud/en/`).
+Official bidirectional B2B Operator Seamless Wallet SDKs (`bebebus/baccarat-openapi-sdk`) for **Node.js, Python, PHP, Go, Java, C++, and Rust**, aligned 100% with OpenAPI `v1.5.1` (`https://openapi.lt.cniia.cloud/en/`).
 
 ## Design Highlights
 

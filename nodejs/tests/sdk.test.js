@@ -123,7 +123,7 @@ test('end-to-end S2S Client over real loopback HTTP server + auto-pagination + e
       } else if (req.url === '/operator/v1/transaction/detail') {
         res.end(JSON.stringify({ traceId: body.traceId, status: 'SC_OK', data: { betId: body.betId, status: 1, roundResult: { outcome: 'PLAYER', playerPoints: 8, bankerPoints: 5, playerPair: false, bankerPair: false, natural: true } } }));
       } else if (req.url === '/operator/v1/ping') {
-        res.end(JSON.stringify({ traceId: body.traceId, status: 'SC_OK', data: { operatorId: 'OP_DEMO', status: 'ACTIVE', serverTime: 1763612000000, allowedCurrencies: ['USD'], allowedTableCount: 1 } }));
+        res.end(JSON.stringify({ traceId: body.traceId, status: 'SC_OK', data: { operatorId: 'OP_DEMO', operatorName: 'Demo Operator', callerIp: '127.0.0.1', callbackConfigured: true, serverTime: 1763612000000 } }));
       } else if (req.url === '/operator/v1/player/status') {
         if (body.username === 'locked_user') {
           res.writeHead(403, { 'Content-Type': 'application/json' });
@@ -189,6 +189,7 @@ test('end-to-end S2S Client over real loopback HTTP server + auto-pagination + e
 
     const pingRes = await client.ping();
     assert.equal(pingRes.data.operatorId, 'OP_DEMO');
+    assert.equal(pingRes.data.callbackConfigured, true);
     const psRes = await client.updatePlayerStatus({ username: 'player_9527', bettingEnabled: false });
     assert.equal(psRes.data.bettingEnabled, false);
     const psResetRes = await client.updatePlayerStatus({ username: 'capped_user', action: 'SET', bettingEnabled: true, resetPnlWindow: true });
@@ -196,11 +197,11 @@ test('end-to-end S2S Client over real loopback HTTP server + auto-pagination + e
     assert.equal(psResetRes.data.statusReason, null);
     await assert.rejects(
       () => client.updatePlayerStatus({ username: 'locked_user', action: 'SET', status: 'ACTIVE' }),
-      (err) => err instanceof BaccaratApiError && err.httpStatus === 403 && err.status === 'SC_USER_DISABLED' && err.message === 'PLATFORM_RISK_LOCKED',
+      (err) => err instanceof BaccaratApiError && err.httpStatus === 403 && err.status === 'SC_USER_DISABLED' && err.message === 'PLATFORM_RISK_LOCKED' && !err.isRetryable(),
     );
     await assert.rejects(
       () => client.updatePlayerStatus({ username: 'capped_user', action: 'SET', bettingEnabled: true }),
-      (err) => err instanceof BaccaratApiError && err.httpStatus === 409 && err.status === 'SC_INVALID_REQUEST' && err.message === 'PNL_CAP_BREACHED_RESET_REQUIRED',
+      (err) => err instanceof BaccaratApiError && err.httpStatus === 409 && err.status === 'SC_INVALID_REQUEST' && err.message === 'PNL_CAP_BREACHED_RESET_REQUIRED' && !err.isRetryable(),
     );
     const plRes = await client.updatePlayerLimits({ username: 'player_9527', currency: 'USD', maxBet: '500.00' });
     assert.equal(plRes.data.maxBet, '500.00');
@@ -208,11 +209,19 @@ test('end-to-end S2S Client over real loopback HTTP server + auto-pagination + e
     assert.equal(unRes.data.total, 0);
     const wtsRes = await client.getWalletTransactionStatus({ transactionId: 'bet_1' });
     assert.equal(wtsRes.data.transactions[0].status, 'COMPLETED');
-    const wtsUserRes = await client.getWalletTransactionStatus({ username: 'player_9527', fromTime: 1000, toTime: 86_401_000 });
+    const wtsUserRes = await client.getWalletTransactionStatus({ username: 'player_9527', fromTime: 0, toTime: 86_400_000 });
     assert.equal(wtsUserRes.data.transactions[0].username, 'player_9527');
+    assert.throws(() => client.getWalletTransactionStatus({}), BaccaratSdkError);
+    assert.throws(() => client.getWalletTransactionStatus({ username: 'player_9527' }), BaccaratSdkError);
     assert.throws(() => client.getWalletTransactionStatus({ username: 'player_9527', fromTime: 0, toTime: 86_400_001 }), BaccaratSdkError);
+    assert.throws(() => client.getWalletTransactionStatus({ transactionId: 'bet_1', fromTime: 1000 }), BaccaratSdkError);
+    assert.throws(() => client.getWalletTransactionStatus({ betId: 'b2btkt1', fromTime: 2000, toTime: 1000 }), BaccaratSdkError);
+    assert.throws(() => client.getWalletTransactionStatus({ transactionId: 'bet_1', fromTime: null }), BaccaratSdkError);
 
     assert.throws(() => client.getTransactionDetail({ betId: 'b2btkt1', fromTime: 0, toTime: 604_800_001 }), BaccaratSdkError);
+    assert.throws(() => client.getTransactionDetail({ betId: 'b2btkt1', fromTime: null }), BaccaratSdkError);
+    assert.throws(() => client.listUnsettledTransactions({ fromTime: null }), BaccaratSdkError);
+    assert.throws(() => client.listTransactions({ fromTime: 0, toTime: 8_640_000_000_000_001 }), BaccaratSdkError);
   } finally {
     server.close();
   }

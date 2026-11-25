@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Zero-dependency Node.js SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.0).
+// Zero-dependency Node.js SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.1).
 
 import crypto from 'node:crypto';
 import http from 'node:http';
@@ -7,6 +7,7 @@ import https from 'node:https';
 
 export const SANDBOX_BASE_URL = 'https://api.lt.cniia.cloud';
 export const MAX_DETAIL_WINDOW_MS = 604_800_000; // 7 days in ms
+export const MAX_EPOCH_MS = 8_640_000_000_000_000; // JS Date max epoch ms
 export const MAX_PAGE_SIZE = 20_000;
 export const MAX_WEBHOOK_BODY_BYTES = 1_048_576; // 1 MiB
 const MAX_HTTP_RESPONSE_BYTES = 16 * 1024 * 1024; // 16 MiB
@@ -456,10 +457,7 @@ export class Client {
   }
 
   listTransactions(params) {
-    if (params == null || typeof params.fromTime !== 'number' || typeof params.toTime !== 'number') {
-      throw new BaccaratSdkError('fromTime and toTime must be non-negative epoch ms integers', 'INVALID_ARGUMENT');
-    }
-    if (!Number.isInteger(params.fromTime) || !Number.isInteger(params.toTime) || params.fromTime < 0 || params.toTime < params.fromTime) {
+    if (params == null || !isValidEpochMs(params.fromTime) || !isValidEpochMs(params.toTime) || params.toTime < params.fromTime) {
       throw new BaccaratSdkError('Invalid [fromTime, toTime] settlement window', 'INVALID_ARGUMENT');
     }
     return this.postSigned('/operator/v1/transaction/list', params);
@@ -486,12 +484,14 @@ export class Client {
     if (params == null || typeof params.betId !== 'string' || !params.betId.trim()) {
       throw new BaccaratSdkError('betId is required', 'INVALID_ARGUMENT');
     }
-    if (params.fromTime != null || params.toTime != null) {
-      if (typeof params.fromTime !== 'number' || typeof params.toTime !== 'number') {
-        throw new BaccaratSdkError('fromTime and toTime must both be epoch ms integers when specified', 'INVALID_ARGUMENT');
+    const hasFrom = Object.prototype.hasOwnProperty.call(params, 'fromTime') && params.fromTime !== undefined;
+    const hasTo = Object.prototype.hasOwnProperty.call(params, 'toTime') && params.toTime !== undefined;
+    if (hasFrom || hasTo) {
+      if (!isValidEpochMs(params.fromTime) || !isValidEpochMs(params.toTime)) {
+        throw new BaccaratSdkError('fromTime and toTime must both be non-negative epoch ms integers when specified (null is rejected)', 'INVALID_ARGUMENT');
       }
       const span = params.toTime - params.fromTime;
-      if (!Number.isInteger(params.fromTime) || !Number.isInteger(params.toTime) || params.fromTime < 0 || span < 0 || span > MAX_DETAIL_WINDOW_MS) {
+      if (span < 0 || span > MAX_DETAIL_WINDOW_MS) {
         throw new BaccaratSdkError('Detail query window must satisfy 0 <= toTime - fromTime <= 604800000 (7 days)', 'INVALID_ARGUMENT');
       }
     }
@@ -499,6 +499,19 @@ export class Client {
   }
 
   listUnsettledTransactions(params = {}) {
+    if (params != null) {
+      const hasFrom = Object.prototype.hasOwnProperty.call(params, 'fromTime') && params.fromTime !== undefined;
+      const hasTo = Object.prototype.hasOwnProperty.call(params, 'toTime') && params.toTime !== undefined;
+      if (hasFrom || hasTo) {
+        if (!isValidEpochMs(params.fromTime) || !isValidEpochMs(params.toTime)) {
+          throw new BaccaratSdkError('fromTime and toTime must both be non-negative epoch ms integers when specified (null is rejected)', 'INVALID_ARGUMENT');
+        }
+        const span = params.toTime - params.fromTime;
+        if (span < 0 || span > MAX_DETAIL_WINDOW_MS) {
+          throw new BaccaratSdkError('Unsettled query window must satisfy 0 <= toTime - fromTime <= 604800000 (7 days)', 'INVALID_ARGUMENT');
+        }
+      }
+    }
     return this.postSigned('/operator/v1/transaction/unsettled', params);
   }
 
@@ -509,17 +522,29 @@ export class Client {
     if (!txId && !betId && !username) {
       throw new BaccaratSdkError('At least one of transactionId, betId, or username is required', 'INVALID_ARGUMENT');
     }
-    if (username && !txId && !betId) {
-      if (typeof params?.fromTime !== 'number' || typeof params?.toTime !== 'number') {
-        throw new BaccaratSdkError('fromTime and toTime epoch ms integers are required when querying by username alone', 'INVALID_ARGUMENT');
+    const userOnly = Boolean(username && !txId && !betId);
+    const hasFrom = params != null && Object.prototype.hasOwnProperty.call(params, 'fromTime') && params.fromTime !== undefined;
+    const hasTo = params != null && Object.prototype.hasOwnProperty.call(params, 'toTime') && params.toTime !== undefined;
+    if (userOnly || hasFrom || hasTo) {
+      if (!isValidEpochMs(params?.fromTime) || !isValidEpochMs(params?.toTime)) {
+        throw new BaccaratSdkError('fromTime and toTime must both be non-negative epoch ms integers (null is rejected)', 'INVALID_ARGUMENT');
       }
       const span = params.toTime - params.fromTime;
-      if (!Number.isInteger(params.fromTime) || !Number.isInteger(params.toTime) || params.fromTime < 0 || span < 0 || span > 86_400_000) {
-        throw new BaccaratSdkError('Username query window must satisfy 0 <= toTime - fromTime <= 86400000 (24 hours)', 'INVALID_ARGUMENT');
+      if (span < 0 || (userOnly && span > 86_400_000)) {
+        throw new BaccaratSdkError(
+          userOnly
+            ? 'Username query window must satisfy 0 <= toTime - fromTime <= 86400000 (24 hours)'
+            : 'Invalid [fromTime, toTime] window',
+          'INVALID_ARGUMENT',
+        );
       }
     }
     return this.postSigned('/operator/v1/wallet/transaction-status', params);
   }
+}
+
+function isValidEpochMs(v) {
+  return typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 && v <= MAX_EPOCH_MS;
 }
 
 // ── 5. Seamless Wallet Webhook Dispatcher & Reference In-Memory Wallet ──────

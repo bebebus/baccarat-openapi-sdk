@@ -195,7 +195,10 @@ func TestS2SClientAndWebhookHTTPServer(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"traceId": body["traceId"], "status": SC_OK, "data": map[string]any{"username": body["username"], "terminatedSessions": 1, "revokedLaunchTokens": 0}})
 		case "/operator/v1/transaction/list":
 			pNo := int(body["pageNo"].(float64))
-			rows := []map[string]any{{"betId": "b2btkt1"}, {"betId": "b2btkt2"}}
+			rows := []map[string]any{
+				{"betId": "b2btkt1", "betTransactionId": "bet_tx_1", "settleTransactionId": "stl_tx_1", "payoutVersion": "v1", "isAdjusted": true, "roundOutcome": "PLAYER"},
+				{"betId": "b2btkt2"},
+			}
 			if pNo > 1 {
 				rows = []map[string]any{{"betId": "b2btkt3"}}
 			}
@@ -211,9 +214,11 @@ func TestS2SClientAndWebhookHTTPServer(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(map[string]any{"traceId": body["traceId"], "status": SC_INVALID_REQUEST, "message": "PNL_CAP_BREACHED_RESET_REQUIRED"})
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"traceId": body["traceId"], "status": SC_OK, "data": map[string]any{"username": body["username"], "status": "ACTIVE", "bettingEnabled": true, "rgRestricted": false, "statusReason": nil, "revokedSessions": 0, "revokedLaunchTokens": 0}})
+			_, hasReason := body["reason"]
+			_ = json.NewEncoder(w).Encode(map[string]any{"traceId": body["traceId"], "status": SC_OK, "data": map[string]any{"username": body["username"], "status": "ACTIVE", "bettingEnabled": true, "rgRestricted": false, "statusReason": body["reason"], "hasReasonKey": hasReason, "revokedSessions": 0, "revokedLaunchTokens": 0}})
 		case "/operator/v1/wallet/transaction-status":
-			_ = json.NewEncoder(w).Encode(map[string]any{"traceId": body["traceId"], "status": SC_OK, "data": map[string]any{"transactions": []map[string]any{{"transactionId": "bet_go_1", "username": body["username"], "status": "COMPLETED"}}}})
+			_, hasFrom := body["fromTime"]
+			_ = json.NewEncoder(w).Encode(map[string]any{"traceId": body["traceId"], "status": SC_OK, "data": map[string]any{"hasFromTimeKey": hasFrom, "transactions": []map[string]any{{"transactionId": "bet_go_1", "username": body["username"], "status": "COMPLETED"}}}})
 		case "/operator/v1/transaction/detail":
 			_ = json.NewEncoder(w).Encode(map[string]any{"traceId": body["traceId"], "status": SC_OK, "data": map[string]any{"betId": body["betId"], "status": 1, "roundResult": map[string]any{"outcome": "PLAYER", "playerPoints": 9, "bankerPoints": 2, "natural": true}}})
 		}
@@ -253,31 +258,61 @@ func TestS2SClientAndWebhookHTTPServer(t *testing.T) {
 	if err != nil || len(allRows) != 3 {
 		t.Fatalf("listAllTransactions failed: %v (%d)", err, len(allRows))
 	}
-	det, _, err := client.GetTransactionDetail(ctx, TransactionDetailRequest{BetID: "b2btkt1", FromTime: 1000, ToTime: 2000})
+	if allRows[0].BetTransactionID == nil || *allRows[0].BetTransactionID != "bet_tx_1" ||
+		allRows[0].SettleTransactionID == nil || *allRows[0].SettleTransactionID != "stl_tx_1" ||
+		allRows[0].PayoutVersion == nil || *allRows[0].PayoutVersion != "v1" ||
+		!allRows[0].IsAdjusted ||
+		allRows[0].RoundOutcome == nil || *allRows[0].RoundOutcome != "PLAYER" {
+		t.Fatalf("expected all 5 extended ReconcileTransactionRow fields populated, got %+v", allRows[0])
+	}
+	i64 := func(v int64) *int64 { return &v }
+	det, _, err := client.GetTransactionDetail(ctx, TransactionDetailRequest{BetID: "b2btkt1", FromTime: i64(1000), ToTime: i64(2000)})
 	if err != nil || det.RoundResult == nil || det.RoundResult.Outcome != "PLAYER" {
 		t.Fatalf("detail failed: %v", err)
 	}
+	if _, _, err := client.GetTransactionDetail(ctx, TransactionDetailRequest{BetID: "b2btkt1", FromTime: i64(1000)}); err == nil {
+		t.Fatal("expected partial detail window to fail")
+	}
 	tTrue := true
-	psData, _, err := client.UpdatePlayerStatus(ctx, UpdatePlayerStatusRequest{Username: "capped_user", Action: "SET", BettingEnabled: &tTrue, ResetPnlWindow: &tTrue})
-	if err != nil || psData["bettingEnabled"] != true {
-		t.Fatalf("updatePlayerStatus reset failed: %v", err)
+	emptyReason := ""
+	psData, _, err := client.UpdatePlayerStatus(ctx, UpdatePlayerStatusRequest{Username: "capped_user", Action: "SET", BettingEnabled: &tTrue, ResetPnlWindow: &tTrue, Reason: &emptyReason})
+	if err != nil || psData["bettingEnabled"] != true || psData["hasReasonKey"] != true || psData["statusReason"] != "" {
+		t.Fatalf("updatePlayerStatus reset with explicit empty reason failed: %v %+v", err, psData)
 	}
 	_, _, err = client.UpdatePlayerStatus(ctx, UpdatePlayerStatusRequest{Username: "locked_user", Action: "SET", Status: "ACTIVE"})
 	var apiErr403 *ApiError
-	if !errors.As(err, &apiErr403) || apiErr403.HTTPStatus != 403 || apiErr403.Status != SC_USER_DISABLED || apiErr403.Message != "PLATFORM_RISK_LOCKED" {
-		t.Fatalf("expected 403 PLATFORM_RISK_LOCKED, got %v", err)
+	if !errors.As(err, &apiErr403) || apiErr403.HTTPStatus != 403 || apiErr403.Status != SC_USER_DISABLED || apiErr403.Message != "PLATFORM_RISK_LOCKED" || apiErr403.IsRetryable() {
+		t.Fatalf("expected non-retryable 403 PLATFORM_RISK_LOCKED, got %v", err)
 	}
 	_, _, err = client.UpdatePlayerStatus(ctx, UpdatePlayerStatusRequest{Username: "capped_user", Action: "SET", BettingEnabled: &tTrue})
 	var apiErr409 *ApiError
-	if !errors.As(err, &apiErr409) || apiErr409.HTTPStatus != 409 || apiErr409.Status != SC_INVALID_REQUEST || apiErr409.Message != "PNL_CAP_BREACHED_RESET_REQUIRED" {
-		t.Fatalf("expected 409 PNL_CAP_BREACHED_RESET_REQUIRED, got %v", err)
+	if !errors.As(err, &apiErr409) || apiErr409.HTTPStatus != 409 || apiErr409.Status != SC_INVALID_REQUEST || apiErr409.Message != "PNL_CAP_BREACHED_RESET_REQUIRED" || apiErr409.IsRetryable() {
+		t.Fatalf("expected non-retryable 409 PNL_CAP_BREACHED_RESET_REQUIRED, got %v", err)
 	}
-	wtsData, _, err := client.GetWalletTransactionStatus(ctx, WalletTransactionStatusRequest{Username: "player_9527", FromTime: 1000, ToTime: 86401000})
-	if err != nil || len(wtsData["transactions"].([]any)) != 1 {
-		t.Fatalf("wallet status by username failed: %v", err)
+	wtsData, _, err := client.GetWalletTransactionStatus(ctx, WalletTransactionStatusRequest{Username: "player_9527", FromTime: i64(0), ToTime: i64(86400000)})
+	if err != nil || len(wtsData["transactions"].([]any)) != 1 || wtsData["hasFromTimeKey"] != true {
+		t.Fatalf("wallet status by username at epoch 0 failed: %v %+v", err, wtsData)
 	}
-	if _, _, err := client.GetWalletTransactionStatus(ctx, WalletTransactionStatusRequest{Username: "player_9527", FromTime: 0, ToTime: 86400001}); err == nil {
+	if _, _, err := client.GetWalletTransactionStatus(ctx, WalletTransactionStatusRequest{Username: "player_9527", FromTime: i64(0), ToTime: i64(0)}); err != nil {
+		t.Fatalf("expected [0, 0] window to succeed, got %v", err)
+	}
+	if _, _, err := client.GetWalletTransactionStatus(ctx, WalletTransactionStatusRequest{}); err == nil {
+		t.Fatal("expected empty wallet status query to fail")
+	}
+	if _, _, err := client.GetWalletTransactionStatus(ctx, WalletTransactionStatusRequest{Username: "player_9527"}); err == nil {
+		t.Fatal("expected username query without window to fail")
+	}
+	if _, _, err := client.GetWalletTransactionStatus(ctx, WalletTransactionStatusRequest{Username: "player_9527", FromTime: i64(0), ToTime: i64(86400001)}); err == nil {
 		t.Fatal("expected >24h username query to fail")
+	}
+	if _, _, err := client.GetWalletTransactionStatus(ctx, WalletTransactionStatusRequest{TransactionID: "bet_1", FromTime: i64(1000)}); err == nil {
+		t.Fatal("expected partial window alongside transactionId to fail")
+	}
+	if _, _, err := client.GetWalletTransactionStatus(ctx, WalletTransactionStatusRequest{BetID: "b2btkt1", FromTime: i64(2000), ToTime: i64(1000)}); err == nil {
+		t.Fatal("expected inverted window alongside betId to fail")
+	}
+	if _, _, err := client.ListUnsettledTransactions(ctx, ListUnsettledRequest{FromTime: i64(1000)}); err == nil {
+		t.Fatal("expected partial unsettled window to fail")
 	}
 
 	// Webhook HTTP server end-to-end

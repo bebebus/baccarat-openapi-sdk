@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.0)."""
+"""Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.1)."""
 
 from __future__ import annotations
 
@@ -619,9 +619,13 @@ class Client:
         trace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {}
-        if from_time is not None:
+        if from_time is not None or to_time is not None:
+            if isinstance(from_time, bool) or isinstance(to_time, bool) or not isinstance(from_time, int) or not isinstance(to_time, int):
+                raise BaccaratSdkError("from_time and to_time must both be ints when specified", "INVALID_ARGUMENT")
+            span = to_time - from_time
+            if from_time < 0 or span < 0 or span > MAX_DETAIL_WINDOW_MS:
+                raise BaccaratSdkError("Unsettled query window must satisfy 0 <= to_time - from_time <= 604800000", "INVALID_ARGUMENT")
             payload["fromTime"] = from_time
-        if to_time is not None:
             payload["toTime"] = to_time
         if username is not None:
             payload["username"] = username
@@ -657,15 +661,20 @@ class Client:
             payload["betId"] = bet_s
         if user_s:
             payload["username"] = user_s
-        if user_s and not tx_s and not bet_s:
+        user_only = bool(user_s and not tx_s and not bet_s)
+        has_window = from_time is not None or to_time is not None
+        if user_only or has_window:
             if isinstance(from_time, bool) or isinstance(to_time, bool) or not isinstance(from_time, int) or not isinstance(to_time, int):
-                raise BaccaratSdkError("from_time and to_time ints are required when querying by username alone", "INVALID_ARGUMENT")
+                raise BaccaratSdkError("from_time and to_time must both be ints when querying by username alone or specifying a window", "INVALID_ARGUMENT")
             span = to_time - from_time
-            if from_time < 0 or span < 0 or span > 86_400_000:
-                raise BaccaratSdkError("Username query window must satisfy 0 <= to_time - from_time <= 86400000 (24 hours)", "INVALID_ARGUMENT")
-        if from_time is not None:
+            if from_time < 0 or span < 0 or (user_only and span > 86_400_000):
+                raise BaccaratSdkError(
+                    "Username query window must satisfy 0 <= to_time - from_time <= 86400000 (24 hours)"
+                    if user_only
+                    else "Invalid [from_time, to_time] window",
+                    "INVALID_ARGUMENT",
+                )
             payload["fromTime"] = from_time
-        if to_time is not None:
             payload["toTime"] = to_time
         if trace_id is not None:
             payload["traceId"] = trace_id

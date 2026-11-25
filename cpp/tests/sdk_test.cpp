@@ -335,7 +335,7 @@ int main() {
         ps_lock.set("status", Json("ACTIVE"));
         client.update_player_status(ps_lock);
     } catch (const ApiError& e) {
-        caught_403 = (e.http_status == 403 && e.status == "SC_USER_DISABLED" && std::string(e.what()) == "PLATFORM_RISK_LOCKED");
+        caught_403 = (e.http_status == 403 && e.status == "SC_USER_DISABLED" && std::string(e.what()) == "PLATFORM_RISK_LOCKED" && !e.is_retryable());
     }
     require_true(caught_403, "s2s:playerStatus403");
 
@@ -347,16 +347,51 @@ int main() {
         ps_cap.set("bettingEnabled", Json(true));
         client.update_player_status(ps_cap);
     } catch (const ApiError& e) {
-        caught_409 = (e.http_status == 409 && e.status == "SC_INVALID_REQUEST" && std::string(e.what()) == "PNL_CAP_BREACHED_RESET_REQUIRED");
+        caught_409 = (e.http_status == 409 && e.status == "SC_INVALID_REQUEST" && std::string(e.what()) == "PNL_CAP_BREACHED_RESET_REQUIRED" && !e.is_retryable());
     }
     require_true(caught_409, "s2s:playerStatus409");
 
     Json wts_req = Json::object();
     wts_req.set("username", Json("player_9527"));
-    wts_req.set("fromTime", Json(static_cast<int64_t>(1000)));
-    wts_req.set("toTime", Json(static_cast<int64_t>(86401000)));
+    wts_req.set("fromTime", Json(static_cast<int64_t>(0)));
+    wts_req.set("toTime", Json(static_cast<int64_t>(86400000)));
     Json wts_res = client.get_wallet_transaction_status(wts_req);
     require_eq(wts_res.at("data").at("transactions").as_array()[0].at("username").as_string(), "player_9527", "s2s:walletStatusByUser");
+
+    auto expect_invalid_arg = [&](auto fn, const std::string& label) {
+        bool threw = false;
+        try {
+            fn();
+        } catch (const SdkError& e) {
+            threw = (e.code == "INVALID_ARGUMENT");
+        }
+        require_true(threw, label);
+    };
+    expect_invalid_arg([&] { client.get_wallet_transaction_status(Json::object()); }, "s2s:wtsEmpty");
+    expect_invalid_arg([&] {
+        Json p = Json::object(); p.set("username", Json("player_9527"));
+        client.get_wallet_transaction_status(p);
+    }, "s2s:wtsUserNoWindow");
+    expect_invalid_arg([&] {
+        Json p = Json::object(); p.set("username", Json("player_9527")); p.set("fromTime", Json(static_cast<int64_t>(0))); p.set("toTime", Json(static_cast<int64_t>(86400001)));
+        client.get_wallet_transaction_status(p);
+    }, "s2s:wtsUserOver24h");
+    expect_invalid_arg([&] {
+        Json p = Json::object(); p.set("transactionId", Json("bet_1")); p.set("fromTime", Json(static_cast<int64_t>(1000)));
+        client.get_wallet_transaction_status(p);
+    }, "s2s:wtsPartialWindow");
+    expect_invalid_arg([&] {
+        Json p = Json::object(); p.set("betId", Json("b2btkt1")); p.set("fromTime", Json(static_cast<int64_t>(2000))); p.set("toTime", Json(static_cast<int64_t>(1000)));
+        client.get_wallet_transaction_status(p);
+    }, "s2s:wtsInvertedWindow");
+    expect_invalid_arg([&] {
+        Json p = Json::object(); p.set("transactionId", Json("bet_1")); p.set("fromTime", Json(nullptr));
+        client.get_wallet_transaction_status(p);
+    }, "s2s:wtsNullFrom");
+    expect_invalid_arg([&] {
+        Json p = Json::object(); p.set("fromTime", Json(nullptr));
+        client.list_unsettled_transactions(p);
+    }, "s2s:unsettledNullFrom");
 
     stop_srv.store(true);
     ::shutdown(srv_fd, SHUT_RDWR);

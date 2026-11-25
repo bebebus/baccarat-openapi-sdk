@@ -575,6 +575,16 @@ Json Client::get_transaction_detail(Json params) const {
 }
 
 Json Client::list_unsettled_transactions(Json params) const {
+    if (params.contains("fromTime") || params.contains("toTime")) {
+        if (!params.at("fromTime").is_int() || !params.at("toTime").is_int()) {
+            throw SdkError("INVALID_ARGUMENT", "fromTime and toTime must both be integers when specified");
+        }
+        int64_t from = params.at("fromTime").as_int(-1);
+        int64_t to = params.at("toTime").as_int(-1);
+        if (from < 0 || to < from || (to - from) > MAX_DETAIL_WINDOW_MS) {
+            throw SdkError("INVALID_ARGUMENT", "unsettled window must satisfy 0 <= toTime - fromTime <= 604800000");
+        }
+    }
     return post_signed("/operator/v1/transaction/unsettled", std::move(params));
 }
 
@@ -585,14 +595,21 @@ Json Client::get_wallet_transaction_status(Json params) const {
     if (tx_id.empty() && bet_id.empty() && username.empty()) {
         throw SdkError("INVALID_ARGUMENT", "At least one of transactionId, betId, or username is required");
     }
-    if (!username.empty() && tx_id.empty() && bet_id.empty()) {
+    bool user_only = (!username.empty() && tx_id.empty() && bet_id.empty());
+    bool has_window = (params.contains("fromTime") || params.contains("toTime"));
+    if (user_only || has_window) {
         if (!params.at("fromTime").is_int() || !params.at("toTime").is_int()) {
-            throw SdkError("INVALID_ARGUMENT", "fromTime and toTime integers are required when querying by username alone");
+            throw SdkError("INVALID_ARGUMENT", "fromTime and toTime must both be integers when querying by username alone or specifying a window");
         }
         int64_t from = params.at("fromTime").as_int(-1);
         int64_t to = params.at("toTime").as_int(-1);
-        if (from < 0 || to < from || (to - from) > 86400000LL) {
-            throw SdkError("INVALID_ARGUMENT", "Username query window must satisfy 0 <= toTime - fromTime <= 86400000");
+        if (from < 0 || to < from || (user_only && (to - from) > 86400000LL)) {
+            throw SdkError(
+                "INVALID_ARGUMENT",
+                user_only
+                    ? "Username query window must satisfy 0 <= toTime - fromTime <= 86400000"
+                    : "Invalid [fromTime, toTime] window"
+            );
         }
     }
     return post_signed("/operator/v1/wallet/transaction-status", std::move(params));

@@ -1,6 +1,6 @@
 > 中文 | [English](./INTERFACES.en.md)
 
-# B2B 运营商单一无缝钱包接口与状态码字典（v1.5.0）
+# B2B 运营商单一无缝钱包接口与状态码字典（v1.5.1）
 
 在线交互式文档与 OpenAPI 3.1 规范：`https://openapi.lt.cniia.cloud`
 
