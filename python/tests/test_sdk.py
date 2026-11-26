@@ -346,11 +346,23 @@ class TestBaccaratPythonSdk(unittest.TestCase):
 
             def do_POST(self) -> None:
                 length = int(self.headers.get("Content-Length", "0"))
-                _ = self.rfile.read(length)
+                raw = self.rfile.read(length)
                 if self.path == "/leaked":
                     redirect_followed["hit"] = True
                     self.send_response(200)
                     self.end_headers()
+                    return
+                body = json.loads(raw.decode("utf-8"))
+                if body.get("traceId") == "oversized_500":
+                    oversized = b"x" * (16 * 1024 * 1024 + 1)
+                    self.send_response(500)
+                    self.send_header("Content-Type", "text/plain")
+                    self.send_header("Content-Length", str(len(oversized)))
+                    self.end_headers()
+                    try:
+                        self.wfile.write(oversized)
+                    except BrokenPipeError:
+                        pass
                     return
                 self.send_response(307)
                 self.send_header("Location", "/leaked")
@@ -373,6 +385,14 @@ class TestBaccaratPythonSdk(unittest.TestCase):
             self.assertEqual(ctx_redir.exception.http_status, 307)
             self.assertEqual(ctx_redir.exception.status, StatusCode.SC_INVALID_REQUEST)
             self.assertFalse(redirect_followed["hit"])
+
+            # >16 MiB HTTP 500 error body must raise non-retryable SC_INVALID_REQUEST
+            with self.assertRaises(BaccaratApiError) as ctx_500_big:
+                redir_client.ping(trace_id="oversized_500")
+            self.assertEqual(ctx_500_big.exception.http_status, 500)
+            self.assertEqual(ctx_500_big.exception.status, StatusCode.SC_INVALID_REQUEST)
+            self.assertEqual(ctx_500_big.exception.code, StatusCode.SC_INVALID_REQUEST)
+            self.assertFalse(ctx_500_big.exception.is_retryable())
         finally:
             redir_srv.shutdown()
             redir_srv.server_close()

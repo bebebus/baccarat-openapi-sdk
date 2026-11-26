@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Zero-dependency Node.js SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.3).
+// Zero-dependency Node.js SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.4).
 
 import crypto from 'node:crypto';
 import http from 'node:http';

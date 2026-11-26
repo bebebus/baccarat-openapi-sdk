@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bebebus-baccarat-openapi-sdk"
-version = "1.5.3"
-description = "Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.3)"
+version = "1.5.4"
+description = "Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.4)"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.9"

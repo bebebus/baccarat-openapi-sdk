@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.3)."""
+"""Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.4)."""
 
 from __future__ import annotations
 
@@ -349,10 +349,16 @@ def _default_transport(url: str, headers: Dict[str, str], raw_body: bytes, timeo
             return resp.status, chunk.decode("utf-8", errors="replace")
     except urllib.error.HTTPError as err:
         try:
-            body = err.read(MAX_HTTP_RESPONSE_BYTES).decode("utf-8", errors="replace") if err.fp else ""
+            raw = err.read(MAX_HTTP_RESPONSE_BYTES + 1) if err.fp else b""
         finally:
             err.close()
-        return err.code, body
+        if len(raw) > MAX_HTTP_RESPONSE_BYTES:
+            raise BaccaratApiError(
+                status=StatusCode.SC_INVALID_REQUEST,
+                message="Gateway response exceeded 16 MiB limit",
+                http_status=err.code,
+            )
+        return err.code, raw.decode("utf-8", errors="replace")
     except BaccaratSdkError:
         raise
     except Exception as exc:

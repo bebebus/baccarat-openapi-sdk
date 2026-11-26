@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.3).
+//! Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.4).
 
 pub mod crypto;
 mod curl_ffi;

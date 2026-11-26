@@ -221,7 +221,7 @@ std::string truncate_utf8(const std::string& s, size_t max_chars) {
 }
 
 std::string extract_trace_hint(const std::string& raw_body) {
-    std::string head = raw_body.substr(0, std::min<size_t>(raw_body.size(), 1024));
+    std::string head = raw_body.substr(0, (std::min<size_t>)(raw_body.size(), 1024));
     size_t key_pos = head.find("\"traceId\"");
     if (key_pos == std::string::npos) return "";
     size_t colon = head.find(':', key_pos + 9);
@@ -511,7 +511,7 @@ Json Client::post_signed(const std::string& route_path, Json payload) const {
     curl_easy_setopt(guard.curl, CURLOPT_POSTFIELDS, raw_body.data());
     curl_easy_setopt(guard.curl, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(raw_body.size()));
     curl_easy_setopt(guard.curl, CURLOPT_TIMEOUT_MS, timeout_ms_);
-    curl_easy_setopt(guard.curl, CURLOPT_CONNECTTIMEOUT_MS, std::min<long>(timeout_ms_, 5000L));
+    curl_easy_setopt(guard.curl, CURLOPT_CONNECTTIMEOUT_MS, (std::min<long>)(timeout_ms_, 5000L));
     curl_easy_setopt(guard.curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
     curl_easy_setopt(guard.curl, CURLOPT_WRITEDATA, &write_state);
 
@@ -588,8 +588,8 @@ std::vector<Json> Client::list_all_transactions(
     if (page_size < 1 || page_size > MAX_PAGE_SIZE) {
         throw SdkError("INVALID_ARGUMENT", "page_size out of range 1..20000");
     }
-    int max_retries = std::max(0, rate_limit_max_retries);
-    int backoff_ms = std::max(0, rate_limit_backoff_ms);
+    int max_retries = (std::max)(0, rate_limit_max_retries);
+    int backoff_ms = (std::max)(0, rate_limit_backoff_ms);
     std::vector<Json> all;
     int page_no = 1;
     while (true) {

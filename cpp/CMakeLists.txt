@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 cmake_minimum_required(VERSION 3.16)
-project(baccarat_sdk VERSION 1.5.3 LANGUAGES CXX)
+project(baccarat_sdk VERSION 1.5.4 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -30,7 +30,9 @@ find_package(Threads REQUIRED)
 add_library(baccarat_sdk STATIC src/sdk.cpp)
 target_include_directories(baccarat_sdk PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(baccarat_sdk PUBLIC OpenSSL::Crypto CURL::libcurl Threads::Threads)
-if(NOT MSVC)
+if(MSVC)
+  target_compile_definitions(baccarat_sdk PRIVATE NOMINMAX)
+else()
   target_compile_options(baccarat_sdk PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 

@@ -9,7 +9,7 @@
 
 ```toml
 [dependencies]
-baccarat-openapi-sdk = { git = "https://github.com/bebebus/baccarat-openapi-sdk", tag = "v1.5.3" }
+baccarat-openapi-sdk = { git = "https://github.com/bebebus/baccarat-openapi-sdk", tag = "v1.5.4" }
 ```
 
 - 单测命令：`cd rust && cargo test`

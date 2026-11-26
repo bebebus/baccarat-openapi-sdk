@@ -4,12 +4,12 @@ package cloud.cniia.baccarat.sdk;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
 import java.math.BigInteger;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Duration;
@@ -23,6 +23,12 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.Flow;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -337,19 +343,102 @@ public final class BaccaratSdk {
             return StatusCode.SC_INVALID_REQUEST;
         }
 
-        private static String readBoundedBody(InputStream is) throws Exception {
-            ByteArrayOutputStream baos = new ByteArrayOutputStream(1024);
-            byte[] buf = new byte[8192];
-            int total = 0;
-            int n;
-            while ((n = is.read(buf)) != -1) {
-                total += n;
-                if (total > MAX_HTTP_RESPONSE_BYTES) {
-                    throw new SdkException(StatusCode.SC_INVALID_REQUEST, "Gateway response exceeded 16 MiB limit");
-                }
-                baos.write(buf, 0, n);
+        private static final class BoundedBodySubscriber implements HttpResponse.BodySubscriber<byte[]> {
+            private final int maxBytes;
+            private final ByteArrayOutputStream out = new ByteArrayOutputStream(1024);
+            private final CompletableFuture<byte[]> body = new CompletableFuture<>();
+            private volatile Flow.Subscription subscription;
+            private long totalBytes = 0L;
+            private volatile boolean failed = false;
+
+            BoundedBodySubscriber(int maxBytes) {
+                this.maxBytes = maxBytes;
             }
-            return baos.toString(StandardCharsets.UTF_8);
+
+            void cancel() {
+                failed = true;
+                Flow.Subscription sub = this.subscription;
+                if (sub != null) {
+                    sub.cancel();
+                }
+                body.cancel(true);
+            }
+
+            @Override
+            public void onSubscribe(Flow.Subscription subscription) {
+                if (failed || this.subscription != null) {
+                    subscription.cancel();
+                    return;
+                }
+                this.subscription = subscription;
+                if (failed) {
+                    subscription.cancel();
+                    return;
+                }
+                subscription.request(Long.MAX_VALUE);
+            }
+
+            @Override
+            public void onNext(List<ByteBuffer> items) {
+                if (failed || items == null) return;
+                for (ByteBuffer buf : items) {
+                    int rem = buf.remaining();
+                    if (rem == 0) continue;
+                    if (totalBytes + rem > maxBytes) {
+                        failed = true;
+                        Flow.Subscription sub = this.subscription;
+                        if (sub != null) {
+                            sub.cancel();
+                        }
+                        body.completeExceptionally(
+                                new SdkException(StatusCode.SC_INVALID_REQUEST, "Gateway response exceeded 16 MiB limit")
+                        );
+                        return;
+                    }
+                    totalBytes += rem;
+                    if (buf.hasArray()) {
+                        out.write(buf.array(), buf.arrayOffset() + buf.position(), rem);
+                        buf.position(buf.limit());
+                    } else {
+                        byte[] tmp = new byte[rem];
+                        buf.get(tmp);
+                        out.write(tmp, 0, rem);
+                    }
+                }
+            }
+
+            @Override
+            public void onError(Throwable throwable) {
+                if (!failed) {
+                    failed = true;
+                    body.completeExceptionally(throwable);
+                }
+            }
+
+            @Override
+            public void onComplete() {
+                if (!failed) {
+                    body.complete(out.toByteArray());
+                }
+            }
+
+            @Override
+            public CompletionStage<byte[]> getBody() {
+                return body;
+            }
+        }
+
+        private static SdkException unwrapSdkException(Throwable t) {
+            Throwable cur = t;
+            int depth = 0;
+            while (cur != null && depth < 16) {
+                if (cur instanceof SdkException se) {
+                    return se;
+                }
+                cur = cur.getCause();
+                depth++;
+            }
+            return null;
         }
 
         @SuppressWarnings("unchecked")
@@ -380,18 +469,38 @@ public final class BaccaratSdk {
 
             int statusCode;
             String responseBody;
+            AtomicReference<BoundedBodySubscriber> activeSub = new AtomicReference<>();
+            HttpResponse.BodyHandler<byte[]> boundedHandler = responseInfo -> {
+                BoundedBodySubscriber sub = new BoundedBodySubscriber(MAX_HTTP_RESPONSE_BYTES);
+                activeSub.set(sub);
+                return sub;
+            };
+            CompletableFuture<HttpResponse<byte[]>> cf = httpClient.sendAsync(req, boundedHandler);
             try {
-                HttpResponse<InputStream> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofInputStream());
+                HttpResponse<byte[]> resp = cf.get(config.timeoutMs, TimeUnit.MILLISECONDS);
                 statusCode = resp.statusCode();
-                try (InputStream is = resp.body()) {
-                    responseBody = is == null ? "" : readBoundedBody(is);
+                byte[] respBytes = resp.body();
+                responseBody = respBytes == null ? "" : new String(respBytes, StandardCharsets.UTF_8);
+            } catch (TimeoutException e) {
+                BoundedBodySubscriber sub = activeSub.get();
+                if (sub != null) {
+                    sub.cancel();
                 }
-            } catch (SdkException e) {
-                throw e;
+                cf.cancel(true);
+                throw new SdkException(StatusCode.SC_OPERATOR_TIMEOUT, "Request timed out after " + config.timeoutMs + "ms");
             } catch (InterruptedException e) {
+                BoundedBodySubscriber sub = activeSub.get();
+                if (sub != null) {
+                    sub.cancel();
+                }
+                cf.cancel(true);
                 Thread.currentThread().interrupt();
                 throw new SdkException(StatusCode.SC_OPERATOR_TIMEOUT, "Request interrupted: " + e.getMessage());
             } catch (Exception e) {
+                SdkException cause = unwrapSdkException(e);
+                if (cause != null) {
+                    throw cause;
+                }
                 throw new SdkException(StatusCode.SC_OPERATOR_TIMEOUT, "Network error: " + e.getMessage());
             }
 

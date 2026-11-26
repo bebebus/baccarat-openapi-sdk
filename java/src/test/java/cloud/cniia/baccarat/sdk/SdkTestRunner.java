@@ -348,6 +348,28 @@ public final class SdkTestRunner {
                     ex.close();
                     return;
                 }
+                if ("m4_exact".equals(tid)) {
+                    String prefix = "{\"traceId\":\"m4_exact\",\"status\":\"SC_OK\",\"data\":{\"pad\":\"";
+                    String suffix = "\"}}";
+                    int exactBytes = 16 * 1024 * 1024;
+                    int padLen = exactBytes - prefix.length() - suffix.length();
+                    ex.getResponseHeaders().set("Content-Type", "application/json");
+                    ex.sendResponseHeaders(200, exactBytes);
+                    byte[] chunk = new byte[65536];
+                    java.util.Arrays.fill(chunk, (byte) 'a');
+                    try (var os = ex.getResponseBody()) {
+                        os.write(prefix.getBytes(StandardCharsets.UTF_8));
+                        int remaining = padLen;
+                        while (remaining > 0) {
+                            int n = Math.min(remaining, chunk.length);
+                            os.write(chunk, 0, n);
+                            remaining -= n;
+                        }
+                        os.write(suffix.getBytes(StandardCharsets.UTF_8));
+                    }
+                    ex.close();
+                    return;
+                }
                 if ("m4_overflow".equals(tid)) {
                     ex.getResponseHeaders().set("Content-Type", "application/json");
                     ex.sendResponseHeaders(200, 0);
@@ -416,7 +438,10 @@ public final class SdkTestRunner {
             }
             check(caughtM1503, "s2s:m1Json503");
 
-            // M4: >16 MiB response body rejected with non-retryable SC_INVALID_REQUEST
+            // M4: exact 16 MiB response body succeeds; >16 MiB response body rejected with non-retryable SC_INVALID_REQUEST
+            Map<String, Object> exactResp = tsClient.ping(Map.of("traceId", "m4_exact"));
+            checkEq(exactResp.get("status"), "SC_OK", "s2s:m4Exact16MiB");
+
             boolean caughtM4Overflow = false;
             try {
                 tsClient.ping(Map.of("traceId", "m4_overflow"));
@@ -426,6 +451,60 @@ public final class SdkTestRunner {
                         && !BaccaratSdk.StatusCode.isRetryable(ex.code);
             }
             check(caughtM4Overflow, "s2s:m4Overflow16MiB");
+
+            // Body-read timeout regression: headers arrive immediately, body stalls mid-stream -> must fail within timeoutMs
+            java.util.concurrent.CountDownLatch releaseStall = new java.util.concurrent.CountDownLatch(1);
+            try (java.net.ServerSocket stallSrv = new java.net.ServerSocket(0, 50, java.net.InetAddress.getByName("127.0.0.1"))) {
+                Thread stallThread = new Thread(() -> {
+                    try (java.net.Socket sock = stallSrv.accept()) {
+                        var in = sock.getInputStream();
+                        byte[] buf = new byte[1024];
+                        StringBuilder reqBuf = new StringBuilder();
+                        sock.setSoTimeout(200);
+                        try {
+                            int n;
+                            while ((n = in.read(buf)) > 0) {
+                                reqBuf.append(new String(buf, 0, n, StandardCharsets.ISO_8859_1));
+                                String s = reqBuf.toString();
+                                int hdrEnd = s.indexOf("\r\n\r\n");
+                                if (hdrEnd >= 0 && s.indexOf('}', hdrEnd + 4) >= 0) {
+                                    break;
+                                }
+                            }
+                        } catch (java.net.SocketTimeoutException ignored) {
+                        }
+                        var out = sock.getOutputStream();
+                        out.write("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{\"a\":".getBytes(StandardCharsets.UTF_8));
+                        out.flush();
+                        releaseStall.await(10, java.util.concurrent.TimeUnit.SECONDS);
+                    } catch (Exception ignored) {
+                    }
+                });
+                stallThread.setDaemon(true);
+                stallThread.start();
+                try {
+                    BaccaratSdk.Config stallCfg = new BaccaratSdk.Config(
+                            apiKey, secret, BaccaratSdk.Environment.PRODUCTION,
+                            "http://127.0.0.1:" + stallSrv.getLocalPort(), 400
+                    );
+                    BaccaratSdk.Client stallClient = new BaccaratSdk.Client(stallCfg);
+                    long t0 = System.nanoTime();
+                    boolean caughtBodyTimeout = false;
+                    try {
+                        stallClient.ping(Map.of("traceId", "body_stall_timeout"));
+                    } catch (BaccaratSdk.SdkException ex) {
+                        caughtBodyTimeout = !(ex instanceof BaccaratSdk.ApiException)
+                                && BaccaratSdk.StatusCode.SC_OPERATOR_TIMEOUT.equals(ex.code)
+                                && BaccaratSdk.StatusCode.isRetryable(ex.code);
+                    }
+                    long elapsedMs = (System.nanoTime() - t0) / 1_000_000L;
+                    check(caughtBodyTimeout, "s2s:bodyReadTimeoutStatus");
+                    check(elapsedMs < 1500L, "s2s:bodyReadTimeoutElapsed<" + elapsedMs + "ms");
+                } finally {
+                    releaseStall.countDown();
+                    stallThread.join(1000);
+                }
+            }
 
             // m1: traceId in filters is stripped so every page & retry gets a distinct fresh UUID
             List<Map<String, Object>> retried = tsClient.listAllTransactions(
