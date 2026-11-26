@@ -565,7 +565,24 @@ type panickingWallet struct {
 	InMemoryWallet
 }
 
-func (p *panickingWallet) OnBetResult(_ context.Context, _ WalletBetResultRequest) WalletResponse {
+func (p *panickingWallet) OnBalance(_ context.Context, req WalletBalanceRequest) WalletResponse {
+	return WalletError(req.TraceID, SC_INSUFFICIENT_FUNDS, "explicit insufficient")
+}
+
+func (p *panickingWallet) OnBet(_ context.Context, req WalletBetRequest) WalletResponse {
+	if _, err := DecimalToLedgerUnits(req.Amount, 2, false); err != nil {
+		return WalletError(req.TraceID, SC_INVALID_REQUEST, err.Error())
+	}
+	return WalletOK(req.TraceID, "p1", "USD", "100.00", 0)
+}
+
+func (p *panickingWallet) OnBetResult(_ context.Context, req WalletBetResultRequest) WalletResponse {
+	if req.TransactionID == "stl_bad_bal" {
+		return WalletOK(req.TraceID, "p1", "USD", "-1.00", 0)
+	}
+	if req.TransactionID == "stl_nan_bal" {
+		return WalletOK(req.TraceID, "p1", "USD", "NaN", 0)
+	}
 	panic("ERROR: deadlock detected (40P01) on table wallets")
 }
 
@@ -641,7 +658,7 @@ func TestV155NullClearingBuildersAndPanicSafety(t *testing.T) {
 	if errResp.Status != SC_INSUFFICIENT_FUNDS || errResp.Message != "low balance" {
 		t.Fatalf("WalletError unexpected: %+v", errResp)
 	}
-	for _, badStatus := range []string{"", "   ", SC_OK, " SC_OK "} {
+	for _, badStatus := range []string{"", "   ", SC_OK, " SC_OK ", "sc_ok", "Sc_Ok", " sc_ok "} {
 		coerced := WalletError("t_coerce", badStatus, "guarded")
 		if coerced.Status != SC_INVALID_REQUEST {
 			t.Fatalf("WalletError(%q) expected coerced SC_INVALID_REQUEST, got %+v", badStatus, coerced)
@@ -678,5 +695,30 @@ func TestV155NullClearingBuildersAndPanicSafety(t *testing.T) {
 	}
 	if strings.Contains(resp.Message, "40P01") || strings.Contains(resp.Message, "deadlock") {
 		t.Fatalf("panic payload leaked: %q", resp.Message)
+	}
+	for _, txID := range []string{"stl_bad_bal", "stl_nan_bal"} {
+		bbRaw := []byte(`{"traceId":"t_go_` + txID + `","transactionId":"` + txID + `","betId":"b1"}`)
+		bbSig, _ := SignBody(bbRaw, secret)
+		bbResp := disp.HandleRaw(context.Background(), "/wallet/bet_result", apiKey, bbSig, bbRaw)
+		if bbResp.Status != SC_OPERATOR_TIMEOUT || bbResp.TraceID != "t_go_"+txID || bbResp.Message != "Temporary wallet handler error" {
+			t.Fatalf("expected sanitized SC_OPERATOR_TIMEOUT for %s, got %+v", txID, bbResp)
+		}
+		if strings.Contains(bbResp.Message, "WalletOK") {
+			t.Fatalf("validator detail leaked: %q", bbResp.Message)
+		}
+	}
+	for _, badAmt := range []string{"not_a_number", "1.123456", "-5.00"} {
+		bdRaw := []byte(`{"traceId":"t_go_bad_dec","amount":"` + badAmt + `"}`)
+		bdSig, _ := SignBody(bdRaw, secret)
+		bdResp := disp.HandleRaw(context.Background(), "/wallet/bet", apiKey, bdSig, bdRaw)
+		if bdResp.Status != SC_INVALID_REQUEST {
+			t.Fatalf("expected SC_INVALID_REQUEST for bad decimal %q, got %+v", badAmt, bdResp)
+		}
+	}
+	balRaw := []byte(`{"traceId":"t_go_insuff"}`)
+	balSig, _ := SignBody(balRaw, secret)
+	balResp := disp.HandleRaw(context.Background(), "/wallet/balance", apiKey, balSig, balRaw)
+	if balResp.Status != SC_INSUFFICIENT_FUNDS {
+		t.Fatalf("expected SC_INSUFFICIENT_FUNDS, got %+v", balResp)
 	}
 }

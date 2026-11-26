@@ -325,11 +325,22 @@ assertEq($utf8Res['status'], StatusCode::SC_INVALID_REQUEST, 'wb:m10Utf8TraceSta
 assertEq((bool) preg_match('//u', (string) $utf8Res['traceId']), true, 'wb:m10Utf8Valid');
 assertEq($utf8Res['traceId'], str_repeat('中', 128), 'wb:m10Utf8CharCount');
 
-// 8. v1.5.6 regressions: deadlock exception safety & WalletResponse builders
+// 8. v1.5.7 regressions: deadlock & internal SdkException safety, WalletResponse builders
 $deadlockWallet = new class implements \Bebebus\BaccaratSdk\WalletHandlerInterface {
     public function onBalance(array $req): array { throw new BaccaratSdkException('explicit sdk err', StatusCode::SC_INSUFFICIENT_FUNDS); }
-    public function onBet(array $req): array { throw new \RuntimeException('ERROR: deadlock detected (40P01) on table wallets'); }
-    public function onBetResult(array $req): array { throw new \RuntimeException('ERROR: deadlock detected (40P01) on table wallets'); }
+    public function onBet(array $req): array {
+        Money::decimalToLedgerUnits((string) ($req['amount'] ?? 'bad_amt'), 2, false);
+        return WalletResponse::ok((string) ($req['traceId'] ?? ''), 'p1', 'USD', '100.00');
+    }
+    public function onBetResult(array $req): array {
+        if (($req['mode'] ?? '') === 'bad_balance') {
+            return WalletResponse::ok((string) ($req['traceId'] ?? ''), 'p1', 'USD', '-1.00');
+        }
+        if (($req['mode'] ?? '') === 'nan_balance') {
+            return WalletResponse::ok((string) ($req['traceId'] ?? ''), 'p1', 'USD', 'NaN');
+        }
+        throw new \RuntimeException('ERROR: deadlock detected (40P01) on table wallets');
+    }
     public function onRollback(array $req): array { return WalletResponse::ok((string) ($req['traceId'] ?? ''), 'p1', 'USD', '100.00', 1700000000000); }
 };
 $dlDisp = WebhookDispatcher::fromCredentials($apiKey, $secret, $deadlockWallet);
@@ -340,6 +351,23 @@ assertEq($dlOut['body']['traceId'], 't_php_dl', 'wb:deadlockTraceId');
 assertEq($dlOut['body']['status'], StatusCode::SC_OPERATOR_TIMEOUT, 'wb:deadlockTimeoutStatus');
 assertEq($dlOut['body']['message'], 'Temporary wallet handler error', 'wb:deadlockSanitizedMsg');
 assertEq(str_contains((string) $dlOut['body']['message'], '40P01'), false, 'wb:deadlockNoLeakSql');
+
+foreach (['bad_balance', 'nan_balance'] as $mode) {
+    $bbRaw = json_encode(['traceId' => "t_php_$mode", 'mode' => $mode], JSON_THROW_ON_ERROR);
+    $bbOut = $dlDisp->handle('/wallet/bet_result', $apiKey, Signing::signBody($bbRaw, $secret), $bbRaw);
+    assertEq($bbOut['statusCode'], 200, "wb:internalSdkErrHttp200:$mode");
+    assertEq($bbOut['body']['traceId'], "t_php_$mode", "wb:internalSdkErrTrace:$mode");
+    assertEq($bbOut['body']['status'], StatusCode::SC_OPERATOR_TIMEOUT, "wb:internalSdkErrStatus:$mode");
+    assertEq($bbOut['body']['message'], 'Temporary wallet handler error', "wb:internalSdkErrMsg:$mode");
+    assertEq(str_contains((string) $bbOut['body']['message'], 'WalletResponse::ok'), false, "wb:internalSdkErrNoLeak:$mode");
+}
+
+foreach (['not_a_number', '1.123456', '-5.00'] as $badAmt) {
+    $bdRaw = json_encode(['traceId' => 't_php_bad_dec', 'amount' => $badAmt], JSON_THROW_ON_ERROR);
+    $bdOut = $dlDisp->handle('/wallet/bet', $apiKey, Signing::signBody($bdRaw, $secret), $bdRaw);
+    assertEq($bdOut['statusCode'], 200, "wb:incomingDecHttp200:$badAmt");
+    assertEq($bdOut['body']['status'], StatusCode::SC_INVALID_REQUEST, "wb:incomingDecInvalidReq:$badAmt");
+}
 
 $sdkErrOut = $dlDisp->handle('/wallet/balance', $apiKey, Signing::signBody($dlRaw, $secret), $dlRaw);
 assertEq($sdkErrOut['body']['status'], StatusCode::SC_INSUFFICIENT_FUNDS, 'wb:sdkErrPreserved');
@@ -360,7 +388,7 @@ foreach (['', '   ', '-1.00', 'abc', '10.', '.5', "10.00\n"] as $badBal) {
     }
     assertEq($threw, true, "walletResp:badBalance:$badBal");
 }
-foreach (['', '   ', StatusCode::SC_OK, ' SC_OK '] as $badStatus) {
+foreach (['', '   ', StatusCode::SC_OK, ' SC_OK ', 'sc_ok', 'Sc_Ok', ' sc_ok '] as $badStatus) {
     $threw = false;
     try {
         WalletResponse::error('t_bad', $badStatus, 'oops');

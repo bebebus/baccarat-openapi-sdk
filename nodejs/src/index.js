@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Zero-dependency Node.js SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.6).
+// Zero-dependency Node.js SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.7).
 
 import crypto from 'node:crypto';
 import http from 'node:http';
@@ -869,7 +869,7 @@ export function walletOk(traceId, username, currency, balance, timestamp = Date.
 
 export function walletError(traceId, status, message = '') {
   const st = typeof status === 'string' ? status.trim() : '';
-  if (!st || st === StatusCode.SC_OK) {
+  if (!st || /^SC_OK$/i.test(st)) {
     throw new BaccaratSdkError(
       'walletError status must be a non-empty error status code (cannot be SC_OK)',
       'INVALID_ARGUMENT',
@@ -890,6 +890,12 @@ function extractSafeTraceHint(rawBuf) {
   const m = TRACE_HINT_RE.exec(head);
   return m ? m[1] : '';
 }
+
+const INCOMING_DECIMAL_ERROR_CODES = new Set([
+  'INVALID_DECIMAL_AMOUNT',
+  'DECIMAL_PRECISION_EXCEEDED',
+  'NEGATIVE_DECIMAL_FORBIDDEN',
+]);
 
 export class WebhookDispatcher {
   constructor(config, walletHandler) {
@@ -1000,13 +1006,19 @@ export class WebhookDispatcher {
       return { statusCode: 200, body: responseBody };
     } catch (err) {
       if (err instanceof BaccaratSdkError) {
-        const status = typeof err.code === 'string' && err.code.startsWith('SC_')
-          ? err.code
-          : StatusCode.SC_INVALID_REQUEST;
-        return {
-          statusCode: 200,
-          body: { traceId, status, message: err.message },
-        };
+        const code = typeof err.code === 'string' ? err.code : '';
+        if (code.startsWith('SC_')) {
+          return {
+            statusCode: 200,
+            body: { traceId, status: code, message: err.message },
+          };
+        }
+        if (INCOMING_DECIMAL_ERROR_CODES.has(code)) {
+          return {
+            statusCode: 200,
+            body: { traceId, status: StatusCode.SC_INVALID_REQUEST, message: err.message },
+          };
+        }
       }
       return {
         statusCode: 200,

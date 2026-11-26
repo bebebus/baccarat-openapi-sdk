@@ -36,7 +36,7 @@ final class WalletResponse
     public static function error(string $traceId, string $status, string $message = ''): array
     {
         $st = trim($status);
-        if ($st === '' || $st === StatusCode::SC_OK) {
+        if ($st === '' || strcasecmp($st, StatusCode::SC_OK) === 0) {
             throw new BaccaratSdkException(
                 'WalletResponse::error status must be a non-empty error status code (cannot be SC_OK)',
                 'INVALID_ARGUMENT'

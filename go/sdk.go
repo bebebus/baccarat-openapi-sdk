@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Package baccarat provides a zero-dependency Go SDK for the Baccarat Live Platform
-// B2B Operator Seamless Wallet API (v1.5.6).
+// B2B Operator Seamless Wallet API (v1.5.7).
 package baccarat
 
 import (
@@ -1083,11 +1083,30 @@ func WalletOK(traceID, username, currency, balance string, timestamp int64) Wall
 	}
 }
 
+func asciiEqualFold(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		ca, cb := a[i], b[i]
+		if ca >= 'a' && ca <= 'z' {
+			ca -= 'a' - 'A'
+		}
+		if cb >= 'a' && cb <= 'z' {
+			cb -= 'a' - 'A'
+		}
+		if ca != cb {
+			return false
+		}
+	}
+	return true
+}
+
 // WalletError builds a non-SC_OK wallet error response envelope.
-// Empty/whitespace status or SC_OK is safely coerced to SC_INVALID_REQUEST.
+// Empty/whitespace status or SC_OK (ASCII case-insensitive) is safely coerced to SC_INVALID_REQUEST.
 func WalletError(traceID, status, message string) WalletResponse {
 	st := strings.TrimSpace(status)
-	if st == "" || st == SC_OK {
+	if st == "" || asciiEqualFold(st, SC_OK) {
 		st = SC_INVALID_REQUEST
 	}
 	return WalletResponse{

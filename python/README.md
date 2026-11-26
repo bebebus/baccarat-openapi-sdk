@@ -8,7 +8,7 @@
 - 安装（通过 Git 标签安装子目录包）：
 
 ```bash
-pip install "git+https://github.com/bebebus/baccarat-openapi-sdk.git@v1.5.6#subdirectory=python"
+pip install "git+https://github.com/bebebus/baccarat-openapi-sdk.git@v1.5.7#subdirectory=python"
 ```
 
 - 单测命令：`cd python && python3 -m unittest discover -s tests -v`

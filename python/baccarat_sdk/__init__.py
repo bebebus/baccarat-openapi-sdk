@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.6)."""
+"""Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.7)."""
 
 from __future__ import annotations
 
@@ -806,7 +806,7 @@ def wallet_ok(
 
 def wallet_error(trace_id: str, status: str, message: Optional[str] = None) -> Dict[str, Any]:
     st = status.strip() if isinstance(status, str) else ""
-    if not st or st == StatusCode.SC_OK:
+    if not st or (st.isascii() and st.upper() == StatusCode.SC_OK):
         raise BaccaratSdkError(
             "wallet_error status must be a non-empty error status code (cannot be SC_OK)",
             "INVALID_ARGUMENT",
@@ -1056,6 +1056,13 @@ def _extract_trace_hint(raw_bytes: bytes) -> str:
     return m.group(1).decode("ascii", errors="ignore") if m else ""
 
 
+_INCOMING_DECIMAL_ERROR_CODES = frozenset({
+    "INVALID_DECIMAL_AMOUNT",
+    "DECIMAL_PRECISION_EXCEEDED",
+    "NEGATIVE_DECIMAL_FORBIDDEN",
+})
+
+
 class WebhookDispatcher:
     def __init__(self, config: Optional[Config], wallet: WalletHandler, *, api_key: Optional[str] = None, hmac_secret: Optional[str] = None) -> None:
         if wallet is None:
@@ -1137,8 +1144,16 @@ class WebhookDispatcher:
                 return 200, adj_fn(parsed)
             return 200, {"traceId": trace_id, "status": StatusCode.SC_INVALID_REQUEST, "message": f"Unknown route {clean}"}
         except BaccaratSdkError as exc:
-            st = exc.code if isinstance(exc.code, str) and exc.code.startswith("SC_") else StatusCode.SC_INVALID_REQUEST
-            return 200, {"traceId": trace_id, "status": st, "message": str(exc)}
+            code = exc.code if isinstance(exc.code, str) else ""
+            if code.startswith("SC_"):
+                return 200, {"traceId": trace_id, "status": code, "message": str(exc)}
+            if code in _INCOMING_DECIMAL_ERROR_CODES:
+                return 200, {"traceId": trace_id, "status": StatusCode.SC_INVALID_REQUEST, "message": str(exc)}
+            return 200, {
+                "traceId": trace_id,
+                "status": StatusCode.SC_OPERATOR_TIMEOUT,
+                "message": "Temporary wallet handler error",
+            }
         except Exception:
             return 200, {
                 "traceId": trace_id,

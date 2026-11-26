@@ -555,15 +555,24 @@ public final class SdkTestRunner {
             rlSrv.stop(0);
         }
 
-        // 5. v1.5.6 regressions: deadlock & sneaky-thrown checked exceptions -> SC_OPERATOR_TIMEOUT sanitized & walletOk/walletError guards
+        // 5. v1.5.7 regressions: deadlock, internal SdkException & sneaky-thrown checked exceptions -> SC_OPERATOR_TIMEOUT sanitized & walletOk/walletError guards
         BaccaratSdk.WalletHandler deadlockWallet = new BaccaratSdk.WalletHandler() {
             @Override public Map<String, Object> onBalance(Map<String, Object> req) {
                 throw new BaccaratSdk.SdkException(BaccaratSdk.StatusCode.SC_INSUFFICIENT_FUNDS, "explicit sdk err");
             }
             @Override public Map<String, Object> onBet(Map<String, Object> req) {
-                throw new RuntimeException("ERROR: deadlock detected (40P01) on table wallets");
+                Object amt = req.get("amount");
+                BaccaratSdk.decimalToLedgerUnits(amt == null ? "bad_amt" : String.valueOf(amt), 2, false);
+                return BaccaratSdk.walletOk(String.valueOf(req.get("traceId")), "p1", "USD", "100.00");
             }
             @Override public Map<String, Object> onBetResult(Map<String, Object> req) {
+                Object mode = req.get("mode");
+                if ("bad_balance".equals(mode)) {
+                    return BaccaratSdk.walletOk(String.valueOf(req.get("traceId")), "p1", "USD", "-1.00");
+                }
+                if ("nan_balance".equals(mode)) {
+                    return BaccaratSdk.walletOk(String.valueOf(req.get("traceId")), "p1", "USD", "NaN");
+                }
                 throw new RuntimeException("ERROR: deadlock detected (40P01) on table wallets");
             }
             @Override public Map<String, Object> onRollback(Map<String, Object> req) {
@@ -581,6 +590,22 @@ public final class SdkTestRunner {
         checkEq(dlResp.get("status"), BaccaratSdk.StatusCode.SC_OPERATOR_TIMEOUT, "wb:deadlockStatus");
         checkEq(dlResp.get("message"), "Temporary wallet handler error", "wb:deadlockSanitizedMsg");
         check(!String.valueOf(dlResp.get("message")).contains("40P01"), "wb:deadlockNoSqlLeak");
+
+        for (String mode : new String[]{"bad_balance", "nan_balance"}) {
+            byte[] bbRaw = ("{\"traceId\":\"t_java_" + mode + "\",\"mode\":\"" + mode + "\"}").getBytes(StandardCharsets.UTF_8);
+            Map<String, Object> bbResp = dlDisp.handle("/wallet/bet_result", apiKey, BaccaratSdk.signBody(bbRaw, secret), bbRaw);
+            checkEq(bbResp.get("traceId"), "t_java_" + mode, "wb:internalSdkErrTrace:" + mode);
+            checkEq(bbResp.get("status"), BaccaratSdk.StatusCode.SC_OPERATOR_TIMEOUT, "wb:internalSdkErrStatus:" + mode);
+            checkEq(bbResp.get("message"), "Temporary wallet handler error", "wb:internalSdkErrMsg:" + mode);
+            check(!String.valueOf(bbResp.get("message")).contains("walletOk"), "wb:internalSdkErrNoLeak:" + mode);
+        }
+
+        for (String badAmt : new String[]{"not_a_number", "1.123456", "-5.00"}) {
+            byte[] bdRaw = ("{\"traceId\":\"t_java_bad_dec\",\"amount\":\"" + badAmt + "\"}").getBytes(StandardCharsets.UTF_8);
+            Map<String, Object> bdResp = dlDisp.handle("/wallet/bet", apiKey, BaccaratSdk.signBody(bdRaw, secret), bdRaw);
+            checkEq(bdResp.get("status"), BaccaratSdk.StatusCode.SC_INVALID_REQUEST, "wb:incomingDecInvalidReq:" + badAmt);
+        }
+
         Map<String, Object> sdkErrResp = dlDisp.handle("/wallet/balance", apiKey, BaccaratSdk.signBody(dlRaw, secret), dlRaw);
         checkEq(sdkErrResp.get("status"), BaccaratSdk.StatusCode.SC_INSUFFICIENT_FUNDS, "wb:sdkErrPreserved");
 
@@ -608,7 +633,7 @@ public final class SdkTestRunner {
             }
             check(threw, "walletOk:rejectBadBalance:" + badBal);
         }
-        for (String badSt : new String[]{null, "", "   ", BaccaratSdk.StatusCode.SC_OK, " SC_OK "}) {
+        for (String badSt : new String[]{null, "", "   ", BaccaratSdk.StatusCode.SC_OK, " SC_OK ", "sc_ok", "Sc_Ok", " sc_ok "}) {
             boolean threw = false;
             try {
                 BaccaratSdk.walletError("t_bad", badSt, "oops");

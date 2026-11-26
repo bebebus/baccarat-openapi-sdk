@@ -5,7 +5,7 @@
 ## 安装、编译与单测
 
 ```bash
-git clone --branch v1.5.6 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
+git clone --branch v1.5.7 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
 cd baccarat-openapi-sdk/java
 bash run-tests.sh          # 零 Maven 依赖直接编译并运行全部单测
 # 或安装至本地 ~/.m2：mvn install

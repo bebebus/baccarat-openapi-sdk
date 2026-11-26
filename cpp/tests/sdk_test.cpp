@@ -597,12 +597,25 @@ int main() {
     require_eq(utf8_res.at("status").as_string(), StatusCode::SC_INVALID_REQUEST, "wb:m10Utf8Status");
     require_eq(utf8_res.at("traceId").as_string(), expected_trunc, "wb:m10Utf8Truncated128Chars");
 
-    // 7. v1.5.6 regressions: deadlock exception safety, wallet_ok/wallet_error guards, locale-independent JSON float
+    // 7. v1.5.7 regressions: deadlock & internal SdkError safety, wallet_ok/wallet_error guards, locale-independent JSON float
     class DeadlockWallet final : public WalletHandler {
     public:
         Json on_balance(const Json&) override { throw SdkError(StatusCode::SC_INSUFFICIENT_FUNDS, "explicit sdk err"); }
-        Json on_bet(const Json&) override { throw std::runtime_error("ERROR: deadlock detected (40P01) on table wallets"); }
-        Json on_bet_result(const Json&) override { throw std::runtime_error("ERROR: deadlock detected (40P01) on table wallets"); }
+        Json on_bet(const Json& req) override {
+            std::string amt = req.at("amount").as_string();
+            (void)decimal_to_ledger_units(amt, 2, false);
+            return wallet_ok(req.at("traceId").as_string(), "p1", "USD", "100.00");
+        }
+        Json on_bet_result(const Json& req) override {
+            std::string mode = req.at("mode").as_string();
+            if (mode == "bad_balance") {
+                return wallet_ok(req.at("traceId").as_string(), "p1", "USD", "-1.00");
+            }
+            if (mode == "nan_balance") {
+                return wallet_ok(req.at("traceId").as_string(), "p1", "USD", "NaN");
+            }
+            throw std::runtime_error("ERROR: deadlock detected (40P01) on table wallets");
+        }
         Json on_rollback(const Json& req) override { return wallet_ok(req.at("traceId").as_string(), "p1", "USD", "100.00"); }
     };
     DeadlockWallet dl_wallet;
@@ -613,6 +626,22 @@ int main() {
     require_eq(dl_res.at("status").as_string(), StatusCode::SC_OPERATOR_TIMEOUT, "wb:deadlockTimeoutStatus");
     require_eq(dl_res.at("message").as_string(), "Temporary wallet handler error", "wb:deadlockSanitizedMsg");
     require_true(dl_res.at("message").as_string().find("40P01") == std::string::npos, "wb:deadlockNoLeak");
+
+    for (const std::string& mode : std::vector<std::string>{"bad_balance", "nan_balance"}) {
+        std::string bb_raw = R"({"traceId":"t_cpp_)" + mode + R"(","mode":")" + mode + R"("})";
+        Json bb_res = dl_disp.handle("/wallet/bet_result", api_key, sign_body(bb_raw, secret), bb_raw);
+        require_eq(bb_res.at("traceId").as_string(), "t_cpp_" + mode, "wb:internalSdkErrTrace:" + mode);
+        require_eq(bb_res.at("status").as_string(), StatusCode::SC_OPERATOR_TIMEOUT, "wb:internalSdkErrStatus:" + mode);
+        require_eq(bb_res.at("message").as_string(), "Temporary wallet handler error", "wb:internalSdkErrMsg:" + mode);
+        require_true(bb_res.at("message").as_string().find("wallet_ok") == std::string::npos, "wb:internalSdkErrNoLeak:" + mode);
+    }
+
+    for (const std::string& bad_amt : std::vector<std::string>{"not_a_number", "1.123456", "-5.00"}) {
+        std::string bd_raw = R"({"traceId":"t_cpp_bad_dec","amount":")" + bad_amt + R"("})";
+        Json bd_res = dl_disp.handle("/wallet/bet", api_key, sign_body(bd_raw, secret), bd_raw);
+        require_eq(bd_res.at("status").as_string(), StatusCode::SC_INVALID_REQUEST, "wb:incomingDecInvalidReq:" + bad_amt);
+    }
+
     Json sdk_err_res = dl_disp.handle("/wallet/balance", api_key, sign_body(dl_raw, secret), dl_raw);
     require_eq(sdk_err_res.at("status").as_string(), StatusCode::SC_INSUFFICIENT_FUNDS, "wb:sdkErrPreserved");
 
@@ -633,7 +662,7 @@ int main() {
         }
         require_true(threw, "wallet_ok:rejectBadBalance:" + bad_bal);
     }
-    for (const std::string& bad_st : std::vector<std::string>{"", "   ", StatusCode::SC_OK, " SC_OK "}) {
+    for (const std::string& bad_st : std::vector<std::string>{"", "   ", StatusCode::SC_OK, " SC_OK ", "sc_ok", "Sc_Ok", " sc_ok "}) {
         bool threw = false;
         try {
             (void)wallet_error("t_bad", bad_st, "oops");

@@ -697,6 +697,18 @@ Json Client::get_wallet_transaction_status(Json params) const {
 }
 
 namespace {
+bool equals_ascii_icase(const std::string& a, const char* b) {
+    size_t i = 0;
+    for (; i < a.size() && b[i] != '\0'; ++i) {
+        unsigned char ca = static_cast<unsigned char>(a[i]);
+        unsigned char cb = static_cast<unsigned char>(b[i]);
+        if (ca >= 'a' && ca <= 'z') ca = static_cast<unsigned char>(ca - ('a' - 'A'));
+        if (cb >= 'a' && cb <= 'z') cb = static_cast<unsigned char>(cb - ('a' - 'A'));
+        if (ca != cb) return false;
+    }
+    return i == a.size() && b[i] == '\0';
+}
+
 bool is_valid_non_negative_decimal(const std::string& s) {
     if (s.empty()) return false;
     bool seen_dot = false;
@@ -751,7 +763,7 @@ Json wallet_error(
     const std::string& message
 ) {
     std::string st = trim(status);
-    if (st.empty() || st == StatusCode::SC_OK) {
+    if (st.empty() || equals_ascii_icase(st, StatusCode::SC_OK)) {
         throw SdkError(
             "INVALID_ARGUMENT",
             "wallet_error status must be a non-empty error status code (cannot be SC_OK)"
@@ -1043,8 +1055,15 @@ Json WebhookDispatcher::handle(
         if (ends_with(clean, "/wallet/adjustment")) return wallet_.on_adjustment(parsed);
         return make_err_json(trace_id, StatusCode::SC_INVALID_REQUEST, "Unknown route");
     } catch (const SdkError& e) {
-        std::string st = (e.code.rfind("SC_", 0) == 0) ? e.code : StatusCode::SC_INVALID_REQUEST;
-        return make_err_json(trace_id, st, e.what());
+        if (e.code.rfind("SC_", 0) == 0) {
+            return make_err_json(trace_id, e.code, e.what());
+        }
+        if (e.code == "INVALID_DECIMAL_AMOUNT"
+            || e.code == "DECIMAL_PRECISION_EXCEEDED"
+            || e.code == "NEGATIVE_DECIMAL_FORBIDDEN") {
+            return make_err_json(trace_id, StatusCode::SC_INVALID_REQUEST, e.what());
+        }
+        return make_err_json(trace_id, StatusCode::SC_OPERATOR_TIMEOUT, "Temporary wallet handler error");
     } catch (const std::exception&) {
         return make_err_json(trace_id, StatusCode::SC_OPERATOR_TIMEOUT, "Temporary wallet handler error");
     } catch (...) {

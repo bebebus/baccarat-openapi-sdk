@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.6).
+//! Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.7).
 
 pub mod crypto;
 mod curl_ffi;
@@ -808,10 +808,10 @@ pub fn wallet_ok(
 }
 
 /// Constructs a non-`SC_OK` wallet error response envelope.
-/// Empty/whitespace `status` or `SC_OK` is safely coerced to `SC_INVALID_REQUEST`.
+/// Empty/whitespace `status` or `SC_OK` (ASCII case-insensitive) is safely coerced to `SC_INVALID_REQUEST`.
 pub fn wallet_error(trace_id: &str, status: &str, message: &str) -> Json {
     let st = status.trim();
-    let eff_status = if st.is_empty() || st == status_code::SC_OK {
+    let eff_status = if st.is_empty() || st.eq_ignore_ascii_case(status_code::SC_OK) {
         status_code::SC_INVALID_REQUEST
     } else {
         st
@@ -2069,7 +2069,7 @@ mod tests {
         );
         assert_eq!(out.get("data").get("balance").as_str(), Some("500.00"));
 
-        // v1.5.6 regressions: panic isolation -> SC_OPERATOR_TIMEOUT, SdkError PartialEq/Eq, wallet_ok/wallet_error guards, UTF-8 lossy trace hint
+        // v1.5.7 regressions: panic & wallet_ok isolation -> SC_OPERATOR_TIMEOUT, SdkError PartialEq/Eq, wallet_ok/wallet_error guards, UTF-8 lossy trace hint
         assert!(decimal_to_ledger_units("0", 0, false) == Ok(0));
         assert!(decimal_to_ledger_units("0.00", 2, false) == Ok(0));
         assert_eq!(SdkError::Money("x".into()), SdkError::Money("x".into()));
@@ -2077,13 +2077,21 @@ mod tests {
         struct PanickingWallet;
         impl WalletHandler for PanickingWallet {
             fn on_balance(&self, req: &Json) -> Json {
-                wallet_ok(req.get("traceId").as_str().unwrap_or(""), "p1", "JPY", "0", None)
+                wallet_error(req.get("traceId").as_str().unwrap_or(""), status_code::SC_INSUFFICIENT_FUNDS, "explicit insufficient")
             }
-            fn on_bet(&self, _req: &Json) -> Json {
-                panic!("ERROR: deadlock detected (40P01) on table wallets");
+            fn on_bet(&self, req: &Json) -> Json {
+                let amt = req.get("amount").as_str().unwrap_or("bad_amt");
+                match decimal_to_ledger_units(amt, 2, false) {
+                    Ok(_) => wallet_ok(req.get("traceId").as_str().unwrap_or(""), "p1", "USD", "100.00", None),
+                    Err(e) => wallet_error(req.get("traceId").as_str().unwrap_or(""), status_code::SC_INVALID_REQUEST, &e.to_string()),
+                }
             }
-            fn on_bet_result(&self, _req: &Json) -> Json {
-                panic!("ERROR: deadlock detected (40P01) on table wallets");
+            fn on_bet_result(&self, req: &Json) -> Json {
+                match req.get("mode").as_str() {
+                    Some("bad_balance") => wallet_ok(req.get("traceId").as_str().unwrap_or(""), "p1", "USD", "-1.00", None),
+                    Some("nan_balance") => wallet_ok(req.get("traceId").as_str().unwrap_or(""), "p1", "USD", "NaN", None),
+                    _ => panic!("ERROR: deadlock detected (40P01) on table wallets"),
+                }
             }
             fn on_rollback(&self, req: &Json) -> Json {
                 wallet_error(req.get("traceId").as_str().unwrap_or(""), status_code::SC_TRANSACTION_NOT_EXISTS, "missing")
@@ -2098,6 +2106,24 @@ mod tests {
         assert_eq!(pw_res.get("message").as_str(), Some("Temporary wallet handler error"));
         assert!(!pw_res.get("message").as_str().unwrap().contains("40P01"));
 
+        for mode in ["bad_balance", "nan_balance"] {
+            let bb_raw = format!(r#"{{"traceId":"t_rs_{}","mode":"{}"}}"#, mode, mode);
+            let bb_res = pw_disp.handle("/wallet/bet_result", api_key, &sign_body(bb_raw.as_bytes(), secret).unwrap(), bb_raw.as_bytes());
+            assert_eq!(bb_res.get("traceId").as_str(), Some(format!("t_rs_{}", mode).as_str()));
+            assert_eq!(bb_res.get("status").as_str(), Some(status_code::SC_OPERATOR_TIMEOUT));
+            assert_eq!(bb_res.get("message").as_str(), Some("Temporary wallet handler error"));
+            assert!(!bb_res.get("message").as_str().unwrap().contains("wallet_ok"));
+        }
+
+        for bad_amt in ["not_a_number", "1.123456", "-5.00"] {
+            let bd_raw = format!(r#"{{"traceId":"t_rs_bad_dec","amount":"{}"}}"#, bad_amt);
+            let bd_res = pw_disp.handle("/wallet/bet", api_key, &sign_body(bd_raw.as_bytes(), secret).unwrap(), bd_raw.as_bytes());
+            assert_eq!(bd_res.get("status").as_str(), Some(status_code::SC_INVALID_REQUEST));
+        }
+        let bal_raw = br#"{"traceId":"t_rs_insuff"}"#;
+        let bal_res = pw_disp.handle("/wallet/balance", api_key, &sign_body(bal_raw, secret).unwrap(), bal_raw);
+        assert_eq!(bal_res.get("status").as_str(), Some(status_code::SC_INSUFFICIENT_FUNDS));
+
         let ok_b = wallet_ok("t_ok", "player_1", "JPY", "0", None);
         assert_eq!(ok_b.get("status").as_str(), Some(status_code::SC_OK));
         assert_eq!(ok_b.get("data").get("balance").as_str(), Some("0"));
@@ -2106,7 +2132,7 @@ mod tests {
         assert_eq!(err_b.get("status").as_str(), Some(status_code::SC_USER_DISABLED));
         assert_eq!(err_b.get("message").as_str(), Some("disabled"));
 
-        for bad_st in ["", "   ", status_code::SC_OK, " SC_OK "] {
+        for bad_st in ["", "   ", status_code::SC_OK, " SC_OK ", "sc_ok", "Sc_Ok", " sc_ok "] {
             let coerced = wallet_error("t_coerce", bad_st, "guarded");
             assert_eq!(coerced.get("status").as_str(), Some(status_code::SC_INVALID_REQUEST));
         }

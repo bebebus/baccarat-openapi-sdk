@@ -5,11 +5,11 @@
 ## 安装与单测
 
 ```bash
-git clone --branch v1.5.6 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
+git clone --branch v1.5.7 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
 cd baccarat-openapi-sdk/php && php tests/run.php
 ```
 
-在项目 `composer.json` 中使用 `path` 仓库引入（本 SDK 未发布至 Packagist；若直接拷贝/vendor `php/` 目录且不包含 `.git` 目录，请在 `php/composer.json` 中补充 `"version": "1.5.6"` 字段，以便 Composer 解析版本约束）：
+在项目 `composer.json` 中使用 `path` 仓库引入（本 SDK 未发布至 Packagist；若直接拷贝/vendor `php/` 目录且不包含 `.git` 目录，请在 `php/composer.json` 中补充 `"version": "1.5.7"` 字段，以便 Composer 解析版本约束）：
 
 ```json
 {

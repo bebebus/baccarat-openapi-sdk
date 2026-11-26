@@ -729,7 +729,9 @@ public final class BaccaratSdk {
 
     public static Map<String, Object> walletError(String traceId, String status, String message) {
         String st = status == null ? "" : status.trim();
-        if (st.isEmpty() || StatusCode.SC_OK.equals(st)) {
+        if (st.isEmpty() || (st.length() == StatusCode.SC_OK.length()
+                && st.chars().allMatch(c -> c < 128)
+                && StatusCode.SC_OK.equalsIgnoreCase(st))) {
             throw new SdkException(
                     "INVALID_ARGUMENT",
                     "walletError status must be a non-empty error status code (cannot be SC_OK)"
@@ -1006,6 +1008,12 @@ public final class BaccaratSdk {
         return m.find() ? m.group(1) : "";
     }
 
+    private static final Set<String> INCOMING_DECIMAL_ERROR_CODES = Set.of(
+            "INVALID_DECIMAL_AMOUNT",
+            "DECIMAL_PRECISION_EXCEEDED",
+            "NEGATIVE_DECIMAL_FORBIDDEN"
+    );
+
     public static final class WebhookDispatcher {
         private final String apiKey;
         private final String hmacSecret;
@@ -1061,8 +1069,13 @@ public final class BaccaratSdk {
                 if (clean.endsWith("/wallet/adjustment")) return wallet.onAdjustment(parsed);
                 return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "Unknown route");
             } catch (SdkException e) {
-                String st = (e.code != null && e.code.startsWith("SC_")) ? e.code : StatusCode.SC_INVALID_REQUEST;
-                return makeErrEnvelope(traceId, st, e.getMessage());
+                if (e.code != null && e.code.startsWith("SC_")) {
+                    return makeErrEnvelope(traceId, e.code, e.getMessage());
+                }
+                if (e.code != null && INCOMING_DECIMAL_ERROR_CODES.contains(e.code)) {
+                    return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, e.getMessage());
+                }
+                return makeErrEnvelope(traceId, StatusCode.SC_OPERATOR_TIMEOUT, "Temporary wallet handler error");
             } catch (Exception e) {
                 return makeErrEnvelope(traceId, StatusCode.SC_OPERATOR_TIMEOUT, "Temporary wallet handler error");
             }

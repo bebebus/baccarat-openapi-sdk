@@ -9,7 +9,7 @@
 - 引入方式（本 SDK 通过 Git 仓库分发，未发布至 npm 公共注册表）：
 
 ```bash
-git clone --branch v1.5.6 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
+git clone --branch v1.5.7 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
 npm install ./baccarat-openapi-sdk/nodejs
 ```
 
@@ -57,23 +57,23 @@ const app = express();
 const dbWallet = {
   async onBalance(req) {
     // 1. 查询数据库玩家余额（只读）
-    return walletOk(req.traceId, req.username, req.currency, '1000.00');
+    return walletOk(String(req.traceId ?? ''), String(req.username ?? ''), String(req.currency ?? ''), '1000.00');
   },
   async onBet(req) {
     // 2. 按 transactionId 唯一索引幂等扣款（同键重放返回 SC_OK + 最新余额；冲突返回 SC_TRANSACTION_DUPLICATED）
-    return walletOk(req.traceId, req.username, req.currency, '900.00');
+    return walletOk(String(req.traceId ?? ''), String(req.username ?? ''), String(req.currency ?? ''), '900.00');
   },
   async onBetResult(req) {
     // 3. 按 transactionId 幂等派彩（会话过期/停用仍须放行已扣款 betId 结算）
-    return walletOk(req.traceId, req.username, req.currency, '1100.00');
+    return walletOk(String(req.traceId ?? ''), String(req.username ?? ''), String(req.currency ?? ''), '1100.00');
   },
   async onRollback(req) {
     // 4. 按 transactionId 冲正（原 betId 从未扣成返回 SC_TRANSACTION_NOT_EXISTS）
-    return walletOk(req.traceId, req.username, req.currency, '1000.00');
+    return walletOk(String(req.traceId ?? ''), String(req.username ?? ''), String(req.currency ?? ''), '1000.00');
   },
   async onAdjustment(req) {
     // 5. 赛后重算/申诉补差（direction: CREDIT | DEBIT，按 transactionId 幂等）
-    return walletOk(req.traceId, req.username, req.currency, '1020.00');
+    return walletOk(String(req.traceId ?? ''), String(req.username ?? ''), String(req.currency ?? ''), '1020.00');
   },
 };
 

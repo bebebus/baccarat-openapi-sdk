@@ -1,7 +1,7 @@
 {
   "name": "@bebebus/baccarat-openapi-sdk",
-  "version": "1.5.6",
-  "description": "Zero-dependency Node.js / TypeScript SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.6)",
+  "version": "1.5.7",
+  "description": "Zero-dependency Node.js / TypeScript SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.7)",
   "license": "MIT",
   "type": "module",
   "main": "./src/index.js",

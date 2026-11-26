@@ -454,13 +454,24 @@ test('WebhookDispatcher & InMemoryWallet full seamless wallet lifecycle', async 
   }
 });
 
-test('v1.5.6 regressions: deadlock exception safety & wallet response builders', async () => {
+test('v1.5.7 regressions: deadlock & internal SdkError safety, wallet response builders', async () => {
   const apiKey = 'ak_0123456789abcdef0123456789abcdef';
   const secret = 'dGVzdF9zZWNyZXRfNDBfY2hhcnNfYmFzZTY0dXJsX2s';
   const deadlockWallet = {
     onBalance() { throw new BaccaratSdkError('explicit validation', StatusCode.SC_INSUFFICIENT_FUNDS); },
-    onBet() { throw new Error('ERROR: deadlock detected (40P01) on table wallets'); },
-    onBetResult() { throw new Error('ERROR: deadlock detected (40P01) on table wallets'); },
+    onBet(req) {
+      decimalToLedgerUnits(String(req.amount ?? 'bad_amt'), 2);
+      return walletOk(String(req.traceId ?? ''), 'p1', 'USD', '100.00');
+    },
+    onBetResult(req) {
+      if (req.mode === 'bad_balance') {
+        return walletOk(String(req.traceId ?? ''), 'p1', 'USD', '-1.00');
+      }
+      if (req.mode === 'nan_balance') {
+        return walletOk(String(req.traceId ?? ''), 'p1', 'USD', 'NaN');
+      }
+      throw new Error('ERROR: deadlock detected (40P01) on table wallets');
+    },
     onRollback() { return walletOk('t_rb', 'p1', 'USD', '100.00', 1700000000000); },
   };
   const disp = new WebhookDispatcher({ apiKey, hmacSecret: secret }, deadlockWallet);
@@ -473,6 +484,25 @@ test('v1.5.6 regressions: deadlock exception safety & wallet response builders',
   assert.equal(settleRes.body.message, 'Temporary wallet handler error');
   assert.ok(!String(settleRes.body.message).includes('40P01'));
   assert.ok(!String(settleRes.body.message).includes('deadlock'));
+
+  for (const mode of ['bad_balance', 'nan_balance']) {
+    const badBalRaw = Buffer.from(JSON.stringify({ traceId: `t_${mode}`, transactionId: 'stl_bad', mode }), 'utf8');
+    const badBalRes = await disp.handle('/wallet/bet_result', apiKey, signBody(badBalRaw, secret), badBalRaw);
+    assert.equal(badBalRes.statusCode, 200);
+    assert.equal(badBalRes.body.traceId, `t_${mode}`);
+    assert.equal(badBalRes.body.status, StatusCode.SC_OPERATOR_TIMEOUT);
+    assert.equal(badBalRes.body.message, 'Temporary wallet handler error');
+    assert.ok(!String(badBalRes.body.message).includes('walletOk'));
+    assert.ok(!String(badBalRes.body.message).includes('INVALID_ARGUMENT'));
+  }
+
+  for (const badAmt of ['not_a_number', '1.123456', '-5.00']) {
+    const badDecRaw = Buffer.from(JSON.stringify({ traceId: 't_bad_dec', amount: badAmt }), 'utf8');
+    const badDecRes = await disp.handle('/wallet/bet', apiKey, signBody(badDecRaw, secret), badDecRaw);
+    assert.equal(badDecRes.statusCode, 200);
+    assert.equal(badDecRes.body.traceId, 't_bad_dec');
+    assert.equal(badDecRes.body.status, StatusCode.SC_INVALID_REQUEST);
+  }
 
   const sdkErrRaw = Buffer.from(JSON.stringify({ traceId: 't_sdkerr' }), 'utf8');
   const sdkErrRes = await disp.handle('/wallet/balance', apiKey, signBody(sdkErrRaw, secret), sdkErrRaw);
@@ -492,7 +522,7 @@ test('v1.5.6 regressions: deadlock exception safety & wallet response builders',
       (e) => e instanceof BaccaratSdkError && e.code === 'INVALID_ARGUMENT',
     );
   }
-  for (const badStatus of ['', '   ', StatusCode.SC_OK, ' SC_OK ', null, undefined]) {
+  for (const badStatus of ['', '   ', StatusCode.SC_OK, ' SC_OK ', 'sc_ok', 'Sc_Ok', ' sc_ok ', null, undefined]) {
     assert.throws(
       () => walletError('t_bad', badStatus, 'oops'),
       (e) => e instanceof BaccaratSdkError && e.code === 'INVALID_ARGUMENT',

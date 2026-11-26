@@ -8,6 +8,13 @@ final class WebhookDispatcher
 {
     public const MAX_WEBHOOK_BODY_BYTES = 1048576;
 
+    /** @var list<string> */
+    private const INCOMING_DECIMAL_ERROR_CODES = [
+        'INVALID_DECIMAL_AMOUNT',
+        'DECIMAL_PRECISION_EXCEEDED',
+        'NEGATIVE_DECIMAL_FORBIDDEN',
+    ];
+
     private string $apiKey;
     private string $hmacSecret;
     private WalletHandlerInterface $wallet;
@@ -116,10 +123,21 @@ final class WebhookDispatcher
                 'body' => ['traceId' => $traceId, 'status' => StatusCode::SC_INVALID_REQUEST, 'message' => "Unknown route {$clean}"],
             ];
         } catch (BaccaratSdkException $e) {
-            $st = str_starts_with($e->errorCode, 'SC_') ? $e->errorCode : StatusCode::SC_INVALID_REQUEST;
+            if (str_starts_with($e->errorCode, 'SC_')) {
+                return [
+                    'statusCode' => 200,
+                    'body' => ['traceId' => $traceId, 'status' => $e->errorCode, 'message' => $e->getMessage()],
+                ];
+            }
+            if (in_array($e->errorCode, self::INCOMING_DECIMAL_ERROR_CODES, true)) {
+                return [
+                    'statusCode' => 200,
+                    'body' => ['traceId' => $traceId, 'status' => StatusCode::SC_INVALID_REQUEST, 'message' => $e->getMessage()],
+                ];
+            }
             return [
                 'statusCode' => 200,
-                'body' => ['traceId' => $traceId, 'status' => $st, 'message' => $e->getMessage()],
+                'body' => ['traceId' => $traceId, 'status' => StatusCode::SC_OPERATOR_TIMEOUT, 'message' => 'Temporary wallet handler error'],
             ];
         } catch (\Throwable $e) {
             return [

@@ -401,15 +401,20 @@ class TestBaccaratPythonSdk(unittest.TestCase):
             redir_srv.shutdown()
             redir_srv.server_close()
 
-        # 6. v1.5.6 regressions: deadlock exception safety, HTTPError read failure, UNSET/None null clearing, wallet helpers
+        # 6. v1.5.7 regressions: deadlock & internal SdkError safety, HTTPError read failure, UNSET/None null clearing, wallet helpers
         class DeadlockWallet:
             def on_balance(self, req: dict) -> dict:
                 raise BaccaratSdkError("explicit sdk err", StatusCode.SC_INSUFFICIENT_FUNDS)
 
             def on_bet(self, req: dict) -> dict:
-                raise RuntimeError("ERROR: deadlock detected (40P01) on table wallets")
+                decimal_to_ledger_units(req.get("amount", "bad_amt"), 2)
+                return wallet_ok(req.get("traceId", ""), "p1", "USD", "100.00")
 
             def on_bet_result(self, req: dict) -> dict:
+                if req.get("mode") == "bad_balance":
+                    return wallet_ok(req.get("traceId", ""), "p1", "USD", "-1.00")
+                if req.get("mode") == "nan_balance":
+                    return wallet_ok(req.get("traceId", ""), "p1", "USD", "NaN")
                 raise RuntimeError("ERROR: deadlock detected (40P01) on table wallets")
 
             def on_rollback(self, req: dict) -> dict:
@@ -428,6 +433,23 @@ class TestBaccaratPythonSdk(unittest.TestCase):
         self.assertNotIn("40P01", body_dl["message"])
         self.assertNotIn("deadlock", body_dl["message"])
 
+        for mode in ("bad_balance", "nan_balance"):
+            bb_raw = json.dumps({"traceId": f"t_py_{mode}", "mode": mode}).encode("utf-8")
+            st_bb, body_bb = dl_disp.handle("/wallet/bet_result", api_key, sign_body(bb_raw, secret), bb_raw)
+            self.assertEqual(st_bb, 200)
+            self.assertEqual(body_bb["traceId"], f"t_py_{mode}")
+            self.assertEqual(body_bb["status"], StatusCode.SC_OPERATOR_TIMEOUT)
+            self.assertEqual(body_bb["message"], "Temporary wallet handler error")
+            self.assertNotIn("wallet_ok", body_bb["message"])
+            self.assertNotIn("INVALID_ARGUMENT", body_bb["message"])
+
+        for bad_amt in ("not_a_number", "1.123456", "-5.00"):
+            bd_raw = json.dumps({"traceId": "t_py_bad_dec", "amount": bad_amt}).encode("utf-8")
+            st_bd, body_bd = dl_disp.handle("/wallet/bet", api_key, sign_body(bd_raw, secret), bd_raw)
+            self.assertEqual(st_bd, 200)
+            self.assertEqual(body_bd["traceId"], "t_py_bad_dec")
+            self.assertEqual(body_bd["status"], StatusCode.SC_INVALID_REQUEST)
+
         sdk_raw = json.dumps({"traceId": "t_py_sdk"}).encode("utf-8")
         st_sdk, body_sdk = dl_disp.handle("/wallet/balance", api_key, sign_body(sdk_raw, secret), sdk_raw)
         self.assertEqual(st_sdk, 200)
@@ -444,7 +466,7 @@ class TestBaccaratPythonSdk(unittest.TestCase):
             with self.assertRaises(BaccaratSdkError) as ctx_bal:
                 wallet_ok("t_bad", "player_1", "USD", bad_bal)
             self.assertEqual(ctx_bal.exception.code, "INVALID_ARGUMENT")
-        for bad_st in ("", "   ", StatusCode.SC_OK, " SC_OK "):
+        for bad_st in ("", "   ", StatusCode.SC_OK, " SC_OK ", "sc_ok", "Sc_Ok", " sc_ok "):
             with self.assertRaises(BaccaratSdkError) as ctx_st:
                 wallet_error("t_bad", bad_st, "oops")
             self.assertEqual(ctx_st.exception.code, "INVALID_ARGUMENT")
