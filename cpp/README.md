@@ -6,11 +6,12 @@
 
 - Debian / Ubuntu：`sudo apt-get install -y cmake g++ libssl-dev libcurl4-openssl-dev`
 - macOS (Homebrew)：`brew install cmake openssl curl`
+- Windows (MSVC / MinGW)：`cmake -S cpp -B cpp/build && cmake --build cpp/build`（`WIN32` 平台默认 `-DBACCARAT_BUILD_TESTS=OFF`，因 `tests/sdk_test.cpp` 依赖 POSIX socket 测试桩，仅构建静态库 `baccarat_sdk`）
 
 在仓库根目录执行编译与单测：
 
 ```bash
-git clone --branch v1.5.4 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
+git clone --branch v1.5.5 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
 cd baccarat-openapi-sdk
 cmake -S cpp -B cpp/build
 cmake --build cpp/build
@@ -35,16 +36,13 @@ public:
     baccarat::Json on_adjustment(const baccarat::Json& req) override { return ok(req, "1020.00"); }
 private:
     static baccarat::Json ok(const baccarat::Json& req, const std::string& bal) {
-        baccarat::Json data = baccarat::Json::object();
-        data.set("username", req.at("username"));
-        data.set("currency", req.at("currency"));
-        data.set("balance", baccarat::Json(bal));
-        data.set("timestamp", baccarat::Json(static_cast<int64_t>(1763612000000LL)));
-        baccarat::Json env = baccarat::Json::object();
-        env.set("traceId", req.at("traceId"));
-        env.set("status", baccarat::Json(baccarat::StatusCode::SC_OK));
-        env.set("data", std::move(data));
-        return env;
+        // timestamp_ms = 0 自动填充当前 Unix 毫秒时间戳
+        return baccarat::wallet_ok(
+            req.at("traceId").as_string(),
+            req.at("username").as_string(),
+            req.at("currency").as_string(),
+            bal
+        );
     }
 };
 
@@ -76,6 +74,14 @@ int main() {
     DbWalletHandler wallet;
     baccarat::WebhookDispatcher dispatcher(api_key, secret, wallet);
     // baccarat::Json reply = dispatcher.handle(route_path, x_api_key, x_signature, raw_http_body);
+    // std::string http_body = reply.dump();
     return 0;
 }
 ```
+
+### 生产回调 4 项强制不变量
+
+1. **4 路并发（不按玩家串行）**：平台按单商户最多 4 路并发推送回调，请对玩家钱包行使用 `SELECT ... FOR UPDATE` 或原子 `UPDATE ... SET balance = balance + delta` + `UNIQUE(transaction_id)`。
+2. **多注同局每张注单均带 `isEndRound: 1`**：切勿收到首张 `isEndRound: 1` 即终结局级状态，必须按 `betId` / `transactionId` 逐票入账。
+3. **终态拦截与 `~5.07h` 重试窗口**：返回 `HTTP 200` 非 JSON 或无瞬态 `SC_*` 的非 2xx JSON 会使 `/wallet/bet_result` 立即挂起 `HELD` 且 0 次重试；瞬态错误按 **1 次首次 + 12 次自动重试（约 `5.07h`）** 退避重试（`WebhookDispatcher` 已自动将未捕获 `std::exception` / `...` 映射为 `SC_OPERATOR_TIMEOUT`）。
+4. **0 位小数币种（如 `JPY`）零值为 `"0"`**：切勿用 `== "0.00"` 判零，请使用 `baccarat::decimal_to_ledger_units(...)` 比较。

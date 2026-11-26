@@ -9,7 +9,7 @@
 
 ```toml
 [dependencies]
-baccarat-openapi-sdk = { git = "https://github.com/bebebus/baccarat-openapi-sdk", tag = "v1.5.4" }
+baccarat-openapi-sdk = { git = "https://github.com/bebebus/baccarat-openapi-sdk", tag = "v1.5.5" }
 ```
 
 - 单测命令：`cd rust && cargo test`
@@ -19,8 +19,29 @@ baccarat-openapi-sdk = { git = "https://github.com/bebebus/baccarat-openapi-sdk"
 ```rust
 use std::sync::Arc;
 use baccarat_openapi_sdk::{
-    Client, Config, Environment, InMemoryWallet, Json, SharedWebhookDispatcher,
+    wallet_ok, Client, Config, Environment, Json, SharedWebhookDispatcher, WalletHandler,
 };
+
+// 生产环境请基于数据库唯一索引实现自定义 WalletHandler（含 on_adjustment）
+struct DbWallet;
+
+impl WalletHandler for DbWallet {
+    fn on_balance(&self, req: &Json) -> Json {
+        wallet_ok(req.get("traceId").as_str().unwrap_or(""), req.get("username").as_str().unwrap_or(""), req.get("currency").as_str().unwrap_or(""), "1000.00", None)
+    }
+    fn on_bet(&self, req: &Json) -> Json {
+        wallet_ok(req.get("traceId").as_str().unwrap_or(""), req.get("username").as_str().unwrap_or(""), req.get("currency").as_str().unwrap_or(""), "900.00", None)
+    }
+    fn on_bet_result(&self, req: &Json) -> Json {
+        wallet_ok(req.get("traceId").as_str().unwrap_or(""), req.get("username").as_str().unwrap_or(""), req.get("currency").as_str().unwrap_or(""), "1100.00", None)
+    }
+    fn on_rollback(&self, req: &Json) -> Json {
+        wallet_ok(req.get("traceId").as_str().unwrap_or(""), req.get("username").as_str().unwrap_or(""), req.get("currency").as_str().unwrap_or(""), "1000.00", None)
+    }
+    fn on_adjustment(&self, req: &Json) -> Json {
+        wallet_ok(req.get("traceId").as_str().unwrap_or(""), req.get("username").as_str().unwrap_or(""), req.get("currency").as_str().unwrap_or(""), "1020.00", None)
+    }
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("B2B_API_KEY")?;
@@ -49,11 +70,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let res = client.create_game_url(req)?;
     println!("Launch URL: {:?}", res.get("data").get("gameUrl").as_str());
 
-    // 适用于 Axum / Actix 的 'static + Send + Sync 回调分发器（无需 base_url；生产请替换为持久化 WalletHandler 实现）
-    let wallet = Arc::new(InMemoryWallet::new());
+    // 适用于 Axum / Actix 的 'static + Send + Sync 回调分发器（无需 base_url）
+    let wallet = Arc::new(DbWallet);
     let dispatcher = Arc::new(SharedWebhookDispatcher::try_new(&api_key, &secret, wallet)?);
     // let reply = dispatcher.handle(path, x_api_key, x_signature, raw_body_bytes);
+    // let json_out = reply.dump();
     let _ = dispatcher;
     Ok(())
 }
 ```
+
+### 生产回调 4 项强制不变量
+
+1. **4 路并发（不按玩家串行）**：平台按单商户最多 4 路并发推送回调，请对玩家钱包行使用 `SELECT ... FOR UPDATE` 或原子 `UPDATE ... SET balance = balance + delta` + `UNIQUE(transaction_id)`。
+2. **多注同局每张注单均带 `isEndRound: 1`**：切勿收到首张 `isEndRound: 1` 即终结局级状态，必须按 `betId` / `transactionId` 逐票入账。
+3. **终态拦截与 `~5.07h` 重试窗口**：返回 `HTTP 200` 非 JSON 或无瞬态 `SC_*` 的非 2xx JSON 会使 `/wallet/bet_result` 立即挂起 `HELD` 且 0 次重试；瞬态错误按 **1 次首次 + 12 次自动重试（约 `5.07h`）** 退避重试（`WebhookDispatcher` 已内置 `catch_unwind`，将未捕获 panic 映射为 `SC_OPERATOR_TIMEOUT`）。
+4. **0 位小数币种（如 `JPY`）零值为 `"0"`**：切勿用 `== "0.00"` 判零，请使用 `decimal_to_ledger_units(...) == Ok(0)` 比较。

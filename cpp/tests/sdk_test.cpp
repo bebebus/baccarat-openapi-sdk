@@ -224,7 +224,7 @@ int main() {
                         std::string chunk(65536, 'a');
                         size_t sent = 0;
                         while (sent < total_len) {
-                            ssize_t w = ::write(cfd, chunk.data(), std::min(chunk.size(), total_len - sent));
+                            ssize_t w = ::write(cfd, chunk.data(), (std::min)(chunk.size(), total_len - sent));
                             if (w <= 0) break;
                             sent += static_cast<size_t>(w);
                         }
@@ -596,6 +596,38 @@ int main() {
     for (int i = 0; i < 128; ++i) expected_trunc += "\xE4\xB8\xAD";
     require_eq(utf8_res.at("status").as_string(), StatusCode::SC_INVALID_REQUEST, "wb:m10Utf8Status");
     require_eq(utf8_res.at("traceId").as_string(), expected_trunc, "wb:m10Utf8Truncated128Chars");
+
+    // 7. v1.5.5 regressions: deadlock exception safety, wallet_ok/wallet_error builders, locale-independent JSON float
+    class DeadlockWallet final : public WalletHandler {
+    public:
+        Json on_balance(const Json&) override { throw SdkError(StatusCode::SC_INSUFFICIENT_FUNDS, "explicit sdk err"); }
+        Json on_bet(const Json&) override { throw std::runtime_error("ERROR: deadlock detected (40P01) on table wallets"); }
+        Json on_bet_result(const Json&) override { throw std::runtime_error("ERROR: deadlock detected (40P01) on table wallets"); }
+        Json on_rollback(const Json& req) override { return wallet_ok(req.at("traceId").as_string(), "p1", "USD", "100.00"); }
+    };
+    DeadlockWallet dl_wallet;
+    WebhookDispatcher dl_disp(api_key, secret, dl_wallet);
+    std::string dl_raw = R"({"traceId":"t_cpp_dl","transactionId":"stl_1"})";
+    Json dl_res = dl_disp.handle("/wallet/bet_result", api_key, sign_body(dl_raw, secret), dl_raw);
+    require_eq(dl_res.at("traceId").as_string(), "t_cpp_dl", "wb:deadlockTraceId");
+    require_eq(dl_res.at("status").as_string(), StatusCode::SC_OPERATOR_TIMEOUT, "wb:deadlockTimeoutStatus");
+    require_eq(dl_res.at("message").as_string(), "Temporary wallet handler error", "wb:deadlockSanitizedMsg");
+    require_true(dl_res.at("message").as_string().find("40P01") == std::string::npos, "wb:deadlockNoLeak");
+    Json sdk_err_res = dl_disp.handle("/wallet/balance", api_key, sign_body(dl_raw, secret), dl_raw);
+    require_eq(sdk_err_res.at("status").as_string(), StatusCode::SC_INSUFFICIENT_FUNDS, "wb:sdkErrPreserved");
+
+    Json ok_env = wallet_ok("t_ok", "player_1", "JPY", "0");
+    require_eq(ok_env.at("status").as_string(), StatusCode::SC_OK, "wallet_ok:status");
+    require_eq(ok_env.at("data").at("balance").as_string(), "0", "wallet_ok:balance");
+    require_true(ok_env.at("data").at("timestamp").as_int() > 0, "wallet_ok:timestamp");
+    Json err_env = wallet_error("t_err", StatusCode::SC_USER_DISABLED, "disabled");
+    require_eq(err_env.at("status").as_string(), StatusCode::SC_USER_DISABLED, "wallet_error:status");
+    require_eq(err_env.at("message").as_string(), "disabled", "wallet_error:message");
+
+    std::string dbl_json = Json(12.34).dump();
+    require_true(dbl_json.find('.') != std::string::npos && dbl_json.find(',') == std::string::npos, "json:classicLocaleDump");
+    Json parsed_dbl = Json::parse(R"({"v":12.34})");
+    require_true(parsed_dbl.at("v").type() == Json::Type::Double, "json:classicLocaleParse");
 
     std::cout << "C++17 SDK: ALL TESTS PASSED\n";
     return 0;

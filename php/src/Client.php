@@ -41,6 +41,7 @@ final class Client
             CURLOPT_POSTFIELDS => $rawBody,
             CURLOPT_HTTPHEADER => $headerLines,
             CURLOPT_RETURNTRANSFER => false,
+            CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_NOSIGNAL => true,
             CURLOPT_TIMEOUT_MS => $timeoutMs,
             CURLOPT_CONNECTTIMEOUT_MS => min($timeoutMs, 5000),

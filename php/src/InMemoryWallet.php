@@ -43,16 +43,12 @@ final class InMemoryWallet implements WalletHandlerInterface, WalletAdjustmentHa
     private function okEnvelope(string $traceId, string $username): array
     {
         $acct = $this->accounts[$username];
-        return [
-            'traceId' => $traceId,
-            'status' => StatusCode::SC_OK,
-            'data' => [
-                'username' => $username,
-                'currency' => $acct['currency'],
-                'balance' => Money::ledgerUnitsToDecimal($acct['balanceUnits'], $acct['exponent']),
-                'timestamp' => (int) floor(microtime(true) * 1000),
-            ],
-        ];
+        return WalletResponse::ok(
+            $traceId,
+            $username,
+            $acct['currency'],
+            Money::ledgerUnitsToDecimal($acct['balanceUnits'], $acct['exponent'])
+        );
     }
 
     private function checkAccount(string $username, string $currency): ?string

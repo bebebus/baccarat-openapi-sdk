@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.4).
+//! Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.5).
 
 pub mod crypto;
 mod curl_ffi;
@@ -517,14 +517,32 @@ impl Client {
             None
         };
 
-        let (http_status, resp_bytes) = self.transport.post_json_with_timestamp(
-            &url,
-            &self.api_key,
-            &sig,
-            ts_str.as_deref(),
-            raw_bytes,
-            self.timeout_ms,
-        )?;
+        let (http_status, resp_bytes) = self
+            .transport
+            .post_json_with_timestamp(
+                &url,
+                &self.api_key,
+                &sig,
+                ts_str.as_deref(),
+                raw_bytes,
+                self.timeout_ms,
+            )
+            .map_err(|err| match err {
+                SdkError::Api {
+                    trace_id: tid,
+                    status,
+                    message,
+                    validation,
+                    http_status,
+                } if tid.is_empty() => SdkError::Api {
+                    trace_id: trace_id.clone(),
+                    status,
+                    message,
+                    validation,
+                    http_status,
+                },
+                other => other,
+            })?;
 
         let resp_str = String::from_utf8_lossy(&resp_bytes);
         let parsed = Json::parse(&resp_str)
@@ -735,6 +753,41 @@ impl Client {
 
 // ── 5. Seamless Wallet Pluggable WalletHandler, WebhookDispatcher & InMemoryWallet ─
 
+pub fn wallet_ok(
+    trace_id: &str,
+    username: &str,
+    currency: &str,
+    balance: &str,
+    timestamp_ms: Option<i64>,
+) -> Json {
+    let ts = timestamp_ms.unwrap_or_else(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0)
+    });
+    let mut data = Json::object();
+    data.set("username", Json::Str(username.into()));
+    data.set("currency", Json::Str(currency.into()));
+    data.set("balance", Json::Str(balance.into()));
+    data.set("timestamp", Json::Int(ts));
+    let mut r = Json::object();
+    r.set("traceId", Json::Str(trace_id.into()));
+    r.set("status", Json::Str(status_code::SC_OK.into()));
+    r.set("data", data);
+    r
+}
+
+pub fn wallet_error(trace_id: &str, status: &str, message: &str) -> Json {
+    let mut r = Json::object();
+    r.set("traceId", Json::Str(trace_id.into()));
+    r.set("status", Json::Str(status.into()));
+    if !message.is_empty() {
+        r.set("message", Json::Str(message.into()));
+    }
+    r
+}
+
 pub trait WalletHandler: Send + Sync {
     fn on_balance(&self, req: &Json) -> Json;
     fn on_bet(&self, req: &Json) -> Json;
@@ -843,21 +896,8 @@ impl InMemoryWallet {
     }
 
     fn ok_env(trace_id: &str, username: &str, acct: &Acct) -> Json {
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
         let bal = ledger_units_to_decimal(acct.units, acct.exponent).unwrap_or_else(|_| "0.00".into());
-        let mut data = Json::object();
-        data.set("username", Json::Str(username.into()));
-        data.set("currency", Json::Str(acct.currency.clone()));
-        data.set("balance", Json::Str(bal));
-        data.set("timestamp", Json::Int(ts));
-        let mut r = Json::object();
-        r.set("traceId", Json::Str(trace_id.into()));
-        r.set("status", Json::Str(status_code::SC_OK.into()));
-        r.set("data", data);
-        r
+        wallet_ok(trace_id, username, &acct.currency, &bal, None)
     }
 }
 
@@ -1179,9 +1219,7 @@ impl InMemoryWallet {
 
 fn extract_trace_hint(raw_body: &[u8]) -> String {
     let head = &raw_body[..raw_body.len().min(1024)];
-    let Ok(s) = std::str::from_utf8(head) else {
-        return String::new();
-    };
+    let s = String::from_utf8_lossy(head);
     let Some(idx) = s.find("\"traceId\"") else {
         return String::new();
     };
@@ -1245,18 +1283,28 @@ fn dispatch_webhook(
         .collect();
 
     let clean = route_path.split('?').next().unwrap_or("").trim_end_matches('/');
-    if clean.ends_with("/wallet/balance") {
-        wallet.on_balance(&body_obj)
-    } else if clean.ends_with("/wallet/bet") {
-        wallet.on_bet(&body_obj)
-    } else if clean.ends_with("/wallet/bet_result") {
-        wallet.on_bet_result(&body_obj)
-    } else if clean.ends_with("/wallet/rollback") {
-        wallet.on_rollback(&body_obj)
-    } else if clean.ends_with("/wallet/adjustment") {
-        wallet.on_adjustment(&body_obj)
-    } else {
-        InMemoryWallet::err_env(&trace_id, status_code::SC_INVALID_REQUEST, "Unknown route")
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if clean.ends_with("/wallet/balance") {
+            wallet.on_balance(&body_obj)
+        } else if clean.ends_with("/wallet/bet") {
+            wallet.on_bet(&body_obj)
+        } else if clean.ends_with("/wallet/bet_result") {
+            wallet.on_bet_result(&body_obj)
+        } else if clean.ends_with("/wallet/rollback") {
+            wallet.on_rollback(&body_obj)
+        } else if clean.ends_with("/wallet/adjustment") {
+            wallet.on_adjustment(&body_obj)
+        } else {
+            InMemoryWallet::err_env(&trace_id, status_code::SC_INVALID_REQUEST, "Unknown route")
+        }
+    }));
+    match result {
+        Ok(resp) => resp,
+        Err(_) => wallet_error(
+            &trace_id,
+            status_code::SC_OPERATOR_TIMEOUT,
+            "Temporary wallet handler error",
+        ),
     }
 }
 
@@ -1958,8 +2006,14 @@ mod tests {
             timeout_ms: 5000,
         })
         .unwrap();
-        let ov_err = ov_client.ping(Json::object()).unwrap_err();
-        assert!(matches!(ov_err, SdkError::Api { ref status, .. } if status == status_code::SC_INVALID_REQUEST));
+        let mut ov_req = Json::object();
+        ov_req.set("traceId", Json::Str("t_rs_overflow".into()));
+        let ov_err = ov_client.ping(ov_req).unwrap_err();
+        assert!(matches!(
+            ov_err,
+            SdkError::Api { ref trace_id, ref status, .. }
+                if trace_id == "t_rs_overflow" && status == status_code::SC_INVALID_REQUEST
+        ));
         assert!(!ov_err.is_retryable());
         let _ = srv.join();
 
@@ -1977,5 +2031,49 @@ mod tests {
             raw.as_bytes(),
         );
         assert_eq!(out.get("data").get("balance").as_str(), Some("500.00"));
+
+        // v1.5.5 regressions: panic isolation -> SC_OPERATOR_TIMEOUT, wallet_ok/wallet_error, UTF-8 lossy trace hint
+        struct PanickingWallet;
+        impl WalletHandler for PanickingWallet {
+            fn on_balance(&self, req: &Json) -> Json {
+                wallet_ok(req.get("traceId").as_str().unwrap_or(""), "p1", "JPY", "0", None)
+            }
+            fn on_bet(&self, _req: &Json) -> Json {
+                panic!("ERROR: deadlock detected (40P01) on table wallets");
+            }
+            fn on_bet_result(&self, _req: &Json) -> Json {
+                panic!("ERROR: deadlock detected (40P01) on table wallets");
+            }
+            fn on_rollback(&self, req: &Json) -> Json {
+                wallet_error(req.get("traceId").as_str().unwrap_or(""), status_code::SC_TRANSACTION_NOT_EXISTS, "missing")
+            }
+        }
+        let pw = PanickingWallet;
+        let pw_disp = WebhookDispatcher::from_credentials(api_key, secret, &pw).unwrap();
+        let pw_raw = br#"{"traceId":"t_rs_panic","transactionId":"stl_1"}"#;
+        let pw_res = pw_disp.handle("/wallet/bet_result", api_key, &sign_body(pw_raw, secret).unwrap(), pw_raw);
+        assert_eq!(pw_res.get("traceId").as_str(), Some("t_rs_panic"));
+        assert_eq!(pw_res.get("status").as_str(), Some(status_code::SC_OPERATOR_TIMEOUT));
+        assert_eq!(pw_res.get("message").as_str(), Some("Temporary wallet handler error"));
+        assert!(!pw_res.get("message").as_str().unwrap().contains("40P01"));
+
+        let ok_b = wallet_ok("t_ok", "player_1", "JPY", "0", None);
+        assert_eq!(ok_b.get("status").as_str(), Some(status_code::SC_OK));
+        assert_eq!(ok_b.get("data").get("balance").as_str(), Some("0"));
+        assert!(ok_b.get("data").get("timestamp").as_i64().unwrap_or(0) > 0);
+        let err_b = wallet_error("t_err", status_code::SC_USER_DISABLED, "disabled");
+        assert_eq!(err_b.get("status").as_str(), Some(status_code::SC_USER_DISABLED));
+        assert_eq!(err_b.get("message").as_str(), Some("disabled"));
+
+        // Multi-byte UTF-8 split at byte 1024 boundary must still extract traceId hint
+        let mut split_utf8 = br#"{"traceId":"t_split_1024","pad":""#.to_vec();
+        while split_utf8.len() < 1023 {
+            split_utf8.push(b'a');
+        }
+        split_utf8.extend_from_slice("中".as_bytes()); // 3-byte char split across byte 1024
+        split_utf8.extend_from_slice(br#""}"#);
+        let hint_res = pw_disp.handle("/wallet/bet", "bad_key", "bad_sig", &split_utf8);
+        assert_eq!(hint_res.get("status").as_str(), Some(status_code::SC_AUTHENTICATION_FAILED));
+        assert_eq!(hint_res.get("traceId").as_str(), Some("t_split_1024"));
     }
 }

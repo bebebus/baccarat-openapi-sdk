@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Zero-dependency Node.js SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.4).
+// Zero-dependency Node.js SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.5).
 
 import crypto from 'node:crypto';
 import http from 'node:http';
@@ -655,16 +655,7 @@ export class InMemoryWallet {
   }
 
   _okEnvelope(traceId, username, acct) {
-    return {
-      traceId,
-      status: StatusCode.SC_OK,
-      data: {
-        username,
-        currency: acct.currency,
-        balance: ledgerUnitsToDecimal(acct.balanceUnits, acct.exponent),
-        timestamp: Date.now(),
-      },
-    };
+    return walletOk(traceId, username, acct.currency, ledgerUnitsToDecimal(acct.balanceUnits, acct.exponent));
   }
 
   async onBalance(req) {
@@ -854,6 +845,31 @@ export class InMemoryWallet {
   }
 }
 
+export function walletOk(traceId, username, currency, balance, timestamp = Date.now()) {
+  const ts = typeof timestamp === 'number' && Number.isFinite(timestamp) ? Math.trunc(timestamp) : Date.now();
+  return {
+    traceId: String(traceId ?? ''),
+    status: StatusCode.SC_OK,
+    data: {
+      username: String(username ?? ''),
+      currency: String(currency ?? ''),
+      balance: String(balance ?? ''),
+      timestamp: ts,
+    },
+  };
+}
+
+export function walletError(traceId, status, message = '') {
+  const body = {
+    traceId: String(traceId ?? ''),
+    status: String(status ?? StatusCode.SC_INVALID_REQUEST),
+  };
+  if (message != null && String(message) !== '') {
+    body.message = String(message);
+  }
+  return body;
+}
+
 function extractSafeTraceHint(rawBuf) {
   const head = rawBuf.subarray(0, 1024).toString('utf8');
   const m = TRACE_HINT_RE.exec(head);
@@ -968,10 +984,18 @@ export class WebhookDispatcher {
       }
       return { statusCode: 200, body: responseBody };
     } catch (err) {
-      const status = err instanceof BaccaratSdkError && err.code.startsWith('SC_') ? err.code : StatusCode.SC_INVALID_REQUEST;
+      if (err instanceof BaccaratSdkError) {
+        const status = typeof err.code === 'string' && err.code.startsWith('SC_')
+          ? err.code
+          : StatusCode.SC_INVALID_REQUEST;
+        return {
+          statusCode: 200,
+          body: { traceId, status, message: err.message },
+        };
+      }
       return {
         statusCode: 200,
-        body: { traceId, status, message: err instanceof Error ? err.message : 'Wallet handler error' },
+        body: { traceId, status: StatusCode.SC_OPERATOR_TIMEOUT, message: 'Temporary wallet handler error' },
       };
     }
   }

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.4)."""
+"""Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.5)."""
 
 from __future__ import annotations
 
@@ -25,6 +25,14 @@ LEDGER_SCALE = 1000
 _HEX64_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _DECIMAL_RE = re.compile(r"^(-?)(\d+)(?:\.(\d+))?$")
 _TRACE_HINT_RE = re.compile(rb'"traceId"\s*:\s*"([A-Za-z0-9_.:-]{1,128})"')
+
+
+class _UnsetType:
+    def __repr__(self) -> str:
+        return "UNSET"
+
+
+UNSET: Any = _UnsetType()
 
 
 class Environment:
@@ -345,11 +353,20 @@ def _default_transport(url: str, headers: Dict[str, str], raw_body: bytes, timeo
         with _NO_REDIRECT_OPENER.open(req, timeout=timeout_ms / 1000.0) as resp:
             chunk = resp.read(MAX_HTTP_RESPONSE_BYTES + 1)
             if len(chunk) > MAX_HTTP_RESPONSE_BYTES:
-                raise BaccaratSdkError("Gateway response exceeded 16 MiB limit", StatusCode.SC_INVALID_REQUEST)
+                raise BaccaratApiError(
+                    status=StatusCode.SC_INVALID_REQUEST,
+                    message="Gateway response exceeded 16 MiB limit",
+                    http_status=resp.status,
+                )
             return resp.status, chunk.decode("utf-8", errors="replace")
     except urllib.error.HTTPError as err:
         try:
             raw = err.read(MAX_HTTP_RESPONSE_BYTES + 1) if err.fp else b""
+        except Exception as read_exc:
+            raise BaccaratSdkError(
+                f"Network error reading HTTP {err.code} body: {read_exc}",
+                StatusCode.SC_OPERATOR_TIMEOUT,
+            ) from read_exc
         finally:
             err.close()
         if len(raw) > MAX_HTTP_RESPONSE_BYTES:
@@ -390,12 +407,17 @@ class Client:
         }
         if self.config.send_timestamp:
             headers["X-Timestamp"] = str(int(time.time() * 1000))
-        http_status, resp_text = self._transport(
-            f"{self.config.resolved_base_url}{route_path}",
-            headers,
-            raw_bytes,
-            self.config.timeout_ms,
-        )
+        try:
+            http_status, resp_text = self._transport(
+                f"{self.config.resolved_base_url}{route_path}",
+                headers,
+                raw_bytes,
+                self.config.timeout_ms,
+            )
+        except BaccaratApiError as exc:
+            if not exc.trace_id:
+                exc.trace_id = trace_id
+            raise
         try:
             parsed = json.loads(resp_text)
         except Exception as exc:
@@ -509,7 +531,7 @@ class Client:
         status: Optional[str] = None,
         betting_enabled: Optional[bool] = None,
         reset_pnl_window: Optional[bool] = None,
-        reason: Optional[str] = None,
+        reason: Any = UNSET,
         trace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"username": username}
@@ -521,7 +543,7 @@ class Client:
             payload["bettingEnabled"] = betting_enabled
         if reset_pnl_window is not None:
             payload["resetPnlWindow"] = reset_pnl_window
-        if reason is not None:
+        if reason is not UNSET:
             payload["reason"] = reason
         if trace_id is not None:
             payload["traceId"] = trace_id
@@ -533,28 +555,28 @@ class Client:
         username: str,
         currency: str,
         action: Optional[str] = None,
-        min_bet: Optional[str] = None,
-        max_bet: Optional[str] = None,
-        max_table_round: Optional[str] = None,
-        max_user_day: Optional[str] = None,
-        max_loss_per_day: Optional[str] = None,
-        custom_chips: Optional[List[str]] = None,
+        min_bet: Any = UNSET,
+        max_bet: Any = UNSET,
+        max_table_round: Any = UNSET,
+        max_user_day: Any = UNSET,
+        max_loss_per_day: Any = UNSET,
+        custom_chips: Any = UNSET,
         trace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"username": username, "currency": currency}
         if action is not None:
             payload["action"] = action
-        if min_bet is not None:
+        if min_bet is not UNSET:
             payload["minBet"] = min_bet
-        if max_bet is not None:
+        if max_bet is not UNSET:
             payload["maxBet"] = max_bet
-        if max_table_round is not None:
+        if max_table_round is not UNSET:
             payload["maxTableRound"] = max_table_round
-        if max_user_day is not None:
+        if max_user_day is not UNSET:
             payload["maxUserDay"] = max_user_day
-        if max_loss_per_day is not None:
+        if max_loss_per_day is not UNSET:
             payload["maxLossPerDay"] = max_loss_per_day
-        if custom_chips is not None:
+        if custom_chips is not UNSET:
             payload["customChips"] = custom_chips
         if trace_id is not None:
             payload["traceId"] = trace_id
@@ -754,6 +776,36 @@ class Client:
 # ── 5. Seamless Wallet Webhook Dispatcher & Reference In-Memory Wallet ──────
 
 
+def wallet_ok(
+    trace_id: str,
+    username: str,
+    currency: str,
+    balance: str,
+    timestamp: Optional[int] = None,
+) -> Dict[str, Any]:
+    ts = int(time.time() * 1000) if timestamp is None else int(timestamp)
+    return {
+        "traceId": trace_id or "",
+        "status": StatusCode.SC_OK,
+        "data": {
+            "username": username,
+            "currency": currency,
+            "balance": balance,
+            "timestamp": ts,
+        },
+    }
+
+
+def wallet_error(trace_id: str, status: str, message: Optional[str] = None) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "traceId": trace_id or "",
+        "status": status,
+    }
+    if message:
+        out["message"] = message
+    return out
+
+
 class WalletHandler(Protocol):
     def on_balance(self, req: Dict[str, Any]) -> Dict[str, Any]: ...
     def on_bet(self, req: Dict[str, Any]) -> Dict[str, Any]: ...
@@ -791,16 +843,12 @@ class InMemoryWallet:
                 self.accounts[username]["disabled"] = disabled
 
     def _ok(self, trace_id: str, username: str, acct: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            "traceId": trace_id,
-            "status": StatusCode.SC_OK,
-            "data": {
-                "username": username,
-                "currency": acct["currency"],
-                "balance": ledger_units_to_decimal(acct["balance_units"], acct["exponent"]),
-                "timestamp": int(time.time() * 1000),
-            },
-        }
+        return wallet_ok(
+            trace_id,
+            username,
+            acct["currency"],
+            ledger_units_to_decimal(acct["balance_units"], acct["exponent"]),
+        )
 
     def _check_acct(self, username: str, currency: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         acct = self.accounts.get(username)
@@ -1075,7 +1123,45 @@ class WebhookDispatcher:
                 return 200, adj_fn(parsed)
             return 200, {"traceId": trace_id, "status": StatusCode.SC_INVALID_REQUEST, "message": f"Unknown route {clean}"}
         except BaccaratSdkError as exc:
-            st = exc.code if exc.code.startswith("SC_") else StatusCode.SC_INVALID_REQUEST
+            st = exc.code if isinstance(exc.code, str) and exc.code.startswith("SC_") else StatusCode.SC_INVALID_REQUEST
             return 200, {"traceId": trace_id, "status": st, "message": str(exc)}
-        except Exception as exc:
-            return 200, {"traceId": trace_id, "status": StatusCode.SC_INVALID_REQUEST, "message": f"Wallet handler error: {exc}"}
+        except Exception:
+            return 200, {
+                "traceId": trace_id,
+                "status": StatusCode.SC_OPERATOR_TIMEOUT,
+                "message": "Temporary wallet handler error",
+            }
+
+
+__all__ = [
+    "SANDBOX_BASE_URL",
+    "MAX_DETAIL_WINDOW_MS",
+    "MAX_PAGE_SIZE",
+    "MAX_WEBHOOK_BODY_BYTES",
+    "MAX_HTTP_RESPONSE_BYTES",
+    "LEDGER_SCALE",
+    "UNSET",
+    "Environment",
+    "StatusCode",
+    "is_retryable_status",
+    "BaccaratSdkError",
+    "BaccaratApiError",
+    "sign_body",
+    "verify_signature",
+    "verify_webhook_headers",
+    "decimal_to_ledger_units",
+    "ledger_units_to_decimal",
+    "encode_tuple_fingerprint",
+    "bet_fingerprint",
+    "bet_result_fingerprint",
+    "rollback_fingerprint",
+    "adjustment_fingerprint",
+    "Config",
+    "TransportFn",
+    "Client",
+    "wallet_ok",
+    "wallet_error",
+    "WalletHandler",
+    "InMemoryWallet",
+    "WebhookDispatcher",
+]

@@ -24,6 +24,8 @@ import {
   signBody,
   verifySignature,
   verifyWebhookHeaders,
+  walletError,
+  walletOk,
 } from '../src/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -450,4 +452,37 @@ test('WebhookDispatcher & InMemoryWallet full seamless wallet lifecycle', async 
   } finally {
     edgeSrv.close();
   }
+});
+
+test('v1.5.5 regressions: deadlock exception safety & wallet response builders', async () => {
+  const apiKey = 'ak_0123456789abcdef0123456789abcdef';
+  const secret = 'dGVzdF9zZWNyZXRfNDBfY2hhcnNfYmFzZTY0dXJsX2s';
+  const deadlockWallet = {
+    onBalance() { throw new BaccaratSdkError('explicit validation', StatusCode.SC_INSUFFICIENT_FUNDS); },
+    onBet() { throw new Error('ERROR: deadlock detected (40P01) on table wallets'); },
+    onBetResult() { throw new Error('ERROR: deadlock detected (40P01) on table wallets'); },
+    onRollback() { return walletOk('t_rb', 'p1', 'USD', '100.00', 1700000000000); },
+  };
+  const disp = new WebhookDispatcher({ apiKey, hmacSecret: secret }, deadlockWallet);
+
+  const settleRaw = Buffer.from(JSON.stringify({ traceId: 't_deadlock', transactionId: 'stl_1', betId: 'b1' }), 'utf8');
+  const settleRes = await disp.handle('/wallet/bet_result', apiKey, signBody(settleRaw, secret), settleRaw);
+  assert.equal(settleRes.statusCode, 200);
+  assert.equal(settleRes.body.traceId, 't_deadlock');
+  assert.equal(settleRes.body.status, StatusCode.SC_OPERATOR_TIMEOUT);
+  assert.equal(settleRes.body.message, 'Temporary wallet handler error');
+  assert.ok(!String(settleRes.body.message).includes('40P01'));
+  assert.ok(!String(settleRes.body.message).includes('deadlock'));
+
+  const sdkErrRaw = Buffer.from(JSON.stringify({ traceId: 't_sdkerr' }), 'utf8');
+  const sdkErrRes = await disp.handle('/wallet/balance', apiKey, signBody(sdkErrRaw, secret), sdkErrRaw);
+  assert.equal(sdkErrRes.statusCode, 200);
+  assert.equal(sdkErrRes.body.status, StatusCode.SC_INSUFFICIENT_FUNDS);
+
+  const ok = walletOk('t_ok', 'player_1', 'JPY', '5000');
+  assert.equal(ok.status, StatusCode.SC_OK);
+  assert.equal(ok.data.balance, '5000');
+  assert.equal(typeof ok.data.timestamp, 'number');
+  const err = walletError('t_err', StatusCode.SC_INSUFFICIENT_FUNDS, 'low balance');
+  assert.deepEqual(err, { traceId: 't_err', status: StatusCode.SC_INSUFFICIENT_FUNDS, message: 'low balance' });
 });

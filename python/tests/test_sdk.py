@@ -16,6 +16,7 @@ from baccarat_sdk import (
     Environment,
     InMemoryWallet,
     StatusCode,
+    UNSET,
     WebhookDispatcher,
     adjustment_fingerprint,
     bet_fingerprint,
@@ -27,6 +28,8 @@ from baccarat_sdk import (
     sign_body,
     verify_signature,
     verify_webhook_headers,
+    wallet_error,
+    wallet_ok,
 )
 
 VECTORS_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../test-vectors.json"))
@@ -386,16 +389,117 @@ class TestBaccaratPythonSdk(unittest.TestCase):
             self.assertEqual(ctx_redir.exception.status, StatusCode.SC_INVALID_REQUEST)
             self.assertFalse(redirect_followed["hit"])
 
-            # >16 MiB HTTP 500 error body must raise non-retryable SC_INVALID_REQUEST
+            # >16 MiB HTTP 500 error body must raise non-retryable SC_INVALID_REQUEST with trace_id attached
             with self.assertRaises(BaccaratApiError) as ctx_500_big:
                 redir_client.ping(trace_id="oversized_500")
             self.assertEqual(ctx_500_big.exception.http_status, 500)
             self.assertEqual(ctx_500_big.exception.status, StatusCode.SC_INVALID_REQUEST)
             self.assertEqual(ctx_500_big.exception.code, StatusCode.SC_INVALID_REQUEST)
+            self.assertEqual(ctx_500_big.exception.trace_id, "oversized_500")
             self.assertFalse(ctx_500_big.exception.is_retryable())
         finally:
             redir_srv.shutdown()
             redir_srv.server_close()
+
+        # 6. v1.5.5 regressions: deadlock exception safety, HTTPError read failure, UNSET/None null clearing, wallet helpers
+        class DeadlockWallet:
+            def on_balance(self, req: dict) -> dict:
+                raise BaccaratSdkError("explicit sdk err", StatusCode.SC_INSUFFICIENT_FUNDS)
+
+            def on_bet(self, req: dict) -> dict:
+                raise RuntimeError("ERROR: deadlock detected (40P01) on table wallets")
+
+            def on_bet_result(self, req: dict) -> dict:
+                raise RuntimeError("ERROR: deadlock detected (40P01) on table wallets")
+
+            def on_rollback(self, req: dict) -> dict:
+                return wallet_ok(req.get("traceId", ""), "p1", "USD", "100.00", timestamp=1700000000000)
+
+            def on_adjustment(self, req: dict) -> dict:
+                return wallet_error(req.get("traceId", ""), StatusCode.SC_INSUFFICIENT_FUNDS, "low funds")
+
+        dl_disp = WebhookDispatcher.from_credentials(api_key, secret, DeadlockWallet())
+        dl_raw = json.dumps({"traceId": "t_py_dl", "transactionId": "stl_1"}).encode("utf-8")
+        st_dl, body_dl = dl_disp.handle("/wallet/bet_result", api_key, sign_body(dl_raw, secret), dl_raw)
+        self.assertEqual(st_dl, 200)
+        self.assertEqual(body_dl["traceId"], "t_py_dl")
+        self.assertEqual(body_dl["status"], StatusCode.SC_OPERATOR_TIMEOUT)
+        self.assertEqual(body_dl["message"], "Temporary wallet handler error")
+        self.assertNotIn("40P01", body_dl["message"])
+        self.assertNotIn("deadlock", body_dl["message"])
+
+        sdk_raw = json.dumps({"traceId": "t_py_sdk"}).encode("utf-8")
+        st_sdk, body_sdk = dl_disp.handle("/wallet/balance", api_key, sign_body(sdk_raw, secret), sdk_raw)
+        self.assertEqual(st_sdk, 200)
+        self.assertEqual(body_sdk["status"], StatusCode.SC_INSUFFICIENT_FUNDS)
+
+        ok_res = wallet_ok("t_ok", "player_1", "JPY", "0")
+        self.assertEqual(ok_res["status"], StatusCode.SC_OK)
+        self.assertEqual(ok_res["data"]["balance"], "0")
+        self.assertIsInstance(ok_res["data"]["timestamp"], int)
+        err_res = wallet_error("t_err", StatusCode.SC_USER_DISABLED, "disabled")
+        self.assertEqual(err_res, {"traceId": "t_err", "status": StatusCode.SC_USER_DISABLED, "message": "disabled"})
+
+        # Explicit None -> JSON null vs omitted UNSET on update_player_status / update_player_limits
+        sent_payloads: list[dict] = []
+
+        def capture_transport(url: str, _hdrs: dict[str, str], raw: bytes, _t: int) -> tuple[int, str]:
+            body = json.loads(raw.decode("utf-8"))
+            sent_payloads.append(body)
+            return 200, json.dumps({"traceId": body["traceId"], "status": "SC_OK", "data": {}})
+
+        cap_client = Client(
+            Config(api_key=api_key, hmac_secret=secret, environment=Environment.SANDBOX),
+            transport=capture_transport,
+        )
+        cap_client.update_player_status(username="p1", action="SET", status="ACTIVE")
+        self.assertNotIn("reason", sent_payloads[-1])
+        cap_client.update_player_status(username="p1", action="SET", status="ACTIVE", reason=None)
+        self.assertIn("reason", sent_payloads[-1])
+        self.assertIsNone(sent_payloads[-1]["reason"])
+
+        cap_client.update_player_limits(username="p1", currency="USD", action="SET", min_bet=UNSET)
+        for k in ("minBet", "maxBet", "maxTableRound", "maxUserDay", "maxLossPerDay", "customChips"):
+            self.assertNotIn(k, sent_payloads[-1])
+        cap_client.update_player_limits(
+            username="p1",
+            currency="USD",
+            action="SET",
+            min_bet=None,
+            max_bet=None,
+            max_table_round=None,
+            max_user_day=None,
+            max_loss_per_day=None,
+            custom_chips=None,
+        )
+        for k in ("minBet", "maxBet", "maxTableRound", "maxUserDay", "maxLossPerDay", "customChips"):
+            self.assertIn(k, sent_payloads[-1])
+            self.assertIsNone(sent_payloads[-1][k])
+
+        # Simulated mid-body HTTPError read failure raises retryable BaccaratSdkError(SC_OPERATOR_TIMEOUT)
+        import io
+        import urllib.error
+        from unittest import mock
+        import baccarat_sdk as _sdk_mod
+
+        closed_flag = {"closed": False}
+
+        class BrokenHttpError(urllib.error.HTTPError):
+            def read(self, amt: int = -1) -> bytes:
+                raise ConnectionResetError("connection reset mid-body")
+
+            def close(self) -> None:
+                closed_flag["closed"] = True
+
+        broken_err = BrokenHttpError("http://127.0.0.1/operator/v1/ping", 502, "Bad Gateway", {}, io.BytesIO(b"x"))  # type: ignore[arg-type]
+        with mock.patch.object(_sdk_mod._NO_REDIRECT_OPENER, "open", side_effect=broken_err):
+            default_client = Client(Config(api_key=api_key, hmac_secret=secret, base_url="http://127.0.0.1:9"))
+            with self.assertRaises(BaccaratSdkError) as ctx_read_err:
+                default_client.ping(trace_id="t_httperr_read")
+            self.assertNotIsInstance(ctx_read_err.exception, BaccaratApiError)
+            self.assertEqual(ctx_read_err.exception.code, StatusCode.SC_OPERATOR_TIMEOUT)
+            self.assertTrue(is_retryable_status(ctx_read_err.exception.code))
+            self.assertTrue(closed_flag["closed"])
 
 
 if __name__ == "__main__":

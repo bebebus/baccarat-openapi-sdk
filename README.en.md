@@ -1,11 +1,11 @@
 > [中文](./README.md) | English
 
-# Baccarat Live Platform · Multi-Language B2B Merchant SDKs (v1.5.4)
+# Baccarat Live Platform · Multi-Language B2B Merchant SDKs (v1.5.5)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
-[![OpenAPI 3.1](https://img.shields.io/badge/OpenAPI_3.1-v1.5.4-635bff)](https://openapi.lt.cniia.cloud/en/)
+[![OpenAPI 3.1](https://img.shields.io/badge/OpenAPI_3.1-v1.5.5-635bff)](https://openapi.lt.cniia.cloud/en/)
 
-Official bidirectional B2B Operator Seamless Wallet SDKs (`bebebus/baccarat-openapi-sdk`) for **Node.js, Python, PHP, Go, Java, C++, and Rust**, aligned 100% with OpenAPI `v1.5.4` (`https://openapi.lt.cniia.cloud/en/`).
+Official bidirectional B2B Operator Seamless Wallet SDKs (`bebebus/baccarat-openapi-sdk`) for **Node.js, Python, PHP, Go, Java, C++, and Rust**, aligned 100% with OpenAPI `v1.5.5` (`https://openapi.lt.cniia.cloud/en/`).
 
 ## Design Highlights
 
@@ -20,12 +20,12 @@ Official bidirectional B2B Operator Seamless Wallet SDKs (`bebebus/baccarat-open
 | Language | Directory | Install / Import | External Packages | Test Command |
 | --- | --- | --- | --- | --- |
 | **Node.js** (>= 18) | [`nodejs/`](./nodejs/) | Clone & import `./nodejs/src/index.js` or `npm install ./baccarat-openapi-sdk/nodejs` | **0** | `cd nodejs && node --test` |
-| **Python** (>= 3.9) | [`python/`](./python/) | `pip install "git+https://github.com/bebebus/baccarat-openapi-sdk.git@v1.5.4#subdirectory=python"` | **0** | `cd python && python3 -m unittest discover -s tests -v` |
+| **Python** (>= 3.9) | [`python/`](./python/) | `pip install "git+https://github.com/bebebus/baccarat-openapi-sdk.git@v1.5.5#subdirectory=python"` | **0** | `cd python && python3 -m unittest discover -s tests -v` |
 | **PHP** (>= 8.1) | [`php/`](./php/) | `require 'php/autoload.php'` or Composer path repo `Bebebus\BaccaratSdk\` | **0** (`ext-curl`, `ext-json`) | `cd php && php tests/run.php` |
-| **Go** (>= 1.21) | [`go/`](./go/) | `go get github.com/bebebus/baccarat-openapi-sdk/go@v1.5.4` | **0** | `cd go && go test -v -count=1 ./...` |
+| **Go** (>= 1.21) | [`go/`](./go/) | `go get github.com/bebebus/baccarat-openapi-sdk/go@v1.5.5` | **0** | `cd go && go test -v -count=1 ./...` |
 | **Java** (>= 17) | [`java/`](./java/) | `cd java && mvn install` or source import `cloud.cniia.baccarat.sdk.*` | **0** | `cd java && bash run-tests.sh` |
 | **C++** (C++17) | [`cpp/`](./cpp/) | CMake `add_subdirectory(cpp)` link `baccarat_sdk` | System `OpenSSL` + `libcurl` | `cmake -S cpp -B cpp/build && cmake --build cpp/build && ctest --test-dir cpp/build --output-on-failure` |
-| **Rust** (2021) | [`rust/`](./rust/) | `baccarat-openapi-sdk = { git = "https://github.com/bebebus/baccarat-openapi-sdk", tag = "v1.5.4" }` | **0 Crates** (`std` + system `libcurl`) | `cd rust && cargo test` |
+| **Rust** (2021) | [`rust/`](./rust/) | `baccarat-openapi-sdk = { git = "https://github.com/bebebus/baccarat-openapi-sdk", tag = "v1.5.5" }` | **0 Crates** (`std` + system `libcurl`) | `cd rust && cargo test` |
 
 Run all 7 test suites sequentially:
 
@@ -37,6 +37,13 @@ bash _tooling/run-all-tests.sh
 
 - **`Environment.SANDBOX`**: Defaults to the sandbox gateway `https://api.lt.cniia.cloud`.
 - **`Environment.PRODUCTION` (default)**: Never hardcodes a production host. You MUST pass your commercially provisioned `baseUrl` explicitly when creating `Client`, preventing accidental production calls to sandbox. (Webhook-only servers can construct `WebhookDispatcher` directly with `apiKey` + `hmacSecret`.)
+
+## Production Webhook Invariants
+
+1. **4-way concurrent webhooks per operator (NOT serialized per player)**: Guard per-player balance updates with DB row locks (`SELECT ... FOR UPDATE`) or atomic `UPDATE ... SET balance = balance + delta` plus `UNIQUE(transaction_id)`.
+2. **`isEndRound: 1` is sent on EVERY ticket in multi-bet rounds**: Never finalize or lock round-level state on the first `isEndRound: 1` callback; settle strictly per `betId` / `transactionId`.
+3. **Terminal HTTP/JSON traps & `~5.07h` retry horizon (1 initial + 12 auto-retries)**: Returning `HTTP 200` with non-JSON body or non-2xx JSON without a transient `SC_*` status parks `/wallet/bet_result` winning tickets in `HELD` with **0 retries**. `WebhookDispatcher` automatically maps unexpected runtime/DB exceptions to retryable `SC_OPERATOR_TIMEOUT` with a sanitized message.
+4. **0-decimal currencies (e.g. `JPY`) format zero as `"0"`**: Never compare zero amounts with `=== "0.00"`; use `decimalToLedgerUnits` or exact decimal comparison.
 
 ## Quick Start (Node.js)
 

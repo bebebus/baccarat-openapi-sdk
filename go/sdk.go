@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Package baccarat provides a zero-dependency Go SDK for the Baccarat Live Platform
-// B2B Operator Seamless Wallet API (v1.5.4).
+// B2B Operator Seamless Wallet API (v1.5.5).
 package baccarat
 
 import (
@@ -643,6 +643,34 @@ type UpdatePlayerStatusRequest struct {
 	BettingEnabled *bool   `json:"bettingEnabled,omitempty"`
 	ResetPnlWindow *bool   `json:"resetPnlWindow,omitempty"`
 	Reason         *string `json:"reason,omitempty"`
+	// ClearReason, when true with nil Reason, explicitly emits "reason": null
+	// so Action="SET" clears a previously saved reason without breaking omitempty semantics.
+	ClearReason bool `json:"-"`
+}
+
+func (r UpdatePlayerStatusRequest) MarshalJSON() ([]byte, error) {
+	if r.ClearReason && r.Reason == nil {
+		type clearStatusPayload struct {
+			TraceID        string  `json:"traceId"`
+			Username       string  `json:"username"`
+			Action         string  `json:"action,omitempty"`
+			Status         string  `json:"status,omitempty"`
+			BettingEnabled *bool   `json:"bettingEnabled,omitempty"`
+			ResetPnlWindow *bool   `json:"resetPnlWindow,omitempty"`
+			Reason         *string `json:"reason"`
+		}
+		return marshalNoEscapeHTML(clearStatusPayload{
+			TraceID:        r.TraceID,
+			Username:       r.Username,
+			Action:         r.Action,
+			Status:         r.Status,
+			BettingEnabled: r.BettingEnabled,
+			ResetPnlWindow: r.ResetPnlWindow,
+			Reason:         nil,
+		})
+	}
+	type alias UpdatePlayerStatusRequest
+	return marshalNoEscapeHTML(alias(r))
 }
 
 func (c *Client) UpdatePlayerStatus(ctx context.Context, req UpdatePlayerStatusRequest) (map[string]any, string, error) {
@@ -668,40 +696,66 @@ type UpdatePlayerLimitsRequest struct {
 	MaxUserDay    *string  `json:"maxUserDay,omitempty"`
 	MaxLossPerDay *string  `json:"maxLossPerDay,omitempty"`
 	CustomChips   []string `json:"customChips,omitempty"`
-	// ClearCustomChips, when true with empty CustomChips, explicitly emits "customChips": []
-	// so Action="SET" clears previously saved custom chips without breaking omitempty semantics.
-	ClearCustomChips bool `json:"-"`
+	// Clear* flags, when true with a nil/empty corresponding field, explicitly emit JSON null
+	// (or "customChips": [] for ClearCustomChips) so Action="SET" clears individual fields.
+	ClearMinBet        bool `json:"-"`
+	ClearMaxBet        bool `json:"-"`
+	ClearMaxTableRound bool `json:"-"`
+	ClearMaxUserDay    bool `json:"-"`
+	ClearMaxLossPerDay bool `json:"-"`
+	ClearCustomChips   bool `json:"-"`
 }
 
 func (r UpdatePlayerLimitsRequest) MarshalJSON() ([]byte, error) {
-	if r.ClearCustomChips && len(r.CustomChips) == 0 {
-		type clearPayload struct {
-			TraceID       string   `json:"traceId"`
-			Username      string   `json:"username"`
-			Currency      string   `json:"currency"`
-			Action        string   `json:"action,omitempty"`
-			MinBet        *string  `json:"minBet,omitempty"`
-			MaxBet        *string  `json:"maxBet,omitempty"`
-			MaxTableRound *string  `json:"maxTableRound,omitempty"`
-			MaxUserDay    *string  `json:"maxUserDay,omitempty"`
-			MaxLossPerDay *string  `json:"maxLossPerDay,omitempty"`
-			CustomChips   []string `json:"customChips"`
-		}
-		return marshalNoEscapeHTML(clearPayload{
-			TraceID:       r.TraceID,
-			Username:      r.Username,
-			Currency:      r.Currency,
-			Action:        r.Action,
-			MinBet:        r.MinBet,
-			MaxBet:        r.MaxBet,
-			MaxTableRound: r.MaxTableRound,
-			MaxUserDay:    r.MaxUserDay,
-			MaxLossPerDay: r.MaxLossPerDay,
-			CustomChips:   []string{},
-		})
+	clearCustom := r.ClearCustomChips && len(r.CustomChips) == 0
+	clearMin := r.ClearMinBet && r.MinBet == nil
+	clearMax := r.ClearMaxBet && r.MaxBet == nil
+	clearTableRound := r.ClearMaxTableRound && r.MaxTableRound == nil
+	clearUserDay := r.ClearMaxUserDay && r.MaxUserDay == nil
+	clearLossDay := r.ClearMaxLossPerDay && r.MaxLossPerDay == nil
+	if !clearCustom && !clearMin && !clearMax && !clearTableRound && !clearUserDay && !clearLossDay {
+		type alias UpdatePlayerLimitsRequest
+		return marshalNoEscapeHTML(alias(r))
 	}
-	type alias UpdatePlayerLimitsRequest
-	return marshalNoEscapeHTML(alias(r))
+	m := map[string]any{
+		"traceId":  r.TraceID,
+		"username": r.Username,
+		"currency": r.Currency,
+	}
+	if r.Action != "" {
+		m["action"] = r.Action
+	}
+	if r.MinBet != nil {
+		m["minBet"] = *r.MinBet
+	} else if clearMin {
+		m["minBet"] = nil
+	}
+	if r.MaxBet != nil {
+		m["maxBet"] = *r.MaxBet
+	} else if clearMax {
+		m["maxBet"] = nil
+	}
+	if r.MaxTableRound != nil {
+		m["maxTableRound"] = *r.MaxTableRound
+	} else if clearTableRound {
+		m["maxTableRound"] = nil
+	}
+	if r.MaxUserDay != nil {
+		m["maxUserDay"] = *r.MaxUserDay
+	} else if clearUserDay {
+		m["maxUserDay"] = nil
+	}
+	if r.MaxLossPerDay != nil {
+		m["maxLossPerDay"] = *r.MaxLossPerDay
+	} else if clearLossDay {
+		m["maxLossPerDay"] = nil
+	}
+	if len(r.CustomChips) > 0 {
+		m["customChips"] = r.CustomChips
+	} else if clearCustom {
+		m["customChips"] = []string{}
+	}
+	return marshalNoEscapeHTML(m)
 }
 
 func (c *Client) UpdatePlayerLimits(ctx context.Context, req UpdatePlayerLimitsRequest) (map[string]any, string, error) {
@@ -984,6 +1038,31 @@ type WalletResponse struct {
 	Data    *WalletResponseData `json:"data,omitempty"`
 }
 
+func WalletOK(traceID, username, currency, balance string, timestamp int64) WalletResponse {
+	ts := timestamp
+	if ts <= 0 {
+		ts = time.Now().UnixMilli()
+	}
+	return WalletResponse{
+		TraceID: traceID,
+		Status:  SC_OK,
+		Data: &WalletResponseData{
+			Username:  username,
+			Currency:  currency,
+			Balance:   balance,
+			Timestamp: ts,
+		},
+	}
+}
+
+func WalletError(traceID, status, message string) WalletResponse {
+	return WalletResponse{
+		TraceID: traceID,
+		Status:  status,
+		Message: message,
+	}
+}
+
 type WalletAdjustmentHandler interface {
 	OnAdjustment(ctx context.Context, req WalletAdjustmentRequest) WalletResponse
 }
@@ -1078,16 +1157,7 @@ func (w *InMemoryWallet) SetDisabled(username string, disabled bool) {
 
 func (w *InMemoryWallet) okResp(traceID, username string, a *walletAcct) WalletResponse {
 	bal, _ := LedgerUnitsToDecimal(a.units, a.exponent)
-	return WalletResponse{
-		TraceID: traceID,
-		Status:  SC_OK,
-		Data: &WalletResponseData{
-			Username:  username,
-			Currency:  a.currency,
-			Balance:   bal,
-			Timestamp: time.Now().UnixMilli(),
-		},
-	}
+	return WalletOK(traceID, username, a.currency, bal, 0)
 }
 
 func (w *InMemoryWallet) OnBalance(_ context.Context, req WalletBalanceRequest) WalletResponse {
@@ -1333,7 +1403,7 @@ func extractTraceHint(rawBody []byte) string {
 	return ""
 }
 
-func (d *WebhookDispatcher) HandleRaw(ctx context.Context, routePath, apiKeyHeader, sigHeader string, rawBody []byte) WalletResponse {
+func (d *WebhookDispatcher) HandleRaw(ctx context.Context, routePath, apiKeyHeader, sigHeader string, rawBody []byte) (resp WalletResponse) {
 	if len(rawBody) > MaxWebhookBodyBytes {
 		return WalletResponse{Status: SC_INVALID_REQUEST, Message: "request body exceeds 1 MiB limit"}
 	}
@@ -1355,6 +1425,12 @@ func (d *WebhookDispatcher) HandleRaw(ctx context.Context, routePath, apiKeyHead
 	if runes := []rune(traceID); len(runes) > 128 {
 		traceID = string(runes[:128])
 	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			resp = WalletError(traceID, SC_OPERATOR_TIMEOUT, "Temporary wallet handler error")
+		}
+	}()
 
 	clean := strings.TrimRight(strings.SplitN(routePath, "?", 2)[0], "/")
 	switch {

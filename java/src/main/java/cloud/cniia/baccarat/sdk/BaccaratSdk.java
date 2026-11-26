@@ -28,6 +28,7 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -469,10 +470,14 @@ public final class BaccaratSdk {
 
             int statusCode;
             String responseBody;
+            AtomicBoolean cancelled = new AtomicBoolean(false);
             AtomicReference<BoundedBodySubscriber> activeSub = new AtomicReference<>();
             HttpResponse.BodyHandler<byte[]> boundedHandler = responseInfo -> {
                 BoundedBodySubscriber sub = new BoundedBodySubscriber(MAX_HTTP_RESPONSE_BYTES);
                 activeSub.set(sub);
+                if (cancelled.get()) {
+                    sub.cancel();
+                }
                 return sub;
             };
             CompletableFuture<HttpResponse<byte[]>> cf = httpClient.sendAsync(req, boundedHandler);
@@ -482,6 +487,7 @@ public final class BaccaratSdk {
                 byte[] respBytes = resp.body();
                 responseBody = respBytes == null ? "" : new String(respBytes, StandardCharsets.UTF_8);
             } catch (TimeoutException e) {
+                cancelled.set(true);
                 BoundedBodySubscriber sub = activeSub.get();
                 if (sub != null) {
                     sub.cancel();
@@ -489,6 +495,7 @@ public final class BaccaratSdk {
                 cf.cancel(true);
                 throw new SdkException(StatusCode.SC_OPERATOR_TIMEOUT, "Request timed out after " + config.timeoutMs + "ms");
             } catch (InterruptedException e) {
+                cancelled.set(true);
                 BoundedBodySubscriber sub = activeSub.get();
                 if (sub != null) {
                     sub.cancel();
@@ -511,8 +518,9 @@ public final class BaccaratSdk {
                 throw new ApiException(fallbackStatusForHttp(statusCode), "Non-JSON HTTP " + statusCode, traceId, null, statusCode);
             }
 
-            String respStatus = str(parsed, "status").trim();
-            String effTrace = str(parsed, "traceId").isEmpty() ? traceId : str(parsed, "traceId");
+            String respStatus = parsed.get("status") instanceof String s ? s.trim() : "";
+            String parsedTrace = parsed.get("traceId") instanceof String t ? t.trim() : "";
+            String effTrace = parsedTrace.isEmpty() ? traceId : parsedTrace;
             if (statusCode != 200 || !StatusCode.SC_OK.equals(respStatus)) {
                 Map<String, String> valMap = null;
                 if (parsed.get("validation") instanceof Map<?, ?> vm) {
@@ -693,6 +701,34 @@ public final class BaccaratSdk {
         }
     }
 
+    public static Map<String, Object> walletOk(String traceId, String username, String currency, String balance) {
+        return walletOk(traceId, username, currency, balance, System.currentTimeMillis());
+    }
+
+    public static Map<String, Object> walletOk(String traceId, String username, String currency, String balance, long timestamp) {
+        long ts = timestamp > 0L ? timestamp : System.currentTimeMillis();
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("username", username == null ? "" : username);
+        data.put("currency", currency == null ? "" : currency);
+        data.put("balance", balance == null ? "" : balance);
+        data.put("timestamp", ts);
+        Map<String, Object> r = new LinkedHashMap<>();
+        r.put("traceId", traceId == null ? "" : traceId);
+        r.put("status", StatusCode.SC_OK);
+        r.put("data", data);
+        return r;
+    }
+
+    public static Map<String, Object> walletError(String traceId, String status, String message) {
+        Map<String, Object> r = new LinkedHashMap<>();
+        r.put("traceId", traceId == null ? "" : traceId);
+        r.put("status", status == null ? StatusCode.SC_INVALID_REQUEST : status);
+        if (message != null && !message.isEmpty()) {
+            r.put("message", message);
+        }
+        return r;
+    }
+
     private static Map<String, Object> makeErrEnvelope(String traceId, String status, String msg) {
         Map<String, Object> r = new LinkedHashMap<>();
         r.put("traceId", traceId == null ? "" : traceId);
@@ -749,16 +785,7 @@ public final class BaccaratSdk {
         }
 
         private Map<String, Object> okResp(String traceId, String username, Acct a) {
-            Map<String, Object> data = new LinkedHashMap<>();
-            data.put("username", username);
-            data.put("currency", a.currency);
-            data.put("balance", ledgerUnitsToDecimal(a.units, a.exponent));
-            data.put("timestamp", System.currentTimeMillis());
-            Map<String, Object> r = new LinkedHashMap<>();
-            r.put("traceId", traceId);
-            r.put("status", StatusCode.SC_OK);
-            r.put("data", data);
-            return r;
+            return walletOk(traceId, username, a.currency, ledgerUnitsToDecimal(a.units, a.exponent));
         }
 
         @Override
@@ -1022,7 +1049,7 @@ public final class BaccaratSdk {
                 String st = (e.code != null && e.code.startsWith("SC_")) ? e.code : StatusCode.SC_INVALID_REQUEST;
                 return makeErrEnvelope(traceId, st, e.getMessage());
             } catch (RuntimeException e) {
-                return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "Wallet handler error");
+                return makeErrEnvelope(traceId, StatusCode.SC_OPERATOR_TIMEOUT, "Temporary wallet handler error");
             }
         }
     }

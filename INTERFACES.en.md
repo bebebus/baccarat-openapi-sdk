@@ -1,6 +1,6 @@
 > [中文](./INTERFACES.md) | English
 
-# B2B Operator Seamless Wallet Endpoints & Status Codes (v1.5.4)
+# B2B Operator Seamless Wallet Endpoints & Status Codes (v1.5.5)
 
 Interactive Explorer & OpenAPI 3.1 Spec: `https://openapi.lt.cniia.cloud`
 
@@ -25,9 +25,15 @@ Every SDK ships a framework-agnostic `WebhookDispatcher` and `InMemoryWallet` re
 
 1. **`POST /wallet/balance`** — Read-only balance check (`SC_OK` + `data.balance`).
 2. **`POST /wallet/bet`** — Idempotent stake deduction by `transactionId = bet_<32hex>`.
-3. **`POST /wallet/bet_result`** — Per-ticket settlement by `transactionId = stl_<32hex>` (`WIN` = stake + netPayout; Tie `PUSH` also sends `resultType = "WIN"` with `winAmount = betAmount`, `winLoss = "0.00"`, `effectiveTurnover = "0.00"`; `LOSE` = `"0.00"`; honor settled tickets even if player session expired).
+3. **`POST /wallet/bet_result`** — Per-ticket settlement by `transactionId = stl_<32hex>` (`WIN` = stake + netPayout; Tie `PUSH` also sends `resultType = "WIN"` with `winAmount = betAmount`, `winLoss = "0.00"` or `"0"` for 0-decimal currencies like `JPY`, `effectiveTurnover = "0.00"` / `"0"`; `LOSE` = `"0.00"` / `"0"` — **never compare zero with `=== "0.00"`**; in multi-bet rounds **`isEndRound: 1` is sent on EVERY ticket** so never finalize round state on the first ticket; honor settled tickets even if player session expired).
 4. **`POST /wallet/rollback`** — Void/late-close refund by `transactionId = rb_<betId>` or `late_<betTxId>` (returns `SC_TRANSACTION_NOT_EXISTS` empty-success when original `betId` was never debited).
 5. **`POST /wallet/adjustment`** — Post-settlement recalculation or appeal delta adjustment by `transactionId = adj_<ref>` (`CREDIT` or `DEBIT`; returns `SC_INSUFFICIENT_FUNDS` on `DEBIT` shortfall without infinite retries).
+
+> **4 Critical Production Webhook Invariants**:
+> 1. **4-way concurrent delivery (NOT serialized per player)**: The platform dispatches up to 4 concurrent `/wallet/*` callbacks per operator and does not serialize requests per player. Guard balance updates with per-player DB row locks (`SELECT ... FOR UPDATE`) or atomic `UPDATE ... SET balance = balance + delta` plus `UNIQUE(transaction_id)`.
+> 2. **`isEndRound: 1` on EVERY ticket in multi-bet rounds**: Do not finalize or close round-level state on the first `isEndRound: 1` callback; settle strictly per `betId` / `transactionId`.
+> 3. **Terminal HTTP/JSON traps & `~5.07h` retry horizon (1 initial + 12 auto-retries)**: Returning `HTTP 200` with a non-JSON body, or a non-2xx JSON response without a transient `SC_*` status, immediately parks `/wallet/bet_result` winning tickets in `HELD` with **0 retries**. All 7 SDK `WebhookDispatcher` implementations automatically convert unexpected runtime/DB exceptions (e.g. Postgres `40P01` deadlocks) into retryable `SC_OPERATOR_TIMEOUT` with a sanitized message.
+> 4. **0-decimal currencies format zero as `"0"`**: Currencies such as `JPY`, `KRW`, and `VND` emit `"0"` instead of `"0.00"`; compare amounts using exact decimal / ledger-unit math, never `=== "0.00"`.
 
 ## 3. Retryability Rule
 

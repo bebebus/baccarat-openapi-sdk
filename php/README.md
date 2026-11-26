@@ -5,11 +5,11 @@
 ## 安装与单测
 
 ```bash
-git clone --branch v1.5.4 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
+git clone --branch v1.5.5 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
 cd baccarat-openapi-sdk/php && php tests/run.php
 ```
 
-在项目 `composer.json` 中使用 `path` 仓库引入（本 SDK 未发布至 Packagist；若直接拷贝/vendor `php/` 目录且不包含 `.git` 目录，请在 `php/composer.json` 中补充 `"version": "1.5.4"` 字段，以便 Composer 解析版本约束）：
+在项目 `composer.json` 中使用 `path` 仓库引入（本 SDK 未发布至 Packagist；若直接拷贝/vendor `php/` 目录且不包含 `.git` 目录，请在 `php/composer.json` 中补充 `"version": "1.5.5"` 字段，以便 Composer 解析版本约束）：
 
 ```json
 {
@@ -71,18 +71,18 @@ echo $res['data']['gameUrl'] . PHP_EOL;
 declare(strict_types=1);
 require __DIR__ . '/vendor/autoload.php'; // 独立克隆使用：require __DIR__ . '/autoload.php';
 
-use Bebebus\BaccaratSdk\StatusCode;
 use Bebebus\BaccaratSdk\WalletAdjustmentHandlerInterface;
 use Bebebus\BaccaratSdk\WalletHandlerInterface;
+use Bebebus\BaccaratSdk\WalletResponse;
 use Bebebus\BaccaratSdk\WebhookDispatcher;
 
 final class DbWalletHandler implements WalletHandlerInterface, WalletAdjustmentHandlerInterface
 {
-    public function onBalance(array $req): array { /* 查询数据库只读余额 */ return ['traceId' => $req['traceId'] ?? '', 'status' => StatusCode::SC_OK, 'data' => ['username' => $req['username'], 'currency' => $req['currency'], 'balance' => '1000.00', 'timestamp' => (int) floor(microtime(true) * 1000)]]; }
-    public function onBet(array $req): array { /* 按 transactionId 幂等扣款 */ return $this->onBalance($req); }
-    public function onBetResult(array $req): array { /* 按 transactionId 幂等派彩（忽略会话过期） */ return $this->onBalance($req); }
-    public function onRollback(array $req): array { /* 按 transactionId 冲正（未扣成返回 SC_TRANSACTION_NOT_EXISTS） */ return $this->onBalance($req); }
-    public function onAdjustment(array $req): array { /* 按 transactionId 幂等执行 CREDIT/DEBIT 调账 */ return $this->onBalance($req); }
+    public function onBalance(array $req): array { /* 查询数据库只读余额 */ return WalletResponse::ok((string) ($req['traceId'] ?? ''), (string) $req['username'], (string) $req['currency'], '1000.00'); }
+    public function onBet(array $req): array { /* 按 transactionId 幂等扣款 */ return WalletResponse::ok((string) ($req['traceId'] ?? ''), (string) $req['username'], (string) $req['currency'], '900.00'); }
+    public function onBetResult(array $req): array { /* 按 transactionId 幂等派彩（忽略会话过期） */ return WalletResponse::ok((string) ($req['traceId'] ?? ''), (string) $req['username'], (string) $req['currency'], '1100.00'); }
+    public function onRollback(array $req): array { /* 按 transactionId 冲正（未扣成返回 SC_TRANSACTION_NOT_EXISTS） */ return WalletResponse::ok((string) ($req['traceId'] ?? ''), (string) $req['username'], (string) $req['currency'], '1000.00'); }
+    public function onAdjustment(array $req): array { /* 按 transactionId 幂等执行 CREDIT/DEBIT 调账 */ return WalletResponse::ok((string) ($req['traceId'] ?? ''), (string) $req['username'], (string) $req['currency'], '1020.00'); }
 }
 
 $rawBody = (string) file_get_contents('php://input');
@@ -101,3 +101,10 @@ http_response_code($out['statusCode']);
 header('Content-Type: application/json');
 echo json_encode($out['body'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 ```
+
+### 生产回调 4 项强制不变量
+
+1. **4 路并发（不按玩家串行）**：平台按单商户最多 4 路并发推送回调，请对玩家钱包行使用 `SELECT ... FOR UPDATE` 或原子 `UPDATE ... SET balance = balance + delta` + `UNIQUE(transaction_id)`。
+2. **多注同局每张注单均带 `isEndRound: 1`**：切勿收到首张 `isEndRound: 1` 即终结局级状态，必须按 `betId` / `transactionId` 逐票入账。
+3. **终态拦截与 `~5.07h` 重试窗口**：返回 `HTTP 200` 非 JSON 或无瞬态 `SC_*` 的非 2xx JSON 会使 `/wallet/bet_result` 立即挂起 `HELD` 且 0 次重试；瞬态错误按 **1 次首次 + 12 次自动重试（约 `5.07h`）** 退避重试（`WebhookDispatcher` 已自动将未捕获 `\Throwable` 映射为 `SC_OPERATOR_TIMEOUT`）。
+4. **0 位小数币种（如 `JPY`）零值为 `"0"`**：切勿用 `=== '0.00'` 判零，请使用 `Money::decimalToLedgerUnits(...) === '0'`。

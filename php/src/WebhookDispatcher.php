@@ -124,7 +124,7 @@ final class WebhookDispatcher
         } catch (\Throwable $e) {
             return [
                 'statusCode' => 200,
-                'body' => ['traceId' => $traceId, 'status' => StatusCode::SC_INVALID_REQUEST, 'message' => 'Wallet handler error'],
+                'body' => ['traceId' => $traceId, 'status' => StatusCode::SC_OPERATOR_TIMEOUT, 'message' => 'Temporary wallet handler error'],
             ];
         }
     }

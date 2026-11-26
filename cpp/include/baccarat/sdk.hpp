@@ -138,6 +138,19 @@ private:
 };
 
 // 5. Seamless Wallet Pluggable WalletHandler, WebhookDispatcher & InMemoryWallet
+Json wallet_ok(
+    const std::string& trace_id,
+    const std::string& username,
+    const std::string& currency,
+    const std::string& balance,
+    int64_t timestamp_ms = 0
+);
+Json wallet_error(
+    const std::string& trace_id,
+    const std::string& status,
+    const std::string& message = ""
+);
+
 class WalletHandler {
 public:
     virtual ~WalletHandler() = default;

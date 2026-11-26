@@ -9,7 +9,7 @@
 - 引入方式（本 SDK 通过 Git 仓库分发，未发布至 npm 公共注册表）：
 
 ```bash
-git clone --branch v1.5.4 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
+git clone --branch v1.5.5 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
 npm install ./baccarat-openapi-sdk/nodejs
 ```
 
@@ -49,7 +49,7 @@ console.log(data.gameUrl, data.token);
 
 ```js
 import express from 'express';
-import { StatusCode, WebhookDispatcher } from '@bebebus/baccarat-openapi-sdk';
+import { WebhookDispatcher, walletOk } from '@bebebus/baccarat-openapi-sdk';
 
 const app = express();
 
@@ -57,23 +57,23 @@ const app = express();
 const dbWallet = {
   async onBalance(req) {
     // 1. 查询数据库玩家余额（只读）
-    return { traceId: req.traceId, status: StatusCode.SC_OK, data: { username: req.username, currency: req.currency, balance: '1000.00', timestamp: Date.now() } };
+    return walletOk(req.traceId, req.username, req.currency, '1000.00');
   },
   async onBet(req) {
     // 2. 按 transactionId 唯一索引幂等扣款（同键重放返回 SC_OK + 最新余额；冲突返回 SC_TRANSACTION_DUPLICATED）
-    return { traceId: req.traceId, status: StatusCode.SC_OK, data: { username: req.username, currency: req.currency, balance: '900.00', timestamp: Date.now() } };
+    return walletOk(req.traceId, req.username, req.currency, '900.00');
   },
   async onBetResult(req) {
     // 3. 按 transactionId 幂等派彩（会话过期/停用仍须放行已扣款 betId 结算）
-    return { traceId: req.traceId, status: StatusCode.SC_OK, data: { username: req.username, currency: req.currency, balance: '1100.00', timestamp: Date.now() } };
+    return walletOk(req.traceId, req.username, req.currency, '1100.00');
   },
   async onRollback(req) {
     // 4. 按 transactionId 冲正（原 betId 从未扣成返回 SC_TRANSACTION_NOT_EXISTS）
-    return { traceId: req.traceId, status: StatusCode.SC_OK, data: { username: req.username, currency: req.currency, balance: '1000.00', timestamp: Date.now() } };
+    return walletOk(req.traceId, req.username, req.currency, '1000.00');
   },
   async onAdjustment(req) {
     // 5. 赛后重算/申诉补差（direction: CREDIT | DEBIT，按 transactionId 幂等）
-    return { traceId: req.traceId, status: StatusCode.SC_OK, data: { username: req.username, currency: req.currency, balance: '1020.00', timestamp: Date.now() } };
+    return walletOk(req.traceId, req.username, req.currency, '1020.00');
   },
 };
 
@@ -93,3 +93,10 @@ app.post('/wallet/:action', express.raw({ type: '*/*' }), async (req, res) => {
   res.status(statusCode).json(body);
 });
 ```
+
+### 生产回调 4 项强制不变量
+
+1. **4 路并发（不按玩家串行）**：平台按单商户最多 4 路并发推送回调，请对玩家钱包行使用 `SELECT ... FOR UPDATE` 或原子 `UPDATE ... SET balance = balance + delta` 配合 `UNIQUE(transaction_id)`。
+2. **多注同局每张注单均带 `isEndRound: 1`**：切勿收到首张 `isEndRound: 1` 即终结局级状态，必须按 `betId` / `transactionId` 逐票入账。
+3. **终态拦截与 `~5.07h` 重试窗口**：返回 `HTTP 200` 非 JSON 或无瞬态 `SC_*` 的非 2xx JSON 会使 `/wallet/bet_result` 立即挂起 `HELD` 且 0 次重试；瞬态错误按 **1 次首次 + 12 次自动重试（约 `5.07h`）** 退避重试（`WebhookDispatcher` 已自动将未捕获异常映射为 `SC_OPERATOR_TIMEOUT`）。
+4. **0 位小数币种（如 `JPY`）零值为 `"0"`**：切勿用 `=== "0.00"` 判零，请使用 `decimalToLedgerUnits(...) === 0n`。

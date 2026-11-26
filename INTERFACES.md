@@ -1,6 +1,6 @@
 > 中文 | [English](./INTERFACES.en.md)
 
-# B2B 运营商单一无缝钱包接口与状态码字典（v1.5.4）
+# B2B 运营商单一无缝钱包接口与状态码字典（v1.5.5）
 
 在线交互式文档与 OpenAPI 3.1 规范：`https://openapi.lt.cniia.cloud`
 
@@ -33,9 +33,15 @@
 | --- | --- | --- | --- |
 | `POST /wallet/balance` | 只读查询（无 `transactionId`） | 核对 `token` 与 `currency`，不改余额 | `SC_OK` + `data: { balance, currency, username, timestamp }` |
 | `POST /wallet/bet` | `bet_<32hex>` | 按 `transactionId` 幂等扣除 `amount`；余额不足回 `SC_INSUFFICIENT_FUNDS` | `SC_OK` + 最新 `balance` |
-| `POST /wallet/bet_result` | `stl_<32hex>` | 逐票结算加款 `winAmount`（`WIN` 为本金+净赢，和局 `PUSH` 同样传 `resultType = "WIN"`、`winAmount = betAmount`、`winLoss = "0.00"`、`effectiveTurnover = "0.00"`，`LOSE` 传 `resultType = "LOSE"`、`winAmount = "0.00"`）；**即使玩家会话已过期/被踢也必须放行已扣款注单入账** | `SC_OK` + 最新 `balance` |
+| `POST /wallet/bet_result` | `stl_<32hex>` | 逐票结算加款 `winAmount`（`WIN` 为本金+净赢，和局 `PUSH` 同样传 `resultType = "WIN"`、`winAmount = betAmount`、`winLoss = "0.00"` 或 0 位小数币种如 `JPY` 为 `"0"`、`effectiveTurnover = "0.00"` / `"0"`，`LOSE` 传 `resultType = "LOSE"`、`winAmount = "0.00"` / `"0"`，**切勿使用 `=== "0.00"` 字符串判零**）；多注同一局中**每张注单均携带 `isEndRound: 1`**（严禁收到首票即锁定或关闭局级状态）；**即使玩家会话已过期/被踢也必须放行已扣款注单入账** | `SC_OK` + 最新 `balance` |
 | `POST /wallet/rollback` | `rb_<betId>` 或 `late_<betTxId>` | 冲回原注 `amount`；**若原 `betId` 在商户侧从未扣款成功，返回 `SC_TRANSACTION_NOT_EXISTS` 即按空成功收敛** | `SC_OK` + 最新 `balance`，或 `SC_TRANSACTION_NOT_EXISTS` |
 | `POST /wallet/adjustment` | `adj_<ref>` | 赛后错牌重算或四眼申诉裁决差额调账（`CREDIT` 加款 / `DEBIT` 扣款）；`DEBIT` 余额不足回 `SC_INSUFFICIENT_FUNDS` 终态失败不死循环 | `SC_OK` + 最新 `balance` |
+
+> **生产回调 4 项强制不变量（必读）**：
+> 1. **4 路并发回调（不按玩家串行）**：平台按单商户最多 4 路并发推送 `/wallet/*` 回调，同一玩家的多次下注/派彩可能同时抵达。商户数据库层务必对玩家钱包行加行锁（`SELECT ... FOR UPDATE`）或使用原子扣加款 `UPDATE ... SET balance = balance + delta` 配合 `UNIQUE(transaction_id)` 幂等索引。
+> 2. **多注同局每票均带 `isEndRound: 1`**：单局同时押多个注区时，每条 `/wallet/bet_result` 都会传 `isEndRound: 1`；请严格按 `betId` / `transactionId` 逐票入账，切勿以首票 `isEndRound: 1` 提前终结整局状态。
+> 3. **终态拦截 vs 约 `5.07h` 自动重试窗口（1 次首次 + 12 次自动重试）**：返回 `HTTP 200` 非 JSON 响应体，或返回非 2xx JSON 但未携带可重试状态码（`SC_OPERATOR_TIMEOUT`、`SC_TRANSACTION_STILL_PROCESSING`、`SC_RATE_LIMITED`；结算/冲正/调账亦包含 `SC_UNDER_MAINTENANCE`），均视为终态失败——在 `/wallet/bet_result` 上会**立即将中奖注单挂起为 `HELD` 且 0 次重试**。本 SDK 的 `WebhookDispatcher` 已自动将未捕获的运行时/数据库异常（如锁冲突死锁）映射为可重试的 `SC_OPERATOR_TIMEOUT` 且不泄露原始异常堆栈。
+> 4. **0 位小数币种零值格式为 `"0"`**：如 `JPY`、`KRW`、`VND` 等 0 位小数币种的零金额序列化为 `"0"` 而非 `"0.00"`；比较金额务必通过十进制数值或 `decimalToLedgerUnits` 账本整数单位，严禁 `=== "0.00"`。
 
 ## 3. 18 项标准状态码（`SC_*`）
 

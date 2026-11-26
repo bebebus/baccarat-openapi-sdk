@@ -62,6 +62,13 @@ export class BaccaratApiError extends BaccaratSdkError {
   readonly status: OperatorStatusCode | string;
   readonly validation?: Record<string, string>;
   readonly httpStatus: number;
+  constructor(opts: {
+    traceId?: string;
+    status: OperatorStatusCode | string;
+    message?: string;
+    validation?: Record<string, string>;
+    httpStatus?: number;
+  });
   isRetryable(): boolean;
 }
 
@@ -85,6 +92,11 @@ export class Config {
 export class Client {
   readonly config: Config;
   constructor(config: Config | ConstructorParameters<typeof Config>[0], opts?: { transport?: Function });
+  postSigned(routePath: string, bodyObj?: Record<string, unknown>): Promise<{
+    traceId: string;
+    status: 'SC_OK';
+    data: unknown;
+  }>;
   ping(params?: { traceId?: string }): Promise<{
     traceId: string;
     status: 'SC_OK';
@@ -202,6 +214,37 @@ export class Client {
     toTime?: number;
   }): Promise<{ traceId: string; status: 'SC_OK'; data: Record<string, unknown> }>;
 }
+
+export interface WalletOkResponse {
+  traceId: string;
+  status: 'SC_OK';
+  data: {
+    username: string;
+    currency: string;
+    balance: string;
+    timestamp: number;
+  };
+}
+
+export interface WalletErrorResponse {
+  traceId: string;
+  status: OperatorStatusCode | string;
+  message?: string;
+}
+
+export function walletOk(
+  traceId: string,
+  username: string,
+  currency: string,
+  balance: string,
+  timestamp?: number,
+): WalletOkResponse;
+
+export function walletError(
+  traceId: string,
+  status: OperatorStatusCode | string,
+  message?: string,
+): WalletErrorResponse;
 
 export interface WalletHandler {
   onBalance(req: Record<string, unknown>): Promise<Record<string, unknown>> | Record<string, unknown>;

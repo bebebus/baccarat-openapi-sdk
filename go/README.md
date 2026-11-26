@@ -5,7 +5,7 @@
 ## 安装与单测
 
 ```bash
-go get github.com/bebebus/baccarat-openapi-sdk/go@v1.5.4
+go get github.com/bebebus/baccarat-openapi-sdk/go@v1.5.5
 cd go && go test -v -count=1 ./...
 ```
 
@@ -20,7 +20,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"time"
 
 	baccarat "github.com/bebebus/baccarat-openapi-sdk/go"
 )
@@ -29,26 +28,23 @@ import (
 type dbWallet struct{}
 
 func (w *dbWallet) OnBalance(_ context.Context, req baccarat.WalletBalanceRequest) baccarat.WalletResponse {
-	return baccarat.WalletResponse{
-		TraceID: req.TraceID, Status: baccarat.SC_OK,
-		Data: &baccarat.WalletResponseData{Username: req.Username, Currency: req.Currency, Balance: "1000.00", Timestamp: time.Now().UnixMilli()},
-	}
+	return baccarat.WalletOK(req.TraceID, req.Username, req.Currency, "1000.00", 0)
 }
-func (w *dbWallet) OnBet(ctx context.Context, req baccarat.WalletBetRequest) baccarat.WalletResponse {
+func (w *dbWallet) OnBet(_ context.Context, req baccarat.WalletBetRequest) baccarat.WalletResponse {
 	// 按 req.TransactionID 唯一索引幂等扣款；req.TableID / req.BetSide 为附加上下文
-	return w.OnBalance(ctx, baccarat.WalletBalanceRequest{TraceID: req.TraceID, Username: req.Username, Currency: req.Currency})
+	return baccarat.WalletOK(req.TraceID, req.Username, req.Currency, "900.00", 0)
 }
-func (w *dbWallet) OnBetResult(ctx context.Context, req baccarat.WalletBetResultRequest) baccarat.WalletResponse {
+func (w *dbWallet) OnBetResult(_ context.Context, req baccarat.WalletBetResultRequest) baccarat.WalletResponse {
 	// 已扣款 betId 即使玩家会话超时也必须放行结算
-	return w.OnBalance(ctx, baccarat.WalletBalanceRequest{TraceID: req.TraceID, Username: req.Username, Currency: req.Currency})
+	return baccarat.WalletOK(req.TraceID, req.Username, req.Currency, "1100.00", 0)
 }
-func (w *dbWallet) OnRollback(ctx context.Context, req baccarat.WalletRollbackRequest) baccarat.WalletResponse {
-	// 原 betId 未扣成时返回 SC_TRANSACTION_NOT_EXISTS 空成功
-	return w.OnBalance(ctx, baccarat.WalletBalanceRequest{TraceID: req.TraceID, Username: req.Username, Currency: req.Currency})
+func (w *dbWallet) OnRollback(_ context.Context, req baccarat.WalletRollbackRequest) baccarat.WalletResponse {
+	// 原 betId 未扣成时返回 baccarat.WalletError(req.TraceID, baccarat.SC_TRANSACTION_NOT_EXISTS, "never deducted")
+	return baccarat.WalletOK(req.TraceID, req.Username, req.Currency, "1000.00", 0)
 }
-func (w *dbWallet) OnAdjustment(ctx context.Context, req baccarat.WalletAdjustmentRequest) baccarat.WalletResponse {
+func (w *dbWallet) OnAdjustment(_ context.Context, req baccarat.WalletAdjustmentRequest) baccarat.WalletResponse {
 	// 处理 POST /wallet/adjustment（CREDIT 加款 / DEBIT 扣款）
-	return w.OnBalance(ctx, baccarat.WalletBalanceRequest{TraceID: req.TraceID, Username: req.Username, Currency: req.Currency})
+	return baccarat.WalletOK(req.TraceID, req.Username, req.Currency, "1020.00", 0)
 }
 
 func main() {
@@ -105,3 +101,12 @@ func main() {
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 ```
+
+### 生产回调 4 项强制不变量
+
+1. **4 路并发（不按玩家串行）**：平台按单商户最多 4 路并发推送回调，请对玩家钱包行使用 `SELECT ... FOR UPDATE` 或原子 `UPDATE ... SET balance = balance + delta` + `UNIQUE(transaction_id)`。
+2. **多注同局每张注单均带 `isEndRound: 1`**：切勿收到首张 `isEndRound: 1` 即终结局级状态，必须按 `betId` / `transactionId` 逐票入账。
+3. **终态拦截与 `~5.07h` 重试窗口**：返回 `HTTP 200` 非 JSON 或无瞬态 `SC_*` 的非 2xx JSON 会使 `/wallet/bet_result` 立即挂起 `HELD` 且 0 次重试；瞬态错误按 **1 次首次 + 12 次自动重试（约 `5.07h`）** 退避重试（`WebhookDispatcher` 已内置 `recover()`，将未捕获 panic 映射为 `SC_OPERATOR_TIMEOUT`）。
+4. **0 位小数币种（如 `JPY`）零值为 `"0"`**：切勿用 `== "0.00"` 判零，请使用 `DecimalToLedgerUnits` 比较。
+
+> **单字段清空说明**：在 `UpdatePlayerStatusRequest` 上设置 `ClearReason: true` 或在 `UpdatePlayerLimitsRequest` 上设置 `ClearMinBet` / `ClearMaxBet` / `ClearMaxTableRound` / `ClearMaxUserDay` / `ClearMaxLossPerDay` 可显式输出 JSON `null`（`ClearCustomChips: true` 输出 `[]`）以清空单个字段。

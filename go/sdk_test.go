@@ -560,3 +560,103 @@ func TestS2SClientAndWebhookHTTPServer(t *testing.T) {
 		t.Fatalf("WalletBetResultRequest v1.3.0+ context fields failed: %+v err=%v", stlCtx, err)
 	}
 }
+
+type panickingWallet struct {
+	InMemoryWallet
+}
+
+func (p *panickingWallet) OnBetResult(_ context.Context, _ WalletBetResultRequest) WalletResponse {
+	panic("ERROR: deadlock detected (40P01) on table wallets")
+}
+
+func TestV155NullClearingBuildersAndPanicSafety(t *testing.T) {
+	// 1. UpdatePlayerStatusRequest ClearReason emits explicit "reason": null
+	statusOmit, err := json.Marshal(UpdatePlayerStatusRequest{TraceID: "t1", Username: "p1", Action: "SET"})
+	if err != nil {
+		t.Fatalf("marshal statusOmit: %v", err)
+	}
+	var mStatusOmit map[string]any
+	_ = json.Unmarshal(statusOmit, &mStatusOmit)
+	if _, exists := mStatusOmit["reason"]; exists {
+		t.Fatalf("expected reason omitted, got %s", string(statusOmit))
+	}
+	statusClear, err := json.Marshal(UpdatePlayerStatusRequest{TraceID: "t2", Username: "p1", Action: "SET", ClearReason: true})
+	if err != nil {
+		t.Fatalf("marshal statusClear: %v", err)
+	}
+	var mStatusClear map[string]any
+	_ = json.Unmarshal(statusClear, &mStatusClear)
+	if val, exists := mStatusClear["reason"]; !exists || val != nil {
+		t.Fatalf("expected explicit reason:null, got %s", string(statusClear))
+	}
+
+	// 2. UpdatePlayerLimitsRequest Clear* flags emit explicit JSON null for individual fields
+	minBet := "10.00"
+	limClear, err := json.Marshal(UpdatePlayerLimitsRequest{
+		TraceID:            "t3",
+		Username:           "p1",
+		Currency:           "USD",
+		Action:             "SET",
+		MinBet:             &minBet,
+		ClearMaxBet:        true,
+		ClearMaxTableRound: true,
+		ClearMaxUserDay:    true,
+		ClearMaxLossPerDay: true,
+		ClearCustomChips:   true,
+	})
+	if err != nil {
+		t.Fatalf("marshal limClear: %v", err)
+	}
+	var mLim map[string]any
+	_ = json.Unmarshal(limClear, &mLim)
+	if mLim["minBet"] != "10.00" {
+		t.Fatalf("expected minBet=10.00, got %s", string(limClear))
+	}
+	for _, k := range []string{"maxBet", "maxTableRound", "maxUserDay", "maxLossPerDay"} {
+		if val, exists := mLim[k]; !exists || val != nil {
+			t.Fatalf("expected %s:null, got %s", k, string(limClear))
+		}
+	}
+	if chips, ok := mLim["customChips"].([]any); !ok || len(chips) != 0 {
+		t.Fatalf("expected customChips:[], got %s", string(limClear))
+	}
+	limClearMin, err := json.Marshal(UpdatePlayerLimitsRequest{
+		TraceID: "t4", Username: "p1", Currency: "USD", Action: "SET", ClearMinBet: true,
+	})
+	if err != nil {
+		t.Fatalf("marshal limClearMin: %v", err)
+	}
+	var mLimMin map[string]any
+	_ = json.Unmarshal(limClearMin, &mLimMin)
+	if val, exists := mLimMin["minBet"]; !exists || val != nil {
+		t.Fatalf("expected minBet:null, got %s", string(limClearMin))
+	}
+
+	// 3. WalletOK / WalletError builders
+	okResp := WalletOK("t_ok", "player_1", "JPY", "0", 0)
+	if okResp.Status != SC_OK || okResp.Data == nil || okResp.Data.Balance != "0" || okResp.Data.Timestamp <= 0 {
+		t.Fatalf("WalletOK unexpected: %+v", okResp)
+	}
+	errResp := WalletError("t_err", SC_INSUFFICIENT_FUNDS, "low balance")
+	if errResp.Status != SC_INSUFFICIENT_FUNDS || errResp.Message != "low balance" {
+		t.Fatalf("WalletError unexpected: %+v", errResp)
+	}
+
+	// 4. Panic recovery in WebhookDispatcher.HandleRaw maps to retryable SC_OPERATOR_TIMEOUT without leaking panic payload
+	apiKey := "ak_0123456789abcdef0123456789abcdef"
+	secret := "dGVzdF9zZWNyZXRfNDBfY2hhcnNfYmFzZTY0dXJsX2s"
+	pw := &panickingWallet{}
+	disp, err := NewWebhookDispatcher(apiKey, secret, pw)
+	if err != nil {
+		t.Fatalf("NewWebhookDispatcher: %v", err)
+	}
+	raw := []byte(`{"traceId":"t_go_panic","transactionId":"stl_1","betId":"b1"}`)
+	sig, _ := SignBody(raw, secret)
+	resp := disp.HandleRaw(context.Background(), "/wallet/bet_result", apiKey, sig, raw)
+	if resp.Status != SC_OPERATOR_TIMEOUT || resp.TraceID != "t_go_panic" || resp.Message != "Temporary wallet handler error" {
+		t.Fatalf("expected sanitized SC_OPERATOR_TIMEOUT on panic, got %+v", resp)
+	}
+	if strings.Contains(resp.Message, "40P01") || strings.Contains(resp.Message, "deadlock") {
+		t.Fatalf("panic payload leaked: %q", resp.Message)
+	}
+}

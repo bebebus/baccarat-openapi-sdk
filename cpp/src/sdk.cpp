@@ -262,15 +262,17 @@ std::string sign_body(const std::string& raw_body, const std::string& hmac_secre
     unsigned char md[EVP_MAX_MD_SIZE];
     unsigned int md_len = 0;
     // CRITICAL: Pass raw UTF-8 bytes of hmac_secret directly — NEVER Base64-decode!
-    HMAC(
-        EVP_sha256(),
-        hmac_secret.data(),
-        static_cast<int>(hmac_secret.size()),
-        reinterpret_cast<const unsigned char*>(raw_body.data()),
-        raw_body.size(),
-        md,
-        &md_len
-    );
+    if (!HMAC(
+            EVP_sha256(),
+            hmac_secret.data(),
+            static_cast<int>(hmac_secret.size()),
+            reinterpret_cast<const unsigned char*>(raw_body.data()),
+            raw_body.size(),
+            md,
+            &md_len
+        )) {
+        throw SdkError("CRYPTO_ERROR", "OpenSSL HMAC calculation failed");
+    }
     return to_hex_lower(md, md_len);
 }
 
@@ -491,21 +493,29 @@ Json Client::post_signed(const std::string& route_path, Json payload) const {
     std::string hdr_key = "X-API-Key: " + api_key_;
     std::string hdr_sig = "X-Signature: " + sig;
     std::string hdr_ts;
-    guard.headers = curl_slist_append(guard.headers, "Content-Type: application/json");
-    guard.headers = curl_slist_append(guard.headers, "Accept: application/json");
-    guard.headers = curl_slist_append(guard.headers, hdr_key.c_str());
-    guard.headers = curl_slist_append(guard.headers, hdr_sig.c_str());
+    auto append_header = [&](const char* hdr) {
+        struct curl_slist* next = curl_slist_append(guard.headers, hdr);
+        if (!next) {
+            throw SdkError(StatusCode::SC_OPERATOR_TIMEOUT, "curl_slist_append failed");
+        }
+        guard.headers = next;
+    };
+    append_header("Content-Type: application/json");
+    append_header("Accept: application/json");
+    append_header(hdr_key.c_str());
+    append_header(hdr_sig.c_str());
     if (send_timestamp_) {
         auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()
         ).count();
         hdr_ts = "X-Timestamp: " + std::to_string(now_ms);
-        guard.headers = curl_slist_append(guard.headers, hdr_ts.c_str());
+        append_header(hdr_ts.c_str());
     }
 
     CurlWriteState write_state;
     curl_easy_setopt(guard.curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(guard.curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(guard.curl, CURLOPT_FOLLOWLOCATION, 0L);
     curl_easy_setopt(guard.curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(guard.curl, CURLOPT_HTTPHEADER, guard.headers);
     curl_easy_setopt(guard.curl, CURLOPT_POSTFIELDS, raw_body.data());
@@ -686,6 +696,46 @@ Json Client::get_wallet_transaction_status(Json params) const {
     return post_signed("/operator/v1/wallet/transaction-status", std::move(params));
 }
 
+Json wallet_ok(
+    const std::string& trace_id,
+    const std::string& username,
+    const std::string& currency,
+    const std::string& balance,
+    int64_t timestamp_ms
+) {
+    int64_t ts = timestamp_ms;
+    if (ts <= 0) {
+        ts = static_cast<int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count());
+    }
+    Json data = Json::object();
+    data.set("username", Json(username));
+    data.set("currency", Json(currency));
+    data.set("balance", Json(balance));
+    data.set("timestamp", Json(ts));
+
+    Json r = Json::object();
+    r.set("traceId", Json(trace_id));
+    r.set("status", Json(StatusCode::SC_OK));
+    r.set("data", std::move(data));
+    return r;
+}
+
+Json wallet_error(
+    const std::string& trace_id,
+    const std::string& status,
+    const std::string& message
+) {
+    Json r = Json::object();
+    r.set("traceId", Json(trace_id));
+    r.set("status", Json(status));
+    if (!message.empty()) {
+        r.set("message", Json(message));
+    }
+    return r;
+}
+
 Json WalletHandler::on_adjustment(const Json& req) {
     return make_err_json(req.at("traceId").as_string(), StatusCode::SC_INVALID_REQUEST, "on_adjustment not implemented");
 }
@@ -713,20 +763,7 @@ void InMemoryWallet::set_disabled(const std::string& username, bool disabled) {
 }
 
 Json InMemoryWallet::ok_envelope(const std::string& trace_id, const std::string& username, const Account& acct) const {
-    auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()
-    ).count();
-    Json data = Json::object();
-    data.set("username", Json(username));
-    data.set("currency", Json(acct.currency));
-    data.set("balance", Json(ledger_units_to_decimal(acct.units, acct.exponent)));
-    data.set("timestamp", Json(static_cast<int64_t>(now_ms)));
-
-    Json r = Json::object();
-    r.set("traceId", Json(trace_id));
-    r.set("status", Json(StatusCode::SC_OK));
-    r.set("data", std::move(data));
-    return r;
+    return wallet_ok(trace_id, username, acct.currency, ledger_units_to_decimal(acct.units, acct.exponent));
 }
 
 Json InMemoryWallet::err_envelope(const std::string& trace_id, const std::string& status, const std::string& msg) {
@@ -978,10 +1015,10 @@ Json WebhookDispatcher::handle(
     } catch (const SdkError& e) {
         std::string st = (e.code.rfind("SC_", 0) == 0) ? e.code : StatusCode::SC_INVALID_REQUEST;
         return make_err_json(trace_id, st, e.what());
-    } catch (const std::exception& e) {
-        return make_err_json(trace_id, StatusCode::SC_INVALID_REQUEST, e.what());
+    } catch (const std::exception&) {
+        return make_err_json(trace_id, StatusCode::SC_OPERATOR_TIMEOUT, "Temporary wallet handler error");
     } catch (...) {
-        return make_err_json(trace_id, StatusCode::SC_INVALID_REQUEST, "Wallet handler error");
+        return make_err_json(trace_id, StatusCode::SC_OPERATOR_TIMEOUT, "Temporary wallet handler error");
     }
 }
 

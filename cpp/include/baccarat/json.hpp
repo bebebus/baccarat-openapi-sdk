@@ -6,6 +6,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <iomanip>
+#include <locale>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -169,9 +172,10 @@ private:
             case Type::Int: out += std::to_string(int_val_); break;
             case Type::Double: {
                 if (!std::isfinite(double_val_)) throw std::runtime_error("Non-finite double in JSON");
-                char buf[64];
-                std::snprintf(buf, sizeof(buf), "%.15g", double_val_);
-                out += buf;
+                std::ostringstream oss;
+                oss.imbue(std::locale::classic());
+                oss << std::setprecision(15) << double_val_;
+                out += oss.str();
                 break;
             }
             case Type::String: append_escaped(out, str_val_); break;
@@ -353,8 +357,13 @@ private:
                     if (idx == tok.size()) return Json(static_cast<int64_t>(v));
                 } catch (...) {}
             }
-            double dv = std::stod(tok);
-            if (!std::isfinite(dv)) throw std::runtime_error("Numeric overflow in JSON");
+            std::istringstream iss(tok);
+            iss.imbue(std::locale::classic());
+            double dv = 0.0;
+            iss >> dv;
+            if (iss.fail() || !iss.eof() || !std::isfinite(dv)) {
+                throw std::runtime_error("Numeric overflow in JSON");
+            }
             return Json(dv);
         }
 

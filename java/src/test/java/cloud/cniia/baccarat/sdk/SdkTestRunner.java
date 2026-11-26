@@ -348,6 +348,22 @@ public final class SdkTestRunner {
                     ex.close();
                     return;
                 }
+                if ("p2_num_429".equals(tid)) {
+                    byte[] out = "{\"status\":429,\"message\":\"proxy rate limited\"}".getBytes(StandardCharsets.UTF_8);
+                    ex.getResponseHeaders().set("Content-Type", "application/json");
+                    ex.sendResponseHeaders(429, out.length);
+                    ex.getResponseBody().write(out);
+                    ex.close();
+                    return;
+                }
+                if ("p2_num_503".equals(tid)) {
+                    byte[] out = "{\"status\":503,\"traceId\":12345}".getBytes(StandardCharsets.UTF_8);
+                    ex.getResponseHeaders().set("Content-Type", "application/json");
+                    ex.sendResponseHeaders(503, out.length);
+                    ex.getResponseBody().write(out);
+                    ex.close();
+                    return;
+                }
                 if ("m4_exact".equals(tid)) {
                     String prefix = "{\"traceId\":\"m4_exact\",\"status\":\"SC_OK\",\"data\":{\"pad\":\"";
                     String suffix = "\"}}";
@@ -438,6 +454,24 @@ public final class SdkTestRunner {
             }
             check(caughtM1503, "s2s:m1Json503");
 
+            // P2-5: Numeric JSON "status" (e.g. {"status": 429} / {"status": 503}) falls back to retryable SC_*
+            boolean caughtNum429 = false;
+            try {
+                tsClient.ping(Map.of("traceId", "p2_num_429"));
+            } catch (BaccaratSdk.ApiException ex) {
+                caughtNum429 = ex.httpStatus == 429 && "SC_RATE_LIMITED".equals(ex.status) && ex.isRetryable();
+            }
+            check(caughtNum429, "s2s:p2NumericStatus429");
+
+            boolean caughtNum503 = false;
+            try {
+                tsClient.ping(Map.of("traceId", "p2_num_503"));
+            } catch (BaccaratSdk.ApiException ex) {
+                caughtNum503 = ex.httpStatus == 503 && "SC_OPERATOR_TIMEOUT".equals(ex.status)
+                        && "p2_num_503".equals(ex.traceId) && ex.isRetryable();
+            }
+            check(caughtNum503, "s2s:p2NumericStatus503");
+
             // M4: exact 16 MiB response body succeeds; >16 MiB response body rejected with non-retryable SC_INVALID_REQUEST
             Map<String, Object> exactResp = tsClient.ping(Map.of("traceId", "m4_exact"));
             checkEq(exactResp.get("status"), "SC_OK", "s2s:m4Exact16MiB");
@@ -520,6 +554,38 @@ public final class SdkTestRunner {
         } finally {
             rlSrv.stop(0);
         }
+
+        // 5. v1.5.5 regressions: deadlock RuntimeException -> SC_OPERATOR_TIMEOUT sanitized & walletOk/walletError builders
+        BaccaratSdk.WalletHandler deadlockWallet = new BaccaratSdk.WalletHandler() {
+            @Override public Map<String, Object> onBalance(Map<String, Object> req) {
+                throw new BaccaratSdk.SdkException(BaccaratSdk.StatusCode.SC_INSUFFICIENT_FUNDS, "explicit sdk err");
+            }
+            @Override public Map<String, Object> onBet(Map<String, Object> req) {
+                throw new RuntimeException("ERROR: deadlock detected (40P01) on table wallets");
+            }
+            @Override public Map<String, Object> onBetResult(Map<String, Object> req) {
+                throw new RuntimeException("ERROR: deadlock detected (40P01) on table wallets");
+            }
+            @Override public Map<String, Object> onRollback(Map<String, Object> req) {
+                return BaccaratSdk.walletOk(String.valueOf(req.get("traceId")), "p1", "USD", "100.00");
+            }
+        };
+        BaccaratSdk.WebhookDispatcher dlDisp = new BaccaratSdk.WebhookDispatcher(apiKey, secret, deadlockWallet);
+        byte[] dlRaw = "{\"traceId\":\"t_java_dl\",\"transactionId\":\"stl_1\"}".getBytes(StandardCharsets.UTF_8);
+        Map<String, Object> dlResp = dlDisp.handle("/wallet/bet_result", apiKey, BaccaratSdk.signBody(dlRaw, secret), dlRaw);
+        checkEq(dlResp.get("traceId"), "t_java_dl", "wb:deadlockTraceId");
+        checkEq(dlResp.get("status"), BaccaratSdk.StatusCode.SC_OPERATOR_TIMEOUT, "wb:deadlockStatus");
+        checkEq(dlResp.get("message"), "Temporary wallet handler error", "wb:deadlockSanitizedMsg");
+        check(!String.valueOf(dlResp.get("message")).contains("40P01"), "wb:deadlockNoSqlLeak");
+        Map<String, Object> sdkErrResp = dlDisp.handle("/wallet/balance", apiKey, BaccaratSdk.signBody(dlRaw, secret), dlRaw);
+        checkEq(sdkErrResp.get("status"), BaccaratSdk.StatusCode.SC_INSUFFICIENT_FUNDS, "wb:sdkErrPreserved");
+
+        Map<String, Object> builtOk = BaccaratSdk.walletOk("t_ok", "player_1", "JPY", "0");
+        checkEq(builtOk.get("status"), BaccaratSdk.StatusCode.SC_OK, "walletOk:status");
+        checkEq(((Map<?, ?>) builtOk.get("data")).get("balance"), "0", "walletOk:balance");
+        Map<String, Object> builtErr = BaccaratSdk.walletError("t_err", BaccaratSdk.StatusCode.SC_USER_DISABLED, "disabled");
+        checkEq(builtErr.get("status"), BaccaratSdk.StatusCode.SC_USER_DISABLED, "walletError:status");
+        checkEq(builtErr.get("message"), "disabled", "walletError:message");
 
         System.out.println("JAVA 17 SDK: ALL TESTS PASSED");
     }

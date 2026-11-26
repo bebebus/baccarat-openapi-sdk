@@ -19,6 +19,7 @@ const CURLOPT_POSTFIELDS: i32 = 10015;
 const CURLOPT_HTTPHEADER: i32 = 10023;
 const CURLOPT_WRITEFUNCTION: i32 = 20011;
 const CURLOPT_POST: i32 = 47;
+const CURLOPT_FOLLOWLOCATION: i32 = 52;
 const CURLOPT_NOSIGNAL: i32 = 99;
 const CURLOPT_TIMEOUT_MS: i32 = 155;
 const CURLOPT_CONNECTTIMEOUT_MS: i32 = 156;
@@ -153,6 +154,7 @@ pub fn libcurl_post_json(
 
         curl_easy_setopt(guard.handle, CURLOPT_URL, c_url.as_ptr());
         curl_easy_setopt(guard.handle, CURLOPT_POST, 1 as c_long);
+        curl_easy_setopt(guard.handle, CURLOPT_FOLLOWLOCATION, 0 as c_long);
         curl_easy_setopt(guard.handle, CURLOPT_NOSIGNAL, 1 as c_long);
         curl_easy_setopt(guard.handle, CURLOPT_HTTPHEADER, guard.headers);
         curl_easy_setopt(guard.handle, CURLOPT_POSTFIELDS, raw_body.as_ptr() as *const c_char);

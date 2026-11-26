@@ -13,6 +13,7 @@ use Bebebus\BaccaratSdk\InMemoryWallet;
 use Bebebus\BaccaratSdk\Money;
 use Bebebus\BaccaratSdk\Signing;
 use Bebebus\BaccaratSdk\StatusCode;
+use Bebebus\BaccaratSdk\WalletResponse;
 use Bebebus\BaccaratSdk\WebhookDispatcher;
 
 function assertEq(mixed $actual, mixed $expected, string $label): void
@@ -323,5 +324,31 @@ $utf8Res = $credDisp->handle('/wallet/unknown', $apiKey, Signing::signBody($utf8
 assertEq($utf8Res['status'], StatusCode::SC_INVALID_REQUEST, 'wb:m10Utf8TraceStatus');
 assertEq((bool) preg_match('//u', (string) $utf8Res['traceId']), true, 'wb:m10Utf8Valid');
 assertEq($utf8Res['traceId'], str_repeat('中', 128), 'wb:m10Utf8CharCount');
+
+// 8. v1.5.5 regressions: deadlock exception safety & WalletResponse builders
+$deadlockWallet = new class implements \Bebebus\BaccaratSdk\WalletHandlerInterface {
+    public function onBalance(array $req): array { throw new BaccaratSdkException('explicit sdk err', StatusCode::SC_INSUFFICIENT_FUNDS); }
+    public function onBet(array $req): array { throw new \RuntimeException('ERROR: deadlock detected (40P01) on table wallets'); }
+    public function onBetResult(array $req): array { throw new \RuntimeException('ERROR: deadlock detected (40P01) on table wallets'); }
+    public function onRollback(array $req): array { return WalletResponse::ok((string) ($req['traceId'] ?? ''), 'p1', 'USD', '100.00', 1700000000000); }
+};
+$dlDisp = WebhookDispatcher::fromCredentials($apiKey, $secret, $deadlockWallet);
+$dlRaw = json_encode(['traceId' => 't_php_dl', 'transactionId' => 'stl_1'], JSON_THROW_ON_ERROR);
+$dlOut = $dlDisp->handle('/wallet/bet_result', $apiKey, Signing::signBody($dlRaw, $secret), $dlRaw);
+assertEq($dlOut['statusCode'], 200, 'wb:deadlockHttp200');
+assertEq($dlOut['body']['traceId'], 't_php_dl', 'wb:deadlockTraceId');
+assertEq($dlOut['body']['status'], StatusCode::SC_OPERATOR_TIMEOUT, 'wb:deadlockTimeoutStatus');
+assertEq($dlOut['body']['message'], 'Temporary wallet handler error', 'wb:deadlockSanitizedMsg');
+assertEq(str_contains((string) $dlOut['body']['message'], '40P01'), false, 'wb:deadlockNoLeakSql');
+
+$sdkErrOut = $dlDisp->handle('/wallet/balance', $apiKey, Signing::signBody($dlRaw, $secret), $dlRaw);
+assertEq($sdkErrOut['body']['status'], StatusCode::SC_INSUFFICIENT_FUNDS, 'wb:sdkErrPreserved');
+
+$okResp = WalletResponse::ok('t_ok', 'player_1', 'JPY', '0');
+assertEq($okResp['status'], StatusCode::SC_OK, 'walletResp:okStatus');
+assertEq($okResp['data']['balance'], '0', 'walletResp:okBalance');
+assertEq(is_int($okResp['data']['timestamp']), true, 'walletResp:okTs');
+$errResp = WalletResponse::error('t_err', StatusCode::SC_INSUFFICIENT_FUNDS, 'low');
+assertEq($errResp, ['traceId' => 't_err', 'status' => StatusCode::SC_INSUFFICIENT_FUNDS, 'message' => 'low'], 'walletResp:err');
 
 echo "PHP SDK: ALL TESTS PASSED\n";
