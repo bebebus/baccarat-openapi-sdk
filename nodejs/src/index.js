@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Zero-dependency Node.js SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.5).
+// Zero-dependency Node.js SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.6).
 
 import crypto from 'node:crypto';
 import http from 'node:http';
@@ -845,7 +845,15 @@ export class InMemoryWallet {
   }
 }
 
+const NON_NEGATIVE_DECIMAL_RE = /^[0-9]+(?:\.[0-9]+)?$/;
+
 export function walletOk(traceId, username, currency, balance, timestamp = Date.now()) {
+  if (typeof balance !== 'string' || !NON_NEGATIVE_DECIMAL_RE.test(balance)) {
+    throw new BaccaratSdkError(
+      'walletOk balance must be a non-empty non-negative decimal string matching ^\\d+(?:\\.\\d+)?$',
+      'INVALID_ARGUMENT',
+    );
+  }
   const ts = typeof timestamp === 'number' && Number.isFinite(timestamp) ? Math.trunc(timestamp) : Date.now();
   return {
     traceId: String(traceId ?? ''),
@@ -853,16 +861,23 @@ export function walletOk(traceId, username, currency, balance, timestamp = Date.
     data: {
       username: String(username ?? ''),
       currency: String(currency ?? ''),
-      balance: String(balance ?? ''),
+      balance,
       timestamp: ts,
     },
   };
 }
 
 export function walletError(traceId, status, message = '') {
+  const st = typeof status === 'string' ? status.trim() : '';
+  if (!st || st === StatusCode.SC_OK) {
+    throw new BaccaratSdkError(
+      'walletError status must be a non-empty error status code (cannot be SC_OK)',
+      'INVALID_ARGUMENT',
+    );
+  }
   const body = {
     traceId: String(traceId ?? ''),
-    status: String(status ?? StatusCode.SC_INVALID_REQUEST),
+    status: st,
   };
   if (message != null && String(message) !== '') {
     body.message = String(message);

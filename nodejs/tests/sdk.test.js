@@ -454,7 +454,7 @@ test('WebhookDispatcher & InMemoryWallet full seamless wallet lifecycle', async 
   }
 });
 
-test('v1.5.5 regressions: deadlock exception safety & wallet response builders', async () => {
+test('v1.5.6 regressions: deadlock exception safety & wallet response builders', async () => {
   const apiKey = 'ak_0123456789abcdef0123456789abcdef';
   const secret = 'dGVzdF9zZWNyZXRfNDBfY2hhcnNfYmFzZTY0dXJsX2s';
   const deadlockWallet = {
@@ -485,4 +485,17 @@ test('v1.5.5 regressions: deadlock exception safety & wallet response builders',
   assert.equal(typeof ok.data.timestamp, 'number');
   const err = walletError('t_err', StatusCode.SC_INSUFFICIENT_FUNDS, 'low balance');
   assert.deepEqual(err, { traceId: 't_err', status: StatusCode.SC_INSUFFICIENT_FUNDS, message: 'low balance' });
+
+  for (const badBal of ['', '   ', '-1.00', 'abc', '10.', '.5', '10.00 ', null, undefined]) {
+    assert.throws(
+      () => walletOk('t_bad', 'player_1', 'USD', badBal),
+      (e) => e instanceof BaccaratSdkError && e.code === 'INVALID_ARGUMENT',
+    );
+  }
+  for (const badStatus of ['', '   ', StatusCode.SC_OK, ' SC_OK ', null, undefined]) {
+    assert.throws(
+      () => walletError('t_bad', badStatus, 'oops'),
+      (e) => e instanceof BaccaratSdkError && e.code === 'INVALID_ARGUMENT',
+    );
+  }
 });

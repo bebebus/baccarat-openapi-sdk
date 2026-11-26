@@ -401,7 +401,7 @@ class TestBaccaratPythonSdk(unittest.TestCase):
             redir_srv.shutdown()
             redir_srv.server_close()
 
-        # 6. v1.5.5 regressions: deadlock exception safety, HTTPError read failure, UNSET/None null clearing, wallet helpers
+        # 6. v1.5.6 regressions: deadlock exception safety, HTTPError read failure, UNSET/None null clearing, wallet helpers
         class DeadlockWallet:
             def on_balance(self, req: dict) -> dict:
                 raise BaccaratSdkError("explicit sdk err", StatusCode.SC_INSUFFICIENT_FUNDS)
@@ -439,6 +439,15 @@ class TestBaccaratPythonSdk(unittest.TestCase):
         self.assertIsInstance(ok_res["data"]["timestamp"], int)
         err_res = wallet_error("t_err", StatusCode.SC_USER_DISABLED, "disabled")
         self.assertEqual(err_res, {"traceId": "t_err", "status": StatusCode.SC_USER_DISABLED, "message": "disabled"})
+
+        for bad_bal in ("", "   ", "-1.00", "abc", "10.", ".5", "10.00\n"):
+            with self.assertRaises(BaccaratSdkError) as ctx_bal:
+                wallet_ok("t_bad", "player_1", "USD", bad_bal)
+            self.assertEqual(ctx_bal.exception.code, "INVALID_ARGUMENT")
+        for bad_st in ("", "   ", StatusCode.SC_OK, " SC_OK "):
+            with self.assertRaises(BaccaratSdkError) as ctx_st:
+                wallet_error("t_bad", bad_st, "oops")
+            self.assertEqual(ctx_st.exception.code, "INVALID_ARGUMENT")
 
         # Explicit None -> JSON null vs omitted UNSET on update_player_status / update_player_limits
         sent_payloads: list[dict] = []

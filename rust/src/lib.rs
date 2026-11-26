@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.5).
+//! Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.6).
 
 pub mod crypto;
 mod curl_ffi;
@@ -58,7 +58,7 @@ pub fn is_retryable_status(status: &str) -> bool {
     )
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SdkError {
     Config(String),
     Argument(String),
@@ -753,6 +753,31 @@ impl Client {
 
 // ── 5. Seamless Wallet Pluggable WalletHandler, WebhookDispatcher & InMemoryWallet ─
 
+fn is_valid_non_negative_decimal(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    let mut seen_dot = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'.' {
+            if seen_dot || i == 0 || i + 1 == bytes.len() {
+                return false;
+            }
+            seen_dot = true;
+        } else if !b.is_ascii_digit() {
+            return false;
+        }
+    }
+    true
+}
+
+/// Constructs a standard `SC_OK` wallet response envelope.
+///
+/// # Panics
+/// Panics if `balance` is not a non-empty non-negative decimal string matching `^\d+(?:\.\d+)?$`,
+/// allowing `WebhookDispatcher`'s `catch_unwind` to map programming bugs to retryable
+/// `SC_OPERATOR_TIMEOUT` instead of emitting a malformed `SC_OK` that would park settlement in `HELD`.
 pub fn wallet_ok(
     trace_id: &str,
     username: &str,
@@ -760,6 +785,10 @@ pub fn wallet_ok(
     balance: &str,
     timestamp_ms: Option<i64>,
 ) -> Json {
+    assert!(
+        is_valid_non_negative_decimal(balance),
+        "wallet_ok balance must be a non-empty non-negative decimal string matching ^\\d+(?:\\.\\d+)?$"
+    );
     let ts = timestamp_ms.unwrap_or_else(|| {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -778,10 +807,18 @@ pub fn wallet_ok(
     r
 }
 
+/// Constructs a non-`SC_OK` wallet error response envelope.
+/// Empty/whitespace `status` or `SC_OK` is safely coerced to `SC_INVALID_REQUEST`.
 pub fn wallet_error(trace_id: &str, status: &str, message: &str) -> Json {
+    let st = status.trim();
+    let eff_status = if st.is_empty() || st == status_code::SC_OK {
+        status_code::SC_INVALID_REQUEST
+    } else {
+        st
+    };
     let mut r = Json::object();
     r.set("traceId", Json::Str(trace_id.into()));
-    r.set("status", Json::Str(status.into()));
+    r.set("status", Json::Str(eff_status.into()));
     if !message.is_empty() {
         r.set("message", Json::Str(message.into()));
     }
@@ -2032,7 +2069,11 @@ mod tests {
         );
         assert_eq!(out.get("data").get("balance").as_str(), Some("500.00"));
 
-        // v1.5.5 regressions: panic isolation -> SC_OPERATOR_TIMEOUT, wallet_ok/wallet_error, UTF-8 lossy trace hint
+        // v1.5.6 regressions: panic isolation -> SC_OPERATOR_TIMEOUT, SdkError PartialEq/Eq, wallet_ok/wallet_error guards, UTF-8 lossy trace hint
+        assert!(decimal_to_ledger_units("0", 0, false) == Ok(0));
+        assert!(decimal_to_ledger_units("0.00", 2, false) == Ok(0));
+        assert_eq!(SdkError::Money("x".into()), SdkError::Money("x".into()));
+
         struct PanickingWallet;
         impl WalletHandler for PanickingWallet {
             fn on_balance(&self, req: &Json) -> Json {
@@ -2064,6 +2105,15 @@ mod tests {
         let err_b = wallet_error("t_err", status_code::SC_USER_DISABLED, "disabled");
         assert_eq!(err_b.get("status").as_str(), Some(status_code::SC_USER_DISABLED));
         assert_eq!(err_b.get("message").as_str(), Some("disabled"));
+
+        for bad_st in ["", "   ", status_code::SC_OK, " SC_OK "] {
+            let coerced = wallet_error("t_coerce", bad_st, "guarded");
+            assert_eq!(coerced.get("status").as_str(), Some(status_code::SC_INVALID_REQUEST));
+        }
+        for bad_bal in ["", "   ", "-1.00", "abc", "10.", ".5", "10.00 "] {
+            let res = std::panic::catch_unwind(|| wallet_ok("t_bad", "player_1", "USD", bad_bal, None));
+            assert!(res.is_err(), "expected wallet_ok({:?}) to panic", bad_bal);
+        }
 
         // Multi-byte UTF-8 split at byte 1024 boundary must still extract traceId hint
         let mut split_utf8 = br#"{"traceId":"t_split_1024","pad":""#.to_vec();

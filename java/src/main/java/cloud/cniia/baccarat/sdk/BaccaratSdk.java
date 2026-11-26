@@ -701,16 +701,24 @@ public final class BaccaratSdk {
         }
     }
 
+    private static final Pattern NON_NEGATIVE_DECIMAL_RE = Pattern.compile("\\A[0-9]+(?:\\.[0-9]+)?\\z");
+
     public static Map<String, Object> walletOk(String traceId, String username, String currency, String balance) {
         return walletOk(traceId, username, currency, balance, System.currentTimeMillis());
     }
 
     public static Map<String, Object> walletOk(String traceId, String username, String currency, String balance, long timestamp) {
+        if (balance == null || !NON_NEGATIVE_DECIMAL_RE.matcher(balance).matches()) {
+            throw new SdkException(
+                    "INVALID_ARGUMENT",
+                    "walletOk balance must be a non-empty non-negative decimal string matching ^\\d+(?:\\.\\d+)?$"
+            );
+        }
         long ts = timestamp > 0L ? timestamp : System.currentTimeMillis();
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("username", username == null ? "" : username);
         data.put("currency", currency == null ? "" : currency);
-        data.put("balance", balance == null ? "" : balance);
+        data.put("balance", balance);
         data.put("timestamp", ts);
         Map<String, Object> r = new LinkedHashMap<>();
         r.put("traceId", traceId == null ? "" : traceId);
@@ -720,9 +728,16 @@ public final class BaccaratSdk {
     }
 
     public static Map<String, Object> walletError(String traceId, String status, String message) {
+        String st = status == null ? "" : status.trim();
+        if (st.isEmpty() || StatusCode.SC_OK.equals(st)) {
+            throw new SdkException(
+                    "INVALID_ARGUMENT",
+                    "walletError status must be a non-empty error status code (cannot be SC_OK)"
+            );
+        }
         Map<String, Object> r = new LinkedHashMap<>();
         r.put("traceId", traceId == null ? "" : traceId);
-        r.put("status", status == null ? StatusCode.SC_INVALID_REQUEST : status);
+        r.put("status", st);
         if (message != null && !message.isEmpty()) {
             r.put("message", message);
         }
@@ -1048,7 +1063,7 @@ public final class BaccaratSdk {
             } catch (SdkException e) {
                 String st = (e.code != null && e.code.startsWith("SC_")) ? e.code : StatusCode.SC_INVALID_REQUEST;
                 return makeErrEnvelope(traceId, st, e.getMessage());
-            } catch (RuntimeException e) {
+            } catch (Exception e) {
                 return makeErrEnvelope(traceId, StatusCode.SC_OPERATOR_TIMEOUT, "Temporary wallet handler error");
             }
         }

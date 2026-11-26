@@ -632,7 +632,7 @@ func TestV155NullClearingBuildersAndPanicSafety(t *testing.T) {
 		t.Fatalf("expected minBet:null, got %s", string(limClearMin))
 	}
 
-	// 3. WalletOK / WalletError builders
+	// 3. WalletOK / WalletError builders & defensive validation
 	okResp := WalletOK("t_ok", "player_1", "JPY", "0", 0)
 	if okResp.Status != SC_OK || okResp.Data == nil || okResp.Data.Balance != "0" || okResp.Data.Timestamp <= 0 {
 		t.Fatalf("WalletOK unexpected: %+v", okResp)
@@ -640,6 +640,26 @@ func TestV155NullClearingBuildersAndPanicSafety(t *testing.T) {
 	errResp := WalletError("t_err", SC_INSUFFICIENT_FUNDS, "low balance")
 	if errResp.Status != SC_INSUFFICIENT_FUNDS || errResp.Message != "low balance" {
 		t.Fatalf("WalletError unexpected: %+v", errResp)
+	}
+	for _, badStatus := range []string{"", "   ", SC_OK, " SC_OK "} {
+		coerced := WalletError("t_coerce", badStatus, "guarded")
+		if coerced.Status != SC_INVALID_REQUEST {
+			t.Fatalf("WalletError(%q) expected coerced SC_INVALID_REQUEST, got %+v", badStatus, coerced)
+		}
+	}
+	for _, badBal := range []string{"", "   ", "-1.00", "abc", "10.", ".5", "10.00 "} {
+		panicked := false
+		func() {
+			defer func() {
+				if recover() != nil {
+					panicked = true
+				}
+			}()
+			_ = WalletOK("t_bad", "player_1", "USD", badBal, 0)
+		}()
+		if !panicked {
+			t.Fatalf("expected WalletOK(%q) to panic", badBal)
+		}
 	}
 
 	// 4. Panic recovery in WebhookDispatcher.HandleRaw maps to retryable SC_OPERATOR_TIMEOUT without leaking panic payload

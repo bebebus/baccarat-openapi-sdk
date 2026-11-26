@@ -144,12 +144,15 @@ pub fn libcurl_post_json(
             handle,
             headers: std::ptr::null_mut(),
         };
-        guard.headers = curl_slist_append(guard.headers, h_ct.as_ptr());
-        guard.headers = curl_slist_append(guard.headers, h_acc.as_ptr());
-        guard.headers = curl_slist_append(guard.headers, h_key.as_ptr());
-        guard.headers = curl_slist_append(guard.headers, h_sig.as_ptr());
-        if let Some(ref ts_hdr) = h_ts {
-            guard.headers = curl_slist_append(guard.headers, ts_hdr.as_ptr());
+        for hdr in [&h_ct, &h_acc, &h_key, &h_sig]
+            .into_iter()
+            .chain(h_ts.as_ref())
+        {
+            let next = curl_slist_append(guard.headers, hdr.as_ptr());
+            if next.is_null() {
+                return Err(CurlError::Transport("curl_slist_append failed".into()));
+            }
+            guard.headers = next;
         }
 
         curl_easy_setopt(guard.handle, CURLOPT_URL, c_url.as_ptr());

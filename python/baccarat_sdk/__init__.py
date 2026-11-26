@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.5)."""
+"""Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.6)."""
 
 from __future__ import annotations
 
@@ -776,6 +776,9 @@ class Client:
 # ── 5. Seamless Wallet Webhook Dispatcher & Reference In-Memory Wallet ──────
 
 
+_NON_NEGATIVE_DECIMAL_RE = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+
+
 def wallet_ok(
     trace_id: str,
     username: str,
@@ -783,6 +786,11 @@ def wallet_ok(
     balance: str,
     timestamp: Optional[int] = None,
 ) -> Dict[str, Any]:
+    if not isinstance(balance, str) or _NON_NEGATIVE_DECIMAL_RE.fullmatch(balance) is None:
+        raise BaccaratSdkError(
+            "wallet_ok balance must be a non-empty non-negative decimal string matching ^\\d+(?:\\.\\d+)?$",
+            "INVALID_ARGUMENT",
+        )
     ts = int(time.time() * 1000) if timestamp is None else int(timestamp)
     return {
         "traceId": trace_id or "",
@@ -797,9 +805,15 @@ def wallet_ok(
 
 
 def wallet_error(trace_id: str, status: str, message: Optional[str] = None) -> Dict[str, Any]:
+    st = status.strip() if isinstance(status, str) else ""
+    if not st or st == StatusCode.SC_OK:
+        raise BaccaratSdkError(
+            "wallet_error status must be a non-empty error status code (cannot be SC_OK)",
+            "INVALID_ARGUMENT",
+        )
     out: Dict[str, Any] = {
         "traceId": trace_id or "",
-        "status": status,
+        "status": st,
     }
     if message:
         out["message"] = message

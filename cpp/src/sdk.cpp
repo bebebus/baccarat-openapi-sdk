@@ -696,6 +696,23 @@ Json Client::get_wallet_transaction_status(Json params) const {
     return post_signed("/operator/v1/wallet/transaction-status", std::move(params));
 }
 
+namespace {
+bool is_valid_non_negative_decimal(const std::string& s) {
+    if (s.empty()) return false;
+    bool seen_dot = false;
+    for (size_t i = 0; i < s.size(); ++i) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        if (c == '.') {
+            if (seen_dot || i == 0 || i + 1 == s.size()) return false;
+            seen_dot = true;
+        } else if (c < '0' || c > '9') {
+            return false;
+        }
+    }
+    return true;
+}
+} // namespace
+
 Json wallet_ok(
     const std::string& trace_id,
     const std::string& username,
@@ -703,6 +720,12 @@ Json wallet_ok(
     const std::string& balance,
     int64_t timestamp_ms
 ) {
+    if (!is_valid_non_negative_decimal(balance)) {
+        throw SdkError(
+            "INVALID_ARGUMENT",
+            "wallet_ok balance must be a non-empty non-negative decimal string matching ^\\d+(?:\\.\\d+)?$"
+        );
+    }
     int64_t ts = timestamp_ms;
     if (ts <= 0) {
         ts = static_cast<int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -727,9 +750,16 @@ Json wallet_error(
     const std::string& status,
     const std::string& message
 ) {
+    std::string st = trim(status);
+    if (st.empty() || st == StatusCode::SC_OK) {
+        throw SdkError(
+            "INVALID_ARGUMENT",
+            "wallet_error status must be a non-empty error status code (cannot be SC_OK)"
+        );
+    }
     Json r = Json::object();
     r.set("traceId", Json(trace_id));
-    r.set("status", Json(status));
+    r.set("status", Json(st));
     if (!message.empty()) {
         r.set("message", Json(message));
     }

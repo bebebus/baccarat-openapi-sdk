@@ -215,7 +215,7 @@ export class Client {
   }): Promise<{ traceId: string; status: 'SC_OK'; data: Record<string, unknown> }>;
 }
 
-export interface WalletOkResponse {
+export type WalletOkResponse = {
   traceId: string;
   status: 'SC_OK';
   data: {
@@ -224,13 +224,15 @@ export interface WalletOkResponse {
     balance: string;
     timestamp: number;
   };
-}
+};
 
-export interface WalletErrorResponse {
+export type WalletErrorResponse = {
   traceId: string;
   status: OperatorStatusCode | string;
   message?: string;
-}
+};
+
+export type WalletResponse = WalletOkResponse | WalletErrorResponse | Record<string, unknown>;
 
 export function walletOk(
   traceId: string,
@@ -247,22 +249,22 @@ export function walletError(
 ): WalletErrorResponse;
 
 export interface WalletHandler {
-  onBalance(req: Record<string, unknown>): Promise<Record<string, unknown>> | Record<string, unknown>;
-  onBet(req: Record<string, unknown>): Promise<Record<string, unknown>> | Record<string, unknown>;
-  onBetResult(req: Record<string, unknown>): Promise<Record<string, unknown>> | Record<string, unknown>;
-  onRollback(req: Record<string, unknown>): Promise<Record<string, unknown>> | Record<string, unknown>;
-  onAdjustment?(req: Record<string, unknown>): Promise<Record<string, unknown>> | Record<string, unknown>;
+  onBalance(req: Record<string, unknown>): Promise<WalletResponse> | WalletResponse;
+  onBet(req: Record<string, unknown>): Promise<WalletResponse> | WalletResponse;
+  onBetResult(req: Record<string, unknown>): Promise<WalletResponse> | WalletResponse;
+  onRollback(req: Record<string, unknown>): Promise<WalletResponse> | WalletResponse;
+  onAdjustment?(req: Record<string, unknown>): Promise<WalletResponse> | WalletResponse;
 }
 
 export class InMemoryWallet implements WalletHandler {
   constructor(initialAccounts?: Record<string, { currency: string; balance: string; exponent?: number; tokens?: string[]; disabled?: boolean }>);
   registerToken(username: string, token: string): void;
   setDisabled(username: string, disabled: boolean): void;
-  onBalance(req: Record<string, unknown>): Promise<Record<string, unknown>>;
-  onBet(req: Record<string, unknown>): Promise<Record<string, unknown>>;
-  onBetResult(req: Record<string, unknown>): Promise<Record<string, unknown>>;
-  onRollback(req: Record<string, unknown>): Promise<Record<string, unknown>>;
-  onAdjustment(req: Record<string, unknown>): Promise<Record<string, unknown>>;
+  onBalance(req: Record<string, unknown>): Promise<WalletResponse>;
+  onBet(req: Record<string, unknown>): Promise<WalletResponse>;
+  onBetResult(req: Record<string, unknown>): Promise<WalletResponse>;
+  onRollback(req: Record<string, unknown>): Promise<WalletResponse>;
+  onAdjustment(req: Record<string, unknown>): Promise<WalletResponse>;
 }
 
 export class WebhookDispatcher {
@@ -272,5 +274,5 @@ export class WebhookDispatcher {
     apiKeyHeader: string | null | undefined,
     signatureHeader: string | null | undefined,
     rawBody: Buffer | Uint8Array | string,
-  ): Promise<{ statusCode: number; body: Record<string, unknown> }>;
+  ): Promise<{ statusCode: number; body: WalletResponse }>;
 }

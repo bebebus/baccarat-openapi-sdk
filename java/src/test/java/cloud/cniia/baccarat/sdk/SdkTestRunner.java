@@ -555,7 +555,7 @@ public final class SdkTestRunner {
             rlSrv.stop(0);
         }
 
-        // 5. v1.5.5 regressions: deadlock RuntimeException -> SC_OPERATOR_TIMEOUT sanitized & walletOk/walletError builders
+        // 5. v1.5.6 regressions: deadlock & sneaky-thrown checked exceptions -> SC_OPERATOR_TIMEOUT sanitized & walletOk/walletError guards
         BaccaratSdk.WalletHandler deadlockWallet = new BaccaratSdk.WalletHandler() {
             @Override public Map<String, Object> onBalance(Map<String, Object> req) {
                 throw new BaccaratSdk.SdkException(BaccaratSdk.StatusCode.SC_INSUFFICIENT_FUNDS, "explicit sdk err");
@@ -569,6 +569,10 @@ public final class SdkTestRunner {
             @Override public Map<String, Object> onRollback(Map<String, Object> req) {
                 return BaccaratSdk.walletOk(String.valueOf(req.get("traceId")), "p1", "USD", "100.00");
             }
+            @Override public Map<String, Object> onAdjustment(Map<String, Object> req) {
+                sneakyThrow(new java.io.IOException("jdbc pool exhausted"));
+                return null;
+            }
         };
         BaccaratSdk.WebhookDispatcher dlDisp = new BaccaratSdk.WebhookDispatcher(apiKey, secret, deadlockWallet);
         byte[] dlRaw = "{\"traceId\":\"t_java_dl\",\"transactionId\":\"stl_1\"}".getBytes(StandardCharsets.UTF_8);
@@ -580,6 +584,14 @@ public final class SdkTestRunner {
         Map<String, Object> sdkErrResp = dlDisp.handle("/wallet/balance", apiKey, BaccaratSdk.signBody(dlRaw, secret), dlRaw);
         checkEq(sdkErrResp.get("status"), BaccaratSdk.StatusCode.SC_INSUFFICIENT_FUNDS, "wb:sdkErrPreserved");
 
+        // Checked exception thrown via Kotlin/Groovy/Lombok @SneakyThrows must also be caught and sanitized
+        byte[] sneakyRaw = "{\"traceId\":\"t_java_sneaky\",\"transactionId\":\"adj_1\"}".getBytes(StandardCharsets.UTF_8);
+        Map<String, Object> sneakyResp = dlDisp.handle("/wallet/adjustment", apiKey, BaccaratSdk.signBody(sneakyRaw, secret), sneakyRaw);
+        checkEq(sneakyResp.get("traceId"), "t_java_sneaky", "wb:sneakyCheckedTraceId");
+        checkEq(sneakyResp.get("status"), BaccaratSdk.StatusCode.SC_OPERATOR_TIMEOUT, "wb:sneakyCheckedStatus");
+        checkEq(sneakyResp.get("message"), "Temporary wallet handler error", "wb:sneakyCheckedSanitizedMsg");
+        check(!String.valueOf(sneakyResp.get("message")).contains("jdbc"), "wb:sneakyCheckedNoLeak");
+
         Map<String, Object> builtOk = BaccaratSdk.walletOk("t_ok", "player_1", "JPY", "0");
         checkEq(builtOk.get("status"), BaccaratSdk.StatusCode.SC_OK, "walletOk:status");
         checkEq(((Map<?, ?>) builtOk.get("data")).get("balance"), "0", "walletOk:balance");
@@ -587,6 +599,30 @@ public final class SdkTestRunner {
         checkEq(builtErr.get("status"), BaccaratSdk.StatusCode.SC_USER_DISABLED, "walletError:status");
         checkEq(builtErr.get("message"), "disabled", "walletError:message");
 
+        for (String badBal : new String[]{null, "", "   ", "-1.00", "abc", "10.", ".5", "10.00\n"}) {
+            boolean threw = false;
+            try {
+                BaccaratSdk.walletOk("t_bad", "player_1", "USD", badBal);
+            } catch (BaccaratSdk.SdkException e) {
+                threw = "INVALID_ARGUMENT".equals(e.code);
+            }
+            check(threw, "walletOk:rejectBadBalance:" + badBal);
+        }
+        for (String badSt : new String[]{null, "", "   ", BaccaratSdk.StatusCode.SC_OK, " SC_OK "}) {
+            boolean threw = false;
+            try {
+                BaccaratSdk.walletError("t_bad", badSt, "oops");
+            } catch (BaccaratSdk.SdkException e) {
+                threw = "INVALID_ARGUMENT".equals(e.code);
+            }
+            check(threw, "walletError:rejectBadStatus:" + badSt);
+        }
+
         System.out.println("JAVA 17 SDK: ALL TESTS PASSED");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <E extends Throwable> void sneakyThrow(Throwable t) throws E {
+        throw (E) t;
     }
 }

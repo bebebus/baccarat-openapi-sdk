@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Package baccarat provides a zero-dependency Go SDK for the Baccarat Live Platform
-// B2B Operator Seamless Wallet API (v1.5.5).
+// B2B Operator Seamless Wallet API (v1.5.6).
 package baccarat
 
 import (
@@ -1038,7 +1038,35 @@ type WalletResponse struct {
 	Data    *WalletResponseData `json:"data,omitempty"`
 }
 
+func isValidNonNegativeDecimal(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	seenDot := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '.' {
+			if seenDot || i == 0 || i == len(s)-1 {
+				return false
+			}
+			seenDot = true
+			continue
+		}
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// WalletOK builds a standard SC_OK wallet response envelope.
+// Panics if balance is not a non-empty non-negative decimal string matching ^\d+(?:\.\d+)?$,
+// so WebhookDispatcher's recover() converts programming bugs into retryable SC_OPERATOR_TIMEOUT
+// instead of emitting an invalid SC_OK that would park settlement in HELD.
 func WalletOK(traceID, username, currency, balance string, timestamp int64) WalletResponse {
+	if !isValidNonNegativeDecimal(balance) {
+		panic("baccarat: WalletOK balance must be a non-empty non-negative decimal string matching ^\\d+(?:\\.\\d+)?$")
+	}
 	ts := timestamp
 	if ts <= 0 {
 		ts = time.Now().UnixMilli()
@@ -1055,10 +1083,16 @@ func WalletOK(traceID, username, currency, balance string, timestamp int64) Wall
 	}
 }
 
+// WalletError builds a non-SC_OK wallet error response envelope.
+// Empty/whitespace status or SC_OK is safely coerced to SC_INVALID_REQUEST.
 func WalletError(traceID, status, message string) WalletResponse {
+	st := strings.TrimSpace(status)
+	if st == "" || st == SC_OK {
+		st = SC_INVALID_REQUEST
+	}
 	return WalletResponse{
 		TraceID: traceID,
-		Status:  status,
+		Status:  st,
 		Message: message,
 	}
 }

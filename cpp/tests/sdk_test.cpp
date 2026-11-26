@@ -597,7 +597,7 @@ int main() {
     require_eq(utf8_res.at("status").as_string(), StatusCode::SC_INVALID_REQUEST, "wb:m10Utf8Status");
     require_eq(utf8_res.at("traceId").as_string(), expected_trunc, "wb:m10Utf8Truncated128Chars");
 
-    // 7. v1.5.5 regressions: deadlock exception safety, wallet_ok/wallet_error builders, locale-independent JSON float
+    // 7. v1.5.6 regressions: deadlock exception safety, wallet_ok/wallet_error guards, locale-independent JSON float
     class DeadlockWallet final : public WalletHandler {
     public:
         Json on_balance(const Json&) override { throw SdkError(StatusCode::SC_INSUFFICIENT_FUNDS, "explicit sdk err"); }
@@ -623,6 +623,25 @@ int main() {
     Json err_env = wallet_error("t_err", StatusCode::SC_USER_DISABLED, "disabled");
     require_eq(err_env.at("status").as_string(), StatusCode::SC_USER_DISABLED, "wallet_error:status");
     require_eq(err_env.at("message").as_string(), "disabled", "wallet_error:message");
+
+    for (const std::string& bad_bal : std::vector<std::string>{"", "   ", "-1.00", "abc", "10.", ".5", "10.00 "}) {
+        bool threw = false;
+        try {
+            (void)wallet_ok("t_bad", "player_1", "USD", bad_bal);
+        } catch (const SdkError& e) {
+            threw = (e.code == "INVALID_ARGUMENT");
+        }
+        require_true(threw, "wallet_ok:rejectBadBalance:" + bad_bal);
+    }
+    for (const std::string& bad_st : std::vector<std::string>{"", "   ", StatusCode::SC_OK, " SC_OK "}) {
+        bool threw = false;
+        try {
+            (void)wallet_error("t_bad", bad_st, "oops");
+        } catch (const SdkError& e) {
+            threw = (e.code == "INVALID_ARGUMENT");
+        }
+        require_true(threw, "wallet_error:rejectBadStatus:" + bad_st);
+    }
 
     std::string dbl_json = Json(12.34).dump();
     require_true(dbl_json.find('.') != std::string::npos && dbl_json.find(',') == std::string::npos, "json:classicLocaleDump");

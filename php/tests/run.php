@@ -325,7 +325,7 @@ assertEq($utf8Res['status'], StatusCode::SC_INVALID_REQUEST, 'wb:m10Utf8TraceSta
 assertEq((bool) preg_match('//u', (string) $utf8Res['traceId']), true, 'wb:m10Utf8Valid');
 assertEq($utf8Res['traceId'], str_repeat('中', 128), 'wb:m10Utf8CharCount');
 
-// 8. v1.5.5 regressions: deadlock exception safety & WalletResponse builders
+// 8. v1.5.6 regressions: deadlock exception safety & WalletResponse builders
 $deadlockWallet = new class implements \Bebebus\BaccaratSdk\WalletHandlerInterface {
     public function onBalance(array $req): array { throw new BaccaratSdkException('explicit sdk err', StatusCode::SC_INSUFFICIENT_FUNDS); }
     public function onBet(array $req): array { throw new \RuntimeException('ERROR: deadlock detected (40P01) on table wallets'); }
@@ -350,5 +350,24 @@ assertEq($okResp['data']['balance'], '0', 'walletResp:okBalance');
 assertEq(is_int($okResp['data']['timestamp']), true, 'walletResp:okTs');
 $errResp = WalletResponse::error('t_err', StatusCode::SC_INSUFFICIENT_FUNDS, 'low');
 assertEq($errResp, ['traceId' => 't_err', 'status' => StatusCode::SC_INSUFFICIENT_FUNDS, 'message' => 'low'], 'walletResp:err');
+
+foreach (['', '   ', '-1.00', 'abc', '10.', '.5', "10.00\n"] as $badBal) {
+    $threw = false;
+    try {
+        WalletResponse::ok('t_bad', 'player_1', 'USD', $badBal);
+    } catch (BaccaratSdkException $e) {
+        $threw = ($e->errorCode === 'INVALID_ARGUMENT');
+    }
+    assertEq($threw, true, "walletResp:badBalance:$badBal");
+}
+foreach (['', '   ', StatusCode::SC_OK, ' SC_OK '] as $badStatus) {
+    $threw = false;
+    try {
+        WalletResponse::error('t_bad', $badStatus, 'oops');
+    } catch (BaccaratSdkException $e) {
+        $threw = ($e->errorCode === 'INVALID_ARGUMENT');
+    }
+    assertEq($threw, true, "walletResp:badStatus:$badStatus");
+}
 
 echo "PHP SDK: ALL TESTS PASSED\n";

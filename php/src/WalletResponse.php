@@ -14,6 +14,12 @@ final class WalletResponse
         string $balance,
         ?int $timestamp = null
     ): array {
+        if (preg_match('/\A[0-9]+(?:\.[0-9]+)?\z/', $balance) !== 1) {
+            throw new BaccaratSdkException(
+                'WalletResponse::ok balance must be a non-empty non-negative decimal string matching ^\\d+(?:\\.\\d+)?$',
+                'INVALID_ARGUMENT'
+            );
+        }
         return [
             'traceId' => $traceId,
             'status' => StatusCode::SC_OK,
@@ -29,9 +35,16 @@ final class WalletResponse
     /** @return array<string, mixed> */
     public static function error(string $traceId, string $status, string $message = ''): array
     {
+        $st = trim($status);
+        if ($st === '' || $st === StatusCode::SC_OK) {
+            throw new BaccaratSdkException(
+                'WalletResponse::error status must be a non-empty error status code (cannot be SC_OK)',
+                'INVALID_ARGUMENT'
+            );
+        }
         $res = [
             'traceId' => $traceId,
-            'status' => $status,
+            'status' => $st,
         ];
         if ($message !== '') {
             $res['message'] = $message;

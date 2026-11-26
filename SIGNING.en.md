@@ -1,6 +1,6 @@
 > [中文](./SIGNING.md) | English
 
-# Raw-Byte HMAC-SHA256 Signing & Idempotency Fingerprint Specification (v1.5.5)
+# Raw-Byte HMAC-SHA256 Signing & Idempotency Fingerprint Specification (v1.5.6)
 
 This document is the authoritative cryptographic and idempotency specification shared across all 7 SDKs in `bebebus/baccarat-openapi-sdk` (Node.js, Python, PHP, Go, Java, C++, and Rust), aligned 100% with `https://openapi.lt.cniia.cloud/openapi.yaml`.
 
