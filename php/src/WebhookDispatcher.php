@@ -123,7 +123,7 @@ final class WebhookDispatcher
                 'body' => ['traceId' => $traceId, 'status' => StatusCode::SC_INVALID_REQUEST, 'message' => "Unknown route {$clean}"],
             ];
         } catch (BaccaratSdkException $e) {
-            if (!($e instanceof BaccaratApiException)) {
+            if (!($e instanceof BaccaratApiException) && !($e instanceof BaccaratTransportException)) {
                 if (StatusCode::isValidErrorCode($e->errorCode)) {
                     return [
                         'statusCode' => 200,

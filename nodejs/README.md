@@ -9,7 +9,7 @@
 - 引入方式（本 SDK 通过 Git 仓库分发，未发布至 npm 公共注册表）：
 
 ```bash
-git clone --branch v1.5.8 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
+git clone --branch v1.5.9 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
 npm install ./baccarat-openapi-sdk/nodejs
 ```
 

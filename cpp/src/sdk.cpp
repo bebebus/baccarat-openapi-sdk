@@ -528,7 +528,7 @@ Json Client::post_signed(const std::string& route_path, Json payload) const {
     ensure_curl_global_init();
     CurlGuard guard;
     guard.curl = curl_easy_init();
-    if (!guard.curl) throw SdkError(StatusCode::SC_OPERATOR_TIMEOUT, "curl_easy_init failed");
+    if (!guard.curl) throw TransportError(StatusCode::SC_OPERATOR_TIMEOUT, "curl_easy_init failed");
 
     std::string hdr_key = "X-API-Key: " + api_key_;
     std::string hdr_sig = "X-Signature: " + sig;
@@ -536,7 +536,7 @@ Json Client::post_signed(const std::string& route_path, Json payload) const {
     auto append_header = [&](const char* hdr) {
         struct curl_slist* next = curl_slist_append(guard.headers, hdr);
         if (!next) {
-            throw SdkError(StatusCode::SC_OPERATOR_TIMEOUT, "curl_slist_append failed");
+            throw TransportError(StatusCode::SC_OPERATOR_TIMEOUT, "curl_slist_append failed");
         }
         guard.headers = next;
     };
@@ -570,10 +570,15 @@ Json Client::post_signed(const std::string& route_path, Json payload) const {
     curl_easy_getinfo(guard.curl, CURLINFO_RESPONSE_CODE, &http_code);
 
     if (write_state.overflow) {
-        throw SdkError(StatusCode::SC_INVALID_REQUEST, "Gateway response exceeded 16 MiB limit");
+        throw ApiError(
+            StatusCode::SC_INVALID_REQUEST,
+            "Gateway response exceeded 16 MiB limit",
+            trace_id,
+            static_cast<int>(http_code)
+        );
     }
     if (rc != CURLE_OK) {
-        throw SdkError(StatusCode::SC_OPERATOR_TIMEOUT, std::string("curl error: ") + curl_easy_strerror(rc));
+        throw TransportError(StatusCode::SC_OPERATOR_TIMEOUT, std::string("curl error: ") + curl_easy_strerror(rc));
     }
 
     Json parsed;
@@ -1083,7 +1088,7 @@ Json WebhookDispatcher::handle(
         if (ends_with(clean, "/wallet/adjustment")) return wallet_.on_adjustment(parsed);
         return make_err_json(trace_id, StatusCode::SC_INVALID_REQUEST, "Unknown route");
     } catch (const SdkError& e) {
-        if (dynamic_cast<const ApiError*>(&e) == nullptr) {
+        if (dynamic_cast<const ApiError*>(&e) == nullptr && dynamic_cast<const TransportError*>(&e) == nullptr) {
             if (is_valid_error_status_code(e.code)) {
                 return make_err_json(trace_id, e.code, e.what());
             }

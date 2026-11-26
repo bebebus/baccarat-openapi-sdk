@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Package baccarat provides a zero-dependency Go SDK for the Baccarat Live Platform
-// B2B Operator Seamless Wallet API (v1.5.8).
+// B2B Operator Seamless Wallet API (v1.5.9).
 package baccarat
 
 import (
@@ -507,7 +507,12 @@ func (c *Client) postSigned(ctx context.Context, route string, reqBody any, trac
 		return "", &SdkError{Code: SC_OPERATOR_TIMEOUT, Message: "read error: " + err.Error()}
 	}
 	if len(respBytes) > maxHTTPResponseBytes {
-		return "", &SdkError{Code: SC_INVALID_REQUEST, Message: "gateway response exceeded 16 MiB limit"}
+		return traceID, &ApiError{
+			TraceID:    traceID,
+			Status:     SC_INVALID_REQUEST,
+			Message:    "gateway response exceeded 16 MiB limit",
+			HTTPStatus: resp.StatusCode,
+		}
 	}
 	var env rawEnvelope
 	if !isJSONObjectBytes(respBytes) || json.Unmarshal(respBytes, &env) != nil {

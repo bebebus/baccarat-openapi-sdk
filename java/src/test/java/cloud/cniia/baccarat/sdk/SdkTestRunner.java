@@ -479,10 +479,11 @@ public final class SdkTestRunner {
             boolean caughtM4Overflow = false;
             try {
                 tsClient.ping(Map.of("traceId", "m4_overflow"));
-            } catch (BaccaratSdk.SdkException ex) {
-                caughtM4Overflow = !(ex instanceof BaccaratSdk.ApiException)
-                        && BaccaratSdk.StatusCode.SC_INVALID_REQUEST.equals(ex.code)
-                        && !BaccaratSdk.StatusCode.isRetryable(ex.code);
+            } catch (BaccaratSdk.ApiException ex) {
+                caughtM4Overflow = BaccaratSdk.StatusCode.SC_INVALID_REQUEST.equals(ex.status)
+                        && ex.httpStatus == 200
+                        && "m4_overflow".equals(ex.traceId)
+                        && !ex.isRetryable();
             }
             check(caughtM4Overflow, "s2s:m4Overflow16MiB");
 
@@ -526,9 +527,8 @@ public final class SdkTestRunner {
                     boolean caughtBodyTimeout = false;
                     try {
                         stallClient.ping(Map.of("traceId", "body_stall_timeout"));
-                    } catch (BaccaratSdk.SdkException ex) {
-                        caughtBodyTimeout = !(ex instanceof BaccaratSdk.ApiException)
-                                && BaccaratSdk.StatusCode.SC_OPERATOR_TIMEOUT.equals(ex.code)
+                    } catch (BaccaratSdk.TransportException ex) {
+                        caughtBodyTimeout = BaccaratSdk.StatusCode.SC_OPERATOR_TIMEOUT.equals(ex.code)
                                 && BaccaratSdk.StatusCode.isRetryable(ex.code);
                     }
                     long elapsedMs = (System.nanoTime() - t0) / 1_000_000L;
@@ -555,7 +555,7 @@ public final class SdkTestRunner {
             rlSrv.stop(0);
         }
 
-        // 5. v1.5.8 regressions: deadlock, S2S ApiException, allowlist SdkException & sneaky-thrown checked exceptions -> SC_OPERATOR_TIMEOUT sanitized & walletOk/walletError guards
+        // 5. v1.5.9 regressions: deadlock, S2S ApiException/TransportException/overflow, allowlist SdkException & sneaky-thrown checked exceptions -> SC_OPERATOR_TIMEOUT sanitized, string-only traceId, & walletOk/walletError guards
         BaccaratSdk.WalletHandler deadlockWallet = new BaccaratSdk.WalletHandler() {
             @Override public Map<String, Object> onBalance(Map<String, Object> req) {
                 throw new BaccaratSdk.SdkException(BaccaratSdk.StatusCode.SC_INSUFFICIENT_FUNDS, "explicit sdk err");
@@ -581,6 +581,18 @@ public final class SdkTestRunner {
                             null,
                             400
                     );
+                }
+                if ("s2s_overflow_err".equals(mode)) {
+                    throw new BaccaratSdk.ApiException(
+                            BaccaratSdk.StatusCode.SC_INVALID_REQUEST,
+                            "Gateway response exceeded 16 MiB limit",
+                            "t_upstream_overflow",
+                            null,
+                            200
+                    );
+                }
+                if ("s2s_transport_err".equals(mode)) {
+                    throw new BaccaratSdk.TransportException("curl failed: 10.0.1.5:8443 proxy refused");
                 }
                 if ("sdk_sc_ok".equals(mode)) {
                     throw new BaccaratSdk.SdkException(BaccaratSdk.StatusCode.SC_OK, "bogus SC_OK error");
@@ -609,7 +621,7 @@ public final class SdkTestRunner {
         checkEq(dlResp.get("message"), "Temporary wallet handler error", "wb:deadlockSanitizedMsg");
         check(!String.valueOf(dlResp.get("message")).contains("40P01"), "wb:deadlockNoSqlLeak");
 
-        for (String mode : new String[]{"bad_balance", "nan_balance", "s2s_api_err", "sdk_sc_ok", "sdk_sc_custom", "sdk_sc_prefix"}) {
+        for (String mode : new String[]{"bad_balance", "nan_balance", "s2s_api_err", "s2s_overflow_err", "s2s_transport_err", "sdk_sc_ok", "sdk_sc_custom", "sdk_sc_prefix"}) {
             byte[] bbRaw = ("{\"traceId\":\"t_java_" + mode + "\",\"mode\":\"" + mode + "\"}").getBytes(StandardCharsets.UTF_8);
             Map<String, Object> bbResp = dlDisp.handle("/wallet/bet_result", apiKey, BaccaratSdk.signBody(bbRaw, secret), bbRaw);
             checkEq(bbResp.get("traceId"), "t_java_" + mode, "wb:internalSdkErrTrace:" + mode);
@@ -617,8 +629,21 @@ public final class SdkTestRunner {
             checkEq(bbResp.get("message"), "Temporary wallet handler error", "wb:internalSdkErrMsg:" + mode);
             check(!String.valueOf(bbResp.get("message")).contains("walletOk"), "wb:internalSdkErrNoLeak:" + mode);
             check(!String.valueOf(bbResp.get("message")).contains("upstream"), "wb:internalSdkErrNoS2sLeak:" + mode);
+            check(!String.valueOf(bbResp.get("message")).contains("10.0.1.5"), "wb:internalSdkErrNoTransportLeak:" + mode);
+            check(!String.valueOf(bbResp.get("message")).contains("16 MiB"), "wb:internalSdkErrNoOverflowLeak:" + mode);
             check(!String.valueOf(bbResp.get("message")).contains("bogus"), "wb:internalSdkErrNoBogusLeak:" + mode);
         }
+
+        // P3-3: non-string traceId (e.g. JSON number 123) in validly signed webhook body must echo "" not "123"
+        byte[] numTraceUnknownRaw = "{\"traceId\": 123, \"username\": \"alice\"}".getBytes(StandardCharsets.UTF_8);
+        Map<String, Object> numTraceUnknownResp = dlDisp.handle("/wallet/unknown", apiKey, BaccaratSdk.signBody(numTraceUnknownRaw, secret), numTraceUnknownRaw);
+        checkEq(numTraceUnknownResp.get("status"), BaccaratSdk.StatusCode.SC_INVALID_REQUEST, "wb:p33NumTraceUnknownStatus");
+        checkEq(numTraceUnknownResp.get("traceId"), "", "wb:p33NumTraceUnknownEmpty");
+
+        byte[] numTraceErrRaw = "{\"traceId\": 123, \"mode\": \"s2s_transport_err\"}".getBytes(StandardCharsets.UTF_8);
+        Map<String, Object> numTraceErrResp = dlDisp.handle("/wallet/bet_result", apiKey, BaccaratSdk.signBody(numTraceErrRaw, secret), numTraceErrRaw);
+        checkEq(numTraceErrResp.get("status"), BaccaratSdk.StatusCode.SC_OPERATOR_TIMEOUT, "wb:p33NumTraceErrStatus");
+        checkEq(numTraceErrResp.get("traceId"), "", "wb:p33NumTraceErrEmpty");
 
         for (String badAmt : new String[]{"not_a_number", "1.123456", "-5.00"}) {
             byte[] bdRaw = ("{\"traceId\":\"t_java_bad_dec\",\"amount\":\"" + badAmt + "\"}").getBytes(StandardCharsets.UTF_8);

@@ -441,6 +441,15 @@ func TestS2SClientAndWebhookHTTPServer(t *testing.T) {
 			case "m7_redirect":
 				w.Header().Set("Location", "/leaked")
 				w.WriteHeader(http.StatusTemporaryRedirect)
+			case "m4_overflow":
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				chunk := bytes.Repeat([]byte("a"), 65536)
+				for i := 0; i < 260; i++ {
+					if _, err := w.Write(chunk); err != nil {
+						return
+					}
+				}
 			default:
 				w.WriteHeader(http.StatusTooManyRequests)
 				_, _ = w.Write([]byte("Too Many Requests"))
@@ -519,6 +528,13 @@ func TestS2SClientAndWebhookHTTPServer(t *testing.T) {
 	var errRedir *ApiError
 	if !errors.As(err, &errRedir) || errRedir.HTTPStatus != http.StatusTemporaryRedirect || redirectHit {
 		t.Fatalf("expected 307 without following redirect (redirectHit=%v), got %v", redirectHit, err)
+	}
+
+	// P2-4: >16 MiB response body returns non-retryable *ApiError carrying SC_INVALID_REQUEST, HTTPStatus, and TraceID
+	_, ovTrace, err := tsClient.Ping(ctx, PingRequest{TraceID: "m4_overflow"})
+	var errOv *ApiError
+	if !errors.As(err, &errOv) || errOv.Status != SC_INVALID_REQUEST || errOv.HTTPStatus != http.StatusOK || errOv.TraceID != "m4_overflow" || ovTrace != "m4_overflow" || errOv.IsRetryable() {
+		t.Fatalf("expected non-retryable ApiError(SC_INVALID_REQUEST, 200, m4_overflow) on >16 MiB overflow, got trace=%q err=%v", ovTrace, err)
 	}
 
 	// m4: ClearCustomChips emits explicit "customChips": [] while default omits it

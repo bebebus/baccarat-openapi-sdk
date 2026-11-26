@@ -71,6 +71,14 @@ public:
     bool is_retryable() const { return is_retryable_status(status); }
 };
 
+class TransportError : public SdkError {
+public:
+    explicit TransportError(const std::string& msg)
+        : SdkError(StatusCode::SC_OPERATOR_TIMEOUT, msg) {}
+    TransportError(std::string c, const std::string& msg)
+        : SdkError(std::move(c), msg) {}
+};
+
 // 1. Raw-byte HMAC-SHA256 signing & timing-safe verification
 std::string sign_body(const std::string& raw_body, const std::string& hmac_secret);
 bool verify_signature(const std::string& raw_body, const std::string& signature_header, const std::string& hmac_secret);

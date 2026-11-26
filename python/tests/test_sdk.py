@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from baccarat_sdk import (
     BaccaratApiError,
     BaccaratSdkError,
+    BaccaratTransportError,
     Client,
     Config,
     Environment,
@@ -401,7 +402,7 @@ class TestBaccaratPythonSdk(unittest.TestCase):
             redir_srv.shutdown()
             redir_srv.server_close()
 
-        # 6. v1.5.8 regressions: deadlock, S2S ApiError & allowlist SdkError safety, ASCII decimal regex, HTTPError read failure, UNSET/None null clearing, wallet helpers
+        # 6. v1.5.9 regressions: deadlock, S2S ApiError/TransportError/overflow & allowlist SdkError safety, ASCII decimal regex, HTTPError read failure, UNSET/None null clearing, wallet helpers
         with self.assertRaises(BaccaratSdkError) as ctx_unicode_dec:
             decimal_to_ledger_units("\u0661\u0660\u0660.\u0660\u0660", 2)
         self.assertEqual(ctx_unicode_dec.exception.code, "INVALID_DECIMAL_AMOUNT")
@@ -427,6 +428,15 @@ class TestBaccaratPythonSdk(unittest.TestCase):
                         trace_id="t_upstream_s2s",
                         http_status=400,
                     )
+                if mode == "s2s_overflow_err":
+                    raise BaccaratApiError(
+                        StatusCode.SC_INVALID_REQUEST,
+                        "Gateway response exceeded 16 MiB limit",
+                        trace_id="t_upstream_overflow",
+                        http_status=200,
+                    )
+                if mode == "s2s_transport_err":
+                    raise BaccaratTransportError("curl failed: 10.0.1.5:8443 proxy refused")
                 if mode == "sdk_sc_ok":
                     raise BaccaratSdkError("bogus SC_OK error", StatusCode.SC_OK)
                 if mode == "sdk_sc_custom":
@@ -451,7 +461,7 @@ class TestBaccaratPythonSdk(unittest.TestCase):
         self.assertNotIn("40P01", body_dl["message"])
         self.assertNotIn("deadlock", body_dl["message"])
 
-        for mode in ("bad_balance", "nan_balance", "s2s_api_err", "sdk_sc_ok", "sdk_sc_custom", "sdk_sc_prefix"):
+        for mode in ("bad_balance", "nan_balance", "s2s_api_err", "s2s_overflow_err", "s2s_transport_err", "sdk_sc_ok", "sdk_sc_custom", "sdk_sc_prefix"):
             bb_raw = json.dumps({"traceId": f"t_py_{mode}", "mode": mode}).encode("utf-8")
             st_bb, body_bb = dl_disp.handle("/wallet/bet_result", api_key, sign_body(bb_raw, secret), bb_raw)
             self.assertEqual(st_bb, 200)
@@ -461,6 +471,9 @@ class TestBaccaratPythonSdk(unittest.TestCase):
             self.assertNotIn("wallet_ok", body_bb["message"])
             self.assertNotIn("INVALID_ARGUMENT", body_bb["message"])
             self.assertNotIn("upstream", body_bb["message"])
+            self.assertNotIn("10.0.1.5", body_bb["message"])
+            self.assertNotIn("proxy", body_bb["message"])
+            self.assertNotIn("16 MiB", body_bb["message"])
             self.assertNotIn("bogus", body_bb["message"])
 
         for bad_amt in ("not_a_number", "1.123456", "-5.00"):
@@ -545,8 +558,9 @@ class TestBaccaratPythonSdk(unittest.TestCase):
         broken_err = BrokenHttpError("http://127.0.0.1/operator/v1/ping", 502, "Bad Gateway", {}, io.BytesIO(b"x"))  # type: ignore[arg-type]
         with mock.patch.object(_sdk_mod._NO_REDIRECT_OPENER, "open", side_effect=broken_err):
             default_client = Client(Config(api_key=api_key, hmac_secret=secret, base_url="http://127.0.0.1:9"))
-            with self.assertRaises(BaccaratSdkError) as ctx_read_err:
+            with self.assertRaises(BaccaratTransportError) as ctx_read_err:
                 default_client.ping(trace_id="t_httperr_read")
+            self.assertIsInstance(ctx_read_err.exception, BaccaratSdkError)
             self.assertNotIsInstance(ctx_read_err.exception, BaccaratApiError)
             self.assertEqual(ctx_read_err.exception.code, StatusCode.SC_OPERATOR_TIMEOUT)
             self.assertTrue(is_retryable_status(ctx_read_err.exception.code))

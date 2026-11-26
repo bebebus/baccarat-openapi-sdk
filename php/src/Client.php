@@ -28,7 +28,7 @@ final class Client
     {
         $ch = curl_init($url);
         if ($ch === false) {
-            throw new BaccaratSdkException('Failed to initialize cURL', StatusCode::SC_OPERATOR_TIMEOUT);
+            throw new BaccaratTransportException('Failed to initialize cURL', StatusCode::SC_OPERATOR_TIMEOUT);
         }
         $headerLines = [];
         foreach ($headers as $k => $v) {
@@ -60,10 +60,16 @@ final class Client
         $errMsg = curl_error($ch);
         $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
         if ($overflow) {
-            throw new BaccaratSdkException('Gateway response exceeded 16 MiB limit', StatusCode::SC_INVALID_REQUEST);
+            throw new BaccaratApiException(
+                StatusCode::SC_INVALID_REQUEST,
+                'Gateway response exceeded 16 MiB limit',
+                '',
+                null,
+                $httpCode
+            );
         }
         if ($ok === false || $errNo !== 0) {
-            throw new BaccaratSdkException("cURL error ({$errNo}): {$errMsg}", StatusCode::SC_OPERATOR_TIMEOUT);
+            throw new BaccaratTransportException("cURL error ({$errNo}): {$errMsg}", StatusCode::SC_OPERATOR_TIMEOUT);
         }
         return [$httpCode, $respBuf];
     }
@@ -112,12 +118,25 @@ final class Client
             $headers['X-Timestamp'] = (string) (int) floor(microtime(true) * 1000);
         }
 
-        [$httpStatus, $rawResp] = ($this->transport)(
-            $this->config->baseUrl . $routePath,
-            $headers,
-            $rawJson,
-            $this->config->timeoutMs
-        );
+        try {
+            [$httpStatus, $rawResp] = ($this->transport)(
+                $this->config->baseUrl . $routePath,
+                $headers,
+                $rawJson,
+                $this->config->timeoutMs
+            );
+        } catch (BaccaratApiException $e) {
+            if ($e->traceId === '') {
+                throw new BaccaratApiException(
+                    $e->status,
+                    $e->getMessage(),
+                    $traceId,
+                    $e->validation,
+                    $e->httpStatus
+                );
+            }
+            throw $e;
+        }
 
         $probeObj = json_decode($rawResp, false, 64);
         if (!($probeObj instanceof \stdClass)) {

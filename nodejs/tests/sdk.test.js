@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import {
   BaccaratApiError,
   BaccaratSdkError,
+  BaccaratTransportError,
   Client,
   Config,
   Environment,
@@ -420,7 +421,8 @@ test('WebhookDispatcher & InMemoryWallet full seamless wallet lifecycle', async 
   assert.equal(parsedObjRes.body.status, StatusCode.SC_INVALID_REQUEST);
   assert.equal(parsedObjRes.body.traceId, 't_obj');
 
-  // M2: real HTTP transport total-deadline timeout & mid-body TCP reset do not hang or crash process
+  // M2 & P2-4: real HTTP transport total-deadline timeout, mid-body TCP reset -> BaccaratTransportError,
+  // and >16 MiB response body -> BaccaratApiError(SC_INVALID_REQUEST, httpStatus, traceId)
   const edgeSrv = http.createServer((req, res) => {
     req.resume();
     if (req.url === '/operator/v1/ping') {
@@ -430,6 +432,23 @@ test('WebhookDispatcher & InMemoryWallet full seamless wallet lifecycle', async 
         if (!res.destroyed) res.write(' ');
       }, 30);
       res.on('close', () => clearInterval(iv));
+      return;
+    }
+    if (req.url === '/operator/v1/game/terminate') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      const chunk = Buffer.alloc(65536, 0x61);
+      let remaining = 260;
+      const writeMore = () => {
+        while (remaining > 0 && !res.destroyed) {
+          remaining -= 1;
+          if (!res.write(chunk)) {
+            res.once('drain', writeMore);
+            return;
+          }
+        }
+        if (!res.destroyed) res.end();
+      };
+      writeMore();
       return;
     }
     res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': '1024' });
@@ -442,19 +461,28 @@ test('WebhookDispatcher & InMemoryWallet full seamless wallet lifecycle', async 
     const deadlineClient = new Client({ apiKey, hmacSecret: secret, baseUrl: `http://127.0.0.1:${edgePort}`, timeoutMs: 120 });
     await assert.rejects(
       () => deadlineClient.ping(),
-      (err) => err instanceof BaccaratSdkError && err.code === StatusCode.SC_OPERATOR_TIMEOUT,
+      (err) => err instanceof BaccaratTransportError && err instanceof BaccaratSdkError && err.code === StatusCode.SC_OPERATOR_TIMEOUT,
     );
     const resetClient = new Client({ apiKey, hmacSecret: secret, baseUrl: `http://127.0.0.1:${edgePort}`, timeoutMs: 2000 });
     await assert.rejects(
       () => resetClient.listTables(),
-      (err) => err instanceof BaccaratSdkError && err.code === StatusCode.SC_OPERATOR_TIMEOUT,
+      (err) => err instanceof BaccaratTransportError && err instanceof BaccaratSdkError && err.code === StatusCode.SC_OPERATOR_TIMEOUT,
+    );
+    await assert.rejects(
+      () => resetClient.terminateSessions({ traceId: 't_node_overflow' }),
+      (err) =>
+        err instanceof BaccaratApiError &&
+        err.status === StatusCode.SC_INVALID_REQUEST &&
+        err.httpStatus === 200 &&
+        err.traceId === 't_node_overflow' &&
+        !err.isRetryable(),
     );
   } finally {
     edgeSrv.close();
   }
 });
 
-test('v1.5.8 regressions: deadlock, S2S ApiError & allowlist SdkError safety, wallet response builders', async () => {
+test('v1.5.9 regressions: deadlock, S2S ApiError/TransportError/overflow & allowlist SdkError safety, wallet response builders', async () => {
   const apiKey = 'ak_0123456789abcdef0123456789abcdef';
   const secret = 'dGVzdF9zZWNyZXRfNDBfY2hhcnNfYmFzZTY0dXJsX2s';
   const deadlockWallet = {
@@ -477,6 +505,17 @@ test('v1.5.8 regressions: deadlock, S2S ApiError & allowlist SdkError safety, wa
           message: 'upstream S2S failure secret detail',
           httpStatus: 400,
         });
+      }
+      if (req.mode === 's2s_overflow_err') {
+        throw new BaccaratApiError({
+          traceId: 't_upstream_overflow',
+          status: StatusCode.SC_INVALID_REQUEST,
+          message: 'Gateway response exceeded 16 MiB limit',
+          httpStatus: 200,
+        });
+      }
+      if (req.mode === 's2s_transport_err') {
+        throw new BaccaratTransportError('curl failed: 10.0.1.5:8443 proxy refused');
       }
       if (req.mode === 'sdk_sc_ok') {
         throw new BaccaratSdkError('bogus SC_OK error', StatusCode.SC_OK);
@@ -502,7 +541,7 @@ test('v1.5.8 regressions: deadlock, S2S ApiError & allowlist SdkError safety, wa
   assert.ok(!String(settleRes.body.message).includes('40P01'));
   assert.ok(!String(settleRes.body.message).includes('deadlock'));
 
-  for (const mode of ['bad_balance', 'nan_balance', 's2s_api_err', 'sdk_sc_ok', 'sdk_sc_custom', 'sdk_sc_prefix']) {
+  for (const mode of ['bad_balance', 'nan_balance', 's2s_api_err', 's2s_overflow_err', 's2s_transport_err', 'sdk_sc_ok', 'sdk_sc_custom', 'sdk_sc_prefix']) {
     const badBalRaw = Buffer.from(JSON.stringify({ traceId: `t_${mode}`, transactionId: 'stl_bad', mode }), 'utf8');
     const badBalRes = await disp.handle('/wallet/bet_result', apiKey, signBody(badBalRaw, secret), badBalRaw);
     assert.equal(badBalRes.statusCode, 200);
@@ -512,6 +551,9 @@ test('v1.5.8 regressions: deadlock, S2S ApiError & allowlist SdkError safety, wa
     assert.ok(!String(badBalRes.body.message).includes('walletOk'));
     assert.ok(!String(badBalRes.body.message).includes('INVALID_ARGUMENT'));
     assert.ok(!String(badBalRes.body.message).includes('upstream'));
+    assert.ok(!String(badBalRes.body.message).includes('10.0.1.5'));
+    assert.ok(!String(badBalRes.body.message).includes('proxy'));
+    assert.ok(!String(badBalRes.body.message).includes('16 MiB'));
     assert.ok(!String(badBalRes.body.message).includes('bogus'));
   }
 

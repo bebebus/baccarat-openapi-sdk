@@ -6,6 +6,7 @@ require_once __DIR__ . '/../autoload.php';
 
 use Bebebus\BaccaratSdk\BaccaratApiException;
 use Bebebus\BaccaratSdk\BaccaratSdkException;
+use Bebebus\BaccaratSdk\BaccaratTransportException;
 use Bebebus\BaccaratSdk\Client;
 use Bebebus\BaccaratSdk\Config;
 use Bebebus\BaccaratSdk\Idempotency;
@@ -325,7 +326,33 @@ assertEq($utf8Res['status'], StatusCode::SC_INVALID_REQUEST, 'wb:m10Utf8TraceSta
 assertEq((bool) preg_match('//u', (string) $utf8Res['traceId']), true, 'wb:m10Utf8Valid');
 assertEq($utf8Res['traceId'], str_repeat('中', 128), 'wb:m10Utf8CharCount');
 
-// 8. v1.5.8 regressions: deadlock, S2S ApiException & allowlist SdkException safety, WalletResponse builders
+// 8. v1.5.9 regressions: deadlock, S2S ApiException/TransportException/overflow & allowlist SdkException safety, WalletResponse builders
+// Verify postSigned attaches traceId on 16 MiB overflow BaccaratApiException with empty traceId
+$ovClient = new Client(
+    $cfg,
+    static function (string $url, array $headers, string $rawBody, int $timeoutMs): array {
+        throw new BaccaratApiException(StatusCode::SC_INVALID_REQUEST, 'Gateway response exceeded 16 MiB limit', '', null, 200);
+    }
+);
+$caughtPhpOv = false;
+try {
+    $ovClient->ping(['traceId' => 't_php_ov']);
+} catch (BaccaratApiException $e) {
+    $caughtPhpOv = ($e->status === StatusCode::SC_INVALID_REQUEST && $e->httpStatus === 200 && $e->traceId === 't_php_ov' && !$e->isRetryable());
+}
+assertEq($caughtPhpOv, true, 's2s:phpOverflowApiException');
+
+// Verify real cURL transport failure raises BaccaratTransportException (subclass of BaccaratSdkException)
+$deadPortCfg = new Config($apiKey, $secret, Config::ENV_PRODUCTION, 'http://127.0.0.1:1', 500);
+$deadPortClient = new Client($deadPortCfg);
+$caughtPhpTransport = false;
+try {
+    $deadPortClient->ping(['traceId' => 't_php_connrefused']);
+} catch (BaccaratTransportException $e) {
+    $caughtPhpTransport = ($e instanceof BaccaratSdkException && $e->errorCode === StatusCode::SC_OPERATOR_TIMEOUT);
+}
+assertEq($caughtPhpTransport, true, 's2s:phpCurlTransportException');
+
 $deadlockWallet = new class implements \Bebebus\BaccaratSdk\WalletHandlerInterface {
     public function onBalance(array $req): array { throw new BaccaratSdkException('explicit sdk err', StatusCode::SC_INSUFFICIENT_FUNDS); }
     public function onBet(array $req): array {
@@ -342,6 +369,12 @@ $deadlockWallet = new class implements \Bebebus\BaccaratSdk\WalletHandlerInterfa
         }
         if ($mode === 's2s_api_err') {
             throw new BaccaratApiException(StatusCode::SC_INVALID_REQUEST, 'upstream S2S failure secret detail', 't_upstream_s2s', null, 400);
+        }
+        if ($mode === 's2s_overflow_err') {
+            throw new BaccaratApiException(StatusCode::SC_INVALID_REQUEST, 'Gateway response exceeded 16 MiB limit', 't_upstream_overflow', null, 200);
+        }
+        if ($mode === 's2s_transport_err') {
+            throw new BaccaratTransportException('curl failed: 10.0.1.5:8443 proxy refused');
         }
         if ($mode === 'sdk_sc_ok') {
             throw new BaccaratSdkException('bogus SC_OK error', StatusCode::SC_OK);
@@ -365,7 +398,7 @@ assertEq($dlOut['body']['status'], StatusCode::SC_OPERATOR_TIMEOUT, 'wb:deadlock
 assertEq($dlOut['body']['message'], 'Temporary wallet handler error', 'wb:deadlockSanitizedMsg');
 assertEq(str_contains((string) $dlOut['body']['message'], '40P01'), false, 'wb:deadlockNoLeakSql');
 
-foreach (['bad_balance', 'nan_balance', 's2s_api_err', 'sdk_sc_ok', 'sdk_sc_custom', 'sdk_sc_prefix'] as $mode) {
+foreach (['bad_balance', 'nan_balance', 's2s_api_err', 's2s_overflow_err', 's2s_transport_err', 'sdk_sc_ok', 'sdk_sc_custom', 'sdk_sc_prefix'] as $mode) {
     $bbRaw = json_encode(['traceId' => "t_php_$mode", 'mode' => $mode], JSON_THROW_ON_ERROR);
     $bbOut = $dlDisp->handle('/wallet/bet_result', $apiKey, Signing::signBody($bbRaw, $secret), $bbRaw);
     assertEq($bbOut['statusCode'], 200, "wb:internalSdkErrHttp200:$mode");
@@ -374,6 +407,8 @@ foreach (['bad_balance', 'nan_balance', 's2s_api_err', 'sdk_sc_ok', 'sdk_sc_cust
     assertEq($bbOut['body']['message'], 'Temporary wallet handler error', "wb:internalSdkErrMsg:$mode");
     assertEq(str_contains((string) $bbOut['body']['message'], 'WalletResponse::ok'), false, "wb:internalSdkErrNoLeak:$mode");
     assertEq(str_contains((string) $bbOut['body']['message'], 'upstream'), false, "wb:internalSdkErrNoS2sLeak:$mode");
+    assertEq(str_contains((string) $bbOut['body']['message'], '10.0.1.5'), false, "wb:internalSdkErrNoTransportLeak:$mode");
+    assertEq(str_contains((string) $bbOut['body']['message'], '16 MiB'), false, "wb:internalSdkErrNoOverflowLeak:$mode");
     assertEq(str_contains((string) $bbOut['body']['message'], 'bogus'), false, "wb:internalSdkErrNoBogusLeak:$mode");
 }
 

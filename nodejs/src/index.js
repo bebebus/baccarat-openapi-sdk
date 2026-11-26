@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Zero-dependency Node.js SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.8).
+// Zero-dependency Node.js SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.9).
 
 import crypto from 'node:crypto';
 import http from 'node:http';
@@ -88,6 +88,13 @@ export class BaccaratApiError extends BaccaratSdkError {
 
   isRetryable() {
     return isRetryableStatus(this.status);
+  }
+}
+
+export class BaccaratTransportError extends BaccaratSdkError {
+  constructor(message, code = StatusCode.SC_OPERATOR_TIMEOUT) {
+    super(message, code);
+    this.name = 'BaccaratTransportError';
   }
 }
 
@@ -362,11 +369,11 @@ function defaultHttpPost(urlStr, headers, rawBodyBuf, timeoutMs) {
     };
     const handleStreamError = (err) => {
       if (timedOut) {
-        finishReject(new BaccaratSdkError(`Request timed out after ${timeoutMs}ms`, StatusCode.SC_OPERATOR_TIMEOUT));
+        finishReject(new BaccaratTransportError(`Request timed out after ${timeoutMs}ms`, StatusCode.SC_OPERATOR_TIMEOUT));
       } else if (err instanceof BaccaratSdkError) {
         finishReject(err);
       } else {
-        finishReject(new BaccaratSdkError(`Network error: ${err.message}`, StatusCode.SC_OPERATOR_TIMEOUT));
+        finishReject(new BaccaratTransportError(`Network error: ${err.message}`, StatusCode.SC_OPERATOR_TIMEOUT));
       }
     };
     const req = transport.request(
@@ -386,7 +393,13 @@ function defaultHttpPost(urlStr, headers, rawBodyBuf, timeoutMs) {
         res.on('data', (chunk) => {
           received += chunk.length;
           if (received > MAX_HTTP_RESPONSE_BYTES) {
-            finishReject(new BaccaratSdkError('Gateway response exceeded 16 MiB limit', StatusCode.SC_INVALID_REQUEST));
+            finishReject(
+              new BaccaratApiError({
+                status: StatusCode.SC_INVALID_REQUEST,
+                message: 'Gateway response exceeded 16 MiB limit',
+                httpStatus: res.statusCode ?? 0,
+              }),
+            );
             req.destroy();
             return;
           }
@@ -437,12 +450,21 @@ export class Client {
       ...(this.config.sendTimestamp ? { 'X-Timestamp': String(Date.now()) } : {}),
     };
 
-    const { httpStatus, rawBody } = await this.transport(
-      `${this.config.baseUrl}${routePath}`,
-      headers,
-      rawBuf,
-      this.config.timeoutMs,
-    );
+    let httpStatus;
+    let rawBody;
+    try {
+      ({ httpStatus, rawBody } = await this.transport(
+        `${this.config.baseUrl}${routePath}`,
+        headers,
+        rawBuf,
+        this.config.timeoutMs,
+      ));
+    } catch (err) {
+      if (err instanceof BaccaratApiError && !err.traceId) {
+        err.traceId = payload.traceId;
+      }
+      throw err;
+    }
 
     let parsed;
     try {
@@ -1025,7 +1047,7 @@ export class WebhookDispatcher {
       }
       return { statusCode: 200, body: responseBody };
     } catch (err) {
-      if (err instanceof BaccaratSdkError && !(err instanceof BaccaratApiError)) {
+      if (err instanceof BaccaratSdkError && !(err instanceof BaccaratApiError) && !(err instanceof BaccaratTransportError)) {
         const code = typeof err.code === 'string' ? err.code : '';
         if (VALID_ERROR_STATUS_CODES.has(code)) {
           return {

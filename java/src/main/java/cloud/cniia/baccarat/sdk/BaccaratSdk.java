@@ -133,6 +133,16 @@ public final class BaccaratSdk {
         }
     }
 
+    public static final class TransportException extends SdkException {
+        public TransportException(String message) {
+            super(StatusCode.SC_OPERATOR_TIMEOUT, message);
+        }
+
+        public TransportException(String code, String message) {
+            super(code, message);
+        }
+    }
+
     // ── 1. Raw-Byte HMAC-SHA256 Signing & Timing-Safe Verification ──────────
 
     public static String signBody(byte[] rawBody, String hmacSecret) {
@@ -370,14 +380,18 @@ public final class BaccaratSdk {
 
         private static final class BoundedBodySubscriber implements HttpResponse.BodySubscriber<byte[]> {
             private final int maxBytes;
+            private final int httpStatus;
+            private final String traceId;
             private final ByteArrayOutputStream out = new ByteArrayOutputStream(1024);
             private final CompletableFuture<byte[]> body = new CompletableFuture<>();
             private volatile Flow.Subscription subscription;
             private long totalBytes = 0L;
             private volatile boolean failed = false;
 
-            BoundedBodySubscriber(int maxBytes) {
+            BoundedBodySubscriber(int maxBytes, int httpStatus, String traceId) {
                 this.maxBytes = maxBytes;
+                this.httpStatus = httpStatus;
+                this.traceId = traceId;
             }
 
             void cancel() {
@@ -416,7 +430,13 @@ public final class BaccaratSdk {
                             sub.cancel();
                         }
                         body.completeExceptionally(
-                                new SdkException(StatusCode.SC_INVALID_REQUEST, "Gateway response exceeded 16 MiB limit")
+                                new ApiException(
+                                        StatusCode.SC_INVALID_REQUEST,
+                                        "Gateway response exceeded 16 MiB limit",
+                                        traceId,
+                                        null,
+                                        httpStatus
+                                )
                         );
                         return;
                     }
@@ -494,10 +514,11 @@ public final class BaccaratSdk {
 
             int statusCode;
             String responseBody;
+            final String reqTraceId = traceId;
             AtomicBoolean cancelled = new AtomicBoolean(false);
             AtomicReference<BoundedBodySubscriber> activeSub = new AtomicReference<>();
             HttpResponse.BodyHandler<byte[]> boundedHandler = responseInfo -> {
-                BoundedBodySubscriber sub = new BoundedBodySubscriber(MAX_HTTP_RESPONSE_BYTES);
+                BoundedBodySubscriber sub = new BoundedBodySubscriber(MAX_HTTP_RESPONSE_BYTES, responseInfo.statusCode(), reqTraceId);
                 activeSub.set(sub);
                 if (cancelled.get()) {
                     sub.cancel();
@@ -517,7 +538,7 @@ public final class BaccaratSdk {
                     sub.cancel();
                 }
                 cf.cancel(true);
-                throw new SdkException(StatusCode.SC_OPERATOR_TIMEOUT, "Request timed out after " + config.timeoutMs + "ms");
+                throw new TransportException("Request timed out after " + config.timeoutMs + "ms");
             } catch (InterruptedException e) {
                 cancelled.set(true);
                 BoundedBodySubscriber sub = activeSub.get();
@@ -526,13 +547,13 @@ public final class BaccaratSdk {
                 }
                 cf.cancel(true);
                 Thread.currentThread().interrupt();
-                throw new SdkException(StatusCode.SC_OPERATOR_TIMEOUT, "Request interrupted: " + e.getMessage());
+                throw new TransportException("Request interrupted: " + e.getMessage());
             } catch (Exception e) {
                 SdkException cause = unwrapSdkException(e);
                 if (cause != null) {
                     throw cause;
                 }
-                throw new SdkException(StatusCode.SC_OPERATOR_TIMEOUT, "Network error: " + e.getMessage());
+                throw new TransportException("Network error: " + e.getMessage());
             }
 
             Map<String, Object> parsed;
@@ -642,7 +663,7 @@ public final class BaccaratSdk {
                                     Thread.sleep(waitMs);
                                 } catch (InterruptedException ie) {
                                     Thread.currentThread().interrupt();
-                                    throw new SdkException(StatusCode.SC_OPERATOR_TIMEOUT, "Interrupted during rate-limit backoff");
+                                    throw new TransportException("Interrupted during rate-limit backoff");
                                 }
                             }
                             continue;
@@ -1076,7 +1097,7 @@ public final class BaccaratSdk {
             String traceId = "";
             try {
                 parsed = JsonCodec.parseObject(new String(safeBody, StandardCharsets.UTF_8));
-                traceId = str(parsed, "traceId").trim();
+                traceId = parsed.get("traceId") instanceof String s ? s.trim() : "";
                 if (traceId.length() > 128) traceId = traceId.substring(0, 128);
             } catch (Exception e) {
                 return makeErrEnvelope("", StatusCode.SC_INVALID_REQUEST, "Invalid JSON");
@@ -1091,7 +1112,7 @@ public final class BaccaratSdk {
                 if (clean.endsWith("/wallet/adjustment")) return wallet.onAdjustment(parsed);
                 return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "Unknown route");
             } catch (SdkException e) {
-                if (!(e instanceof ApiException)) {
+                if (!(e instanceof ApiException) && !(e instanceof TransportException)) {
                     if (StatusCode.isValidErrorCode(e.code)) {
                         return makeErrEnvelope(traceId, e.code, e.getMessage());
                     }

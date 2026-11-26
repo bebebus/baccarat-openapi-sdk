@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.8).
+//! Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.9).
 
 pub mod crypto;
 mod curl_ffi;
@@ -1094,21 +1094,22 @@ impl WalletHandler for InMemoryWallet {
         ) else {
             return Self::err_env(tid, status_code::SC_INVALID_REQUEST, "Bad bet_result amount");
         };
-        let Some(orig) = st.deducted_bets.get_mut(&bet_id) else {
-            return Self::err_env(tid, status_code::SC_TRANSACTION_NOT_EXISTS, "Original betId missing");
-        };
-        if orig.username != u || orig.currency != cur || orig.stake != bet_units {
-            return Self::err_env(tid, status_code::SC_INVALID_REQUEST, "bet_result mismatch");
+        {
+            let Some(orig) = st.deducted_bets.get(&bet_id) else {
+                return Self::err_env(tid, status_code::SC_TRANSACTION_NOT_EXISTS, "Original betId missing");
+            };
+            if orig.username != u || orig.currency != cur || orig.stake != bet_units {
+                return Self::err_env(tid, status_code::SC_INVALID_REQUEST, "bet_result mismatch");
+            }
+            if orig.state != BetState::Deducted {
+                return Self::err_env(tid, status_code::SC_TRANSACTION_DUPLICATED, "betId already finalized");
+            }
         }
-        if orig.state != BetState::Deducted {
-            return Self::err_env(tid, status_code::SC_TRANSACTION_DUPLICATED, "betId already finalized");
-        }
-        orig.state = BetState::Settled;
-        let acct = st.accounts.get_mut(u).unwrap();
-        let Some(next_units) = acct.units.checked_add(win) else {
+        let Some(next_units) = st.accounts.get(u).unwrap().units.checked_add(win) else {
             return Self::err_env(tid, status_code::SC_INVALID_REQUEST, "Balance overflow");
         };
-        acct.units = next_units;
+        st.accounts.get_mut(u).unwrap().units = next_units;
+        st.deducted_bets.get_mut(&bet_id).unwrap().state = BetState::Settled;
         st.transactions.insert(
             tx_id,
             TxRec {
@@ -1153,29 +1154,30 @@ impl WalletHandler for InMemoryWallet {
         if refund <= 0 {
             return Self::err_env(tid, status_code::SC_INVALID_REQUEST, "Rollback amount must be positive");
         }
-        let Some(orig) = st.deducted_bets.get_mut(&bet_id) else {
-            st.transactions.insert(
-                tx_id,
-                TxRec {
-                    kind: "ROLLBACK",
-                    fp,
-                    empty: true,
-                },
-            );
-            return Self::err_env(tid, status_code::SC_TRANSACTION_NOT_EXISTS, "Never deducted");
-        };
-        if orig.username != u || orig.currency != cur || orig.stake != refund {
-            return Self::err_env(tid, status_code::SC_INVALID_REQUEST, "Rollback mismatch");
+        {
+            let Some(orig) = st.deducted_bets.get(&bet_id) else {
+                st.transactions.insert(
+                    tx_id,
+                    TxRec {
+                        kind: "ROLLBACK",
+                        fp,
+                        empty: true,
+                    },
+                );
+                return Self::err_env(tid, status_code::SC_TRANSACTION_NOT_EXISTS, "Never deducted");
+            };
+            if orig.username != u || orig.currency != cur || orig.stake != refund {
+                return Self::err_env(tid, status_code::SC_INVALID_REQUEST, "Rollback mismatch");
+            }
+            if orig.state != BetState::Deducted {
+                return Self::err_env(tid, status_code::SC_TRANSACTION_DUPLICATED, "betId already finalized");
+            }
         }
-        if orig.state != BetState::Deducted {
-            return Self::err_env(tid, status_code::SC_TRANSACTION_DUPLICATED, "betId already finalized");
-        }
-        orig.state = BetState::RolledBack;
-        let acct = st.accounts.get_mut(u).unwrap();
-        let Some(next_units) = acct.units.checked_add(refund) else {
+        let Some(next_units) = st.accounts.get(u).unwrap().units.checked_add(refund) else {
             return Self::err_env(tid, status_code::SC_INVALID_REQUEST, "Balance overflow");
         };
-        acct.units = next_units;
+        st.accounts.get_mut(u).unwrap().units = next_units;
+        st.deducted_bets.get_mut(&bet_id).unwrap().state = BetState::RolledBack;
         st.transactions.insert(
             tx_id,
             TxRec {
@@ -2105,7 +2107,7 @@ mod tests {
         );
         assert_eq!(out.get("data").get("balance").as_str(), Some("500.00"));
 
-        // v1.5.8 regressions: panic & wallet_ok isolation -> SC_OPERATOR_TIMEOUT, SdkError PartialEq/Eq, wallet_ok/wallet_error allowlist guards, strict JSON whitespace & UTF-8 lossy trace hint
+        // v1.5.9 regressions: panic & wallet_ok isolation -> SC_OPERATOR_TIMEOUT, SdkError PartialEq/Eq, wallet_ok/wallet_error allowlist guards, strict JSON whitespace & UTF-8 lossy trace hint, atomic checked_add before state mutation
         assert!(decimal_to_ledger_units("0", 0, false) == Ok(0));
         assert!(decimal_to_ledger_units("0.00", 2, false) == Ok(0));
         assert_eq!(SdkError::Money("x".into()), SdkError::Money("x".into()));
@@ -2212,5 +2214,99 @@ mod tests {
         let hint_res = pw_disp.handle("/wallet/bet", "bad_key", "bad_sig", &split_utf8);
         assert_eq!(hint_res.get("status").as_str(), Some(status_code::SC_AUTHENTICATION_FAILED));
         assert_eq!(hint_res.get("traceId").as_str(), Some("t_split_1024"));
+
+        // P3-2: InMemoryWallet::on_bet_result & on_rollback must NOT mutate bet state on i128 balance overflow
+        let ov_wallet = InMemoryWallet::new();
+        // i128::MAX = 170141183460469231731687303715884105727; exp=0 => 1 unit = 0.001 => 170141183460469231731687303715884105 leaves 727 units headroom
+        ov_wallet
+            .add_account("whale_settle", "JPY", "170141183460469231731687303715884105", 0, &[])
+            .unwrap();
+        let mut bet_ov = Json::object();
+        bet_ov.set("traceId", Json::Str("t_ov_bet_1".into()));
+        bet_ov.set("transactionId", Json::Str("tx_ov_bet_1".into()));
+        bet_ov.set("betId", Json::Str("bet_ov_1".into()));
+        bet_ov.set("externalTransactionId", Json::Str("bet_ov_1".into()));
+        bet_ov.set("roundId", Json::Str("r_ov_1".into()));
+        bet_ov.set("username", Json::Str("whale_settle".into()));
+        bet_ov.set("currency", Json::Str("JPY".into()));
+        bet_ov.set("gameCode", Json::Str("BACCARAT".into()));
+        bet_ov.set("amount", Json::Str("1".into()));
+        assert_eq!(ov_wallet.on_bet(&bet_ov).get("status").as_str(), Some(status_code::SC_OK));
+
+        let mut stl_ov = Json::object();
+        stl_ov.set("traceId", Json::Str("t_ov_stl_fail".into()));
+        stl_ov.set("transactionId", Json::Str("tx_ov_stl_fail".into()));
+        stl_ov.set("betId", Json::Str("bet_ov_1".into()));
+        stl_ov.set("externalTransactionId", Json::Str("bet_ov_1".into()));
+        stl_ov.set("roundId", Json::Str("r_ov_1".into()));
+        stl_ov.set("username", Json::Str("whale_settle".into()));
+        stl_ov.set("currency", Json::Str("JPY".into()));
+        stl_ov.set("gameCode", Json::Str("BACCARAT".into()));
+        stl_ov.set("betAmount", Json::Str("1".into()));
+        stl_ov.set("winAmount", Json::Str("2".into()));
+        let stl_fail_res = ov_wallet.on_bet_result(&stl_ov);
+        assert_eq!(stl_fail_res.get("status").as_str(), Some(status_code::SC_INVALID_REQUEST));
+        assert_eq!(stl_fail_res.get("message").as_str(), Some("Balance overflow"));
+
+        // Bet must still be Deducted so a valid non-overflowing settlement succeeds
+        let mut stl_ok = stl_ov.clone();
+        stl_ok.set("traceId", Json::Str("t_ov_stl_ok".into()));
+        stl_ok.set("transactionId", Json::Str("tx_ov_stl_ok".into()));
+        stl_ok.set("winAmount", Json::Str("1".into()));
+        assert_eq!(ov_wallet.on_bet_result(&stl_ok).get("status").as_str(), Some(status_code::SC_OK));
+
+        // Same atomicity check for on_rollback
+        ov_wallet
+            .add_account("whale_rb", "JPY", "170141183460469231731687303715884104", 0, &[])
+            .unwrap();
+        let mut bet_rb = bet_ov.clone();
+        bet_rb.set("traceId", Json::Str("t_ov_rb_bet".into()));
+        bet_rb.set("transactionId", Json::Str("tx_ov_rb_bet".into()));
+        bet_rb.set("betId", Json::Str("bet_ov_rb".into()));
+        bet_rb.set("externalTransactionId", Json::Str("bet_ov_rb".into()));
+        bet_rb.set("username", Json::Str("whale_rb".into()));
+        assert_eq!(ov_wallet.on_bet(&bet_rb).get("status").as_str(), Some(status_code::SC_OK));
+
+        // Credit adjustment pushes balance to ...105000 (727 headroom), so rollback of 1 (1000 units) overflows
+        let mut adj_up = Json::object();
+        adj_up.set("traceId", Json::Str("t_ov_adj_up".into()));
+        adj_up.set("transactionId", Json::Str("tx_ov_adj_up".into()));
+        adj_up.set("betId", Json::Str("bet_ov_rb".into()));
+        adj_up.set("externalTransactionId", Json::Str("bet_ov_rb".into()));
+        adj_up.set("roundId", Json::Str("r_ov_1".into()));
+        adj_up.set("username", Json::Str("whale_rb".into()));
+        adj_up.set("currency", Json::Str("JPY".into()));
+        adj_up.set("gameCode", Json::Str("BACCARAT".into()));
+        adj_up.set("direction", Json::Str("CREDIT".into()));
+        adj_up.set("reasonCode", Json::Str("MANUAL".into()));
+        adj_up.set("amount", Json::Str("2".into()));
+        assert_eq!(ov_wallet.on_adjustment(&adj_up).get("status").as_str(), Some(status_code::SC_OK));
+
+        let mut rb_fail = Json::object();
+        rb_fail.set("traceId", Json::Str("t_ov_rb_fail".into()));
+        rb_fail.set("transactionId", Json::Str("tx_ov_rb_fail".into()));
+        rb_fail.set("betId", Json::Str("bet_ov_rb".into()));
+        rb_fail.set("externalTransactionId", Json::Str("bet_ov_rb".into()));
+        rb_fail.set("roundId", Json::Str("r_ov_1".into()));
+        rb_fail.set("username", Json::Str("whale_rb".into()));
+        rb_fail.set("currency", Json::Str("JPY".into()));
+        rb_fail.set("gameCode", Json::Str("BACCARAT".into()));
+        rb_fail.set("amount", Json::Str("1".into()));
+        let rb_fail_res = ov_wallet.on_rollback(&rb_fail);
+        assert_eq!(rb_fail_res.get("status").as_str(), Some(status_code::SC_INVALID_REQUEST));
+        assert_eq!(rb_fail_res.get("message").as_str(), Some("Balance overflow"));
+
+        // Debit adjustment restores headroom, then rollback must succeed because bet remained Deducted
+        let mut adj_down = adj_up.clone();
+        adj_down.set("traceId", Json::Str("t_ov_adj_down".into()));
+        adj_down.set("transactionId", Json::Str("tx_ov_adj_down".into()));
+        adj_down.set("direction", Json::Str("DEBIT".into()));
+        adj_down.set("amount", Json::Str("1".into()));
+        assert_eq!(ov_wallet.on_adjustment(&adj_down).get("status").as_str(), Some(status_code::SC_OK));
+
+        let mut rb_ok = rb_fail.clone();
+        rb_ok.set("traceId", Json::Str("t_ov_rb_ok".into()));
+        rb_ok.set("transactionId", Json::Str("tx_ov_rb_ok".into()));
+        assert_eq!(ov_wallet.on_rollback(&rb_ok).get("status").as_str(), Some(status_code::SC_OK));
     }
 }

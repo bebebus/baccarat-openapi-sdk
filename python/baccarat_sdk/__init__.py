@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.8)."""
+"""Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.9)."""
 
 from __future__ import annotations
 
@@ -121,6 +121,11 @@ class BaccaratApiError(BaccaratSdkError):
 
     def is_retryable(self) -> bool:
         return is_retryable_status(self.status)
+
+
+class BaccaratTransportError(BaccaratSdkError):
+    def __init__(self, message: str, code: str = StatusCode.SC_OPERATOR_TIMEOUT) -> None:
+        super().__init__(message, code)
 
 
 # ── 1. Raw-Byte HMAC-SHA256 Signing & Timing-Safe Verification ──────────────
@@ -385,7 +390,7 @@ def _default_transport(url: str, headers: Dict[str, str], raw_body: bytes, timeo
         try:
             raw = err.read(MAX_HTTP_RESPONSE_BYTES + 1) if err.fp else b""
         except Exception as read_exc:
-            raise BaccaratSdkError(
+            raise BaccaratTransportError(
                 f"Network error reading HTTP {err.code} body: {read_exc}",
                 StatusCode.SC_OPERATOR_TIMEOUT,
             ) from read_exc
@@ -401,7 +406,7 @@ def _default_transport(url: str, headers: Dict[str, str], raw_body: bytes, timeo
     except BaccaratSdkError:
         raise
     except Exception as exc:
-        raise BaccaratSdkError(f"Network error: {exc}", StatusCode.SC_OPERATOR_TIMEOUT) from exc
+        raise BaccaratTransportError(f"Network error: {exc}", StatusCode.SC_OPERATOR_TIMEOUT) from exc
 
 
 class Client:
@@ -1166,7 +1171,7 @@ class WebhookDispatcher:
                 return 200, adj_fn(parsed)
             return 200, {"traceId": trace_id, "status": StatusCode.SC_INVALID_REQUEST, "message": f"Unknown route {clean}"}
         except BaccaratSdkError as exc:
-            if not isinstance(exc, BaccaratApiError):
+            if not isinstance(exc, (BaccaratApiError, BaccaratTransportError)):
                 code = exc.code if isinstance(exc.code, str) else ""
                 if code in _VALID_ERROR_STATUS_CODES:
                     return 200, {"traceId": trace_id, "status": code, "message": str(exc)}
@@ -1198,6 +1203,7 @@ __all__ = [
     "is_retryable_status",
     "BaccaratSdkError",
     "BaccaratApiError",
+    "BaccaratTransportError",
     "sign_body",
     "verify_signature",
     "verify_webhook_headers",

@@ -72,6 +72,10 @@ export class BaccaratApiError extends BaccaratSdkError {
   isRetryable(): boolean;
 }
 
+export class BaccaratTransportError extends BaccaratSdkError {
+  constructor(message: string, code?: OperatorStatusCode | string);
+}
+
 export class Config {
   readonly apiKey: string;
   readonly hmacSecret: string;

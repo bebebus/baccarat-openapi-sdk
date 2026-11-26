@@ -490,13 +490,17 @@ int main() {
     }
     require_true(caught_m1_503, "s2s:m1Json503");
 
-    // m2: >16 MiB response throws non-retryable SC_INVALID_REQUEST instead of SC_OPERATOR_TIMEOUT
+    // m2 & P2-4: >16 MiB response throws non-retryable ApiError(SC_INVALID_REQUEST, http_status, trace_id)
     bool caught_m2_overflow = false;
     try {
         Json p = Json::object(); p.set("traceId", Json("m2_overflow"));
         ts_client.ping(p);
-    } catch (const SdkError& e) {
-        caught_m2_overflow = (e.code == StatusCode::SC_INVALID_REQUEST && !is_retryable_status(e.code));
+    } catch (const ApiError& e) {
+        caught_m2_overflow = (e.status == StatusCode::SC_INVALID_REQUEST
+            && e.code == StatusCode::SC_INVALID_REQUEST
+            && e.trace_id == "m2_overflow"
+            && e.http_status == 200
+            && !e.is_retryable());
     }
     require_true(caught_m2_overflow, "s2s:m2OverflowNonRetryable");
 
@@ -597,7 +601,7 @@ int main() {
     require_eq(utf8_res.at("status").as_string(), StatusCode::SC_INVALID_REQUEST, "wb:m10Utf8Status");
     require_eq(utf8_res.at("traceId").as_string(), expected_trunc, "wb:m10Utf8Truncated128Chars");
 
-    // 7. v1.5.8 regressions: deadlock, S2S ApiError & allowlist SdkError safety, wallet_ok/wallet_error guards, strict JSON ws trace hint, locale-independent JSON float
+    // 7. v1.5.9 regressions: deadlock, S2S ApiError/TransportError/overflow & allowlist SdkError safety, wallet_ok/wallet_error guards, strict JSON ws trace hint, locale-independent JSON float
     class DeadlockWallet final : public WalletHandler {
     public:
         Json on_balance(const Json&) override { throw SdkError(StatusCode::SC_INSUFFICIENT_FUNDS, "explicit sdk err"); }
@@ -616,6 +620,12 @@ int main() {
             }
             if (mode == "s2s_api_err") {
                 throw ApiError(StatusCode::SC_INVALID_REQUEST, "upstream S2S failure secret detail", "t_upstream_s2s", 400);
+            }
+            if (mode == "s2s_overflow_err") {
+                throw ApiError(StatusCode::SC_INVALID_REQUEST, "Gateway response exceeded 16 MiB limit", "t_upstream_overflow", 200);
+            }
+            if (mode == "s2s_transport_err") {
+                throw TransportError("curl failed: 10.0.1.5:8443 proxy refused");
             }
             if (mode == "sdk_sc_ok") {
                 throw SdkError(StatusCode::SC_OK, "bogus SC_OK error");
@@ -639,7 +649,7 @@ int main() {
     require_eq(dl_res.at("message").as_string(), "Temporary wallet handler error", "wb:deadlockSanitizedMsg");
     require_true(dl_res.at("message").as_string().find("40P01") == std::string::npos, "wb:deadlockNoLeak");
 
-    for (const std::string& mode : std::vector<std::string>{"bad_balance", "nan_balance", "s2s_api_err", "sdk_sc_ok", "sdk_sc_custom", "sdk_sc_prefix"}) {
+    for (const std::string& mode : std::vector<std::string>{"bad_balance", "nan_balance", "s2s_api_err", "s2s_overflow_err", "s2s_transport_err", "sdk_sc_ok", "sdk_sc_custom", "sdk_sc_prefix"}) {
         std::string bb_raw = R"({"traceId":"t_cpp_)" + mode + R"(","mode":")" + mode + R"("})";
         Json bb_res = dl_disp.handle("/wallet/bet_result", api_key, sign_body(bb_raw, secret), bb_raw);
         require_eq(bb_res.at("traceId").as_string(), "t_cpp_" + mode, "wb:internalSdkErrTrace:" + mode);
@@ -647,6 +657,8 @@ int main() {
         require_eq(bb_res.at("message").as_string(), "Temporary wallet handler error", "wb:internalSdkErrMsg:" + mode);
         require_true(bb_res.at("message").as_string().find("wallet_ok") == std::string::npos, "wb:internalSdkErrNoLeak:" + mode);
         require_true(bb_res.at("message").as_string().find("upstream") == std::string::npos, "wb:internalSdkErrNoS2sLeak:" + mode);
+        require_true(bb_res.at("message").as_string().find("10.0.1.5") == std::string::npos, "wb:internalSdkErrNoTransportLeak:" + mode);
+        require_true(bb_res.at("message").as_string().find("16 MiB") == std::string::npos, "wb:internalSdkErrNoOverflowLeak:" + mode);
         require_true(bb_res.at("message").as_string().find("bogus") == std::string::npos, "wb:internalSdkErrNoBogusLeak:" + mode);
     }
 
