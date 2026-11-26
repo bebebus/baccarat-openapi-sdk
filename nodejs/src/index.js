@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Zero-dependency Node.js SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.2).
+// Zero-dependency Node.js SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.3).
 
 import crypto from 'node:crypto';
 import http from 'node:http';
@@ -310,20 +310,50 @@ export class Config {
   }
 }
 
+function fallbackStatusForHttp(httpStatus) {
+  if (httpStatus === 429) return StatusCode.SC_RATE_LIMITED;
+  if (httpStatus >= 500 || httpStatus === 408) return StatusCode.SC_OPERATOR_TIMEOUT;
+  return StatusCode.SC_INVALID_REQUEST;
+}
+
 function defaultHttpPost(urlStr, headers, rawBodyBuf, timeoutMs) {
   return new Promise((resolve, reject) => {
     const url = new URL(urlStr);
     const transport = url.protocol === 'https:' ? https : http;
+    const ac = new AbortController();
     let settled = false;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      ac.abort();
+    }, timeoutMs);
+    const cleanup = () => clearTimeout(timer);
+    const finishResolve = (val) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(val);
+    };
     const finishReject = (err) => {
       if (settled) return;
       settled = true;
+      cleanup();
       reject(err);
+    };
+    const handleStreamError = (err) => {
+      if (timedOut) {
+        finishReject(new BaccaratSdkError(`Request timed out after ${timeoutMs}ms`, StatusCode.SC_OPERATOR_TIMEOUT));
+      } else if (err instanceof BaccaratSdkError) {
+        finishReject(err);
+      } else {
+        finishReject(new BaccaratSdkError(`Network error: ${err.message}`, StatusCode.SC_OPERATOR_TIMEOUT));
+      }
     };
     const req = transport.request(
       url,
       {
         method: 'POST',
+        signal: ac.signal,
         headers: {
           ...headers,
           'Content-Length': String(rawBodyBuf.length),
@@ -332,32 +362,25 @@ function defaultHttpPost(urlStr, headers, rawBodyBuf, timeoutMs) {
       (res) => {
         const chunks = [];
         let received = 0;
+        res.on('error', handleStreamError);
         res.on('data', (chunk) => {
           received += chunk.length;
           if (received > MAX_HTTP_RESPONSE_BYTES) {
-            req.destroy();
             finishReject(new BaccaratSdkError('Gateway response exceeded 16 MiB limit', StatusCode.SC_INVALID_REQUEST));
+            req.destroy();
             return;
           }
           chunks.push(chunk);
         });
         res.on('end', () => {
-          if (settled) return;
-          settled = true;
-          resolve({
+          finishResolve({
             httpStatus: res.statusCode ?? 0,
             rawBody: Buffer.concat(chunks).toString('utf8'),
           });
         });
       },
     );
-    req.setTimeout(timeoutMs, () => {
-      req.destroy(new BaccaratSdkError(`Request timed out after ${timeoutMs}ms`, StatusCode.SC_OPERATOR_TIMEOUT));
-    });
-    req.on('error', (err) => {
-      if (err instanceof BaccaratSdkError) finishReject(err);
-      else finishReject(new BaccaratSdkError(`Network error: ${err.message}`, StatusCode.SC_OPERATOR_TIMEOUT));
-    });
+    req.on('error', handleStreamError);
     req.write(rawBodyBuf);
     req.end();
   });
@@ -407,11 +430,7 @@ export class Client {
     } catch {
       throw new BaccaratApiError({
         traceId: payload.traceId,
-        status: httpStatus === 429
-          ? StatusCode.SC_RATE_LIMITED
-          : httpStatus >= 500 || httpStatus === 408
-            ? StatusCode.SC_OPERATOR_TIMEOUT
-            : StatusCode.SC_INVALID_REQUEST,
+        status: fallbackStatusForHttp(httpStatus),
         message: `Non-JSON HTTP ${httpStatus} response from gateway`,
         httpStatus,
       });
@@ -420,16 +439,17 @@ export class Client {
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       throw new BaccaratApiError({
         traceId: payload.traceId,
-        status: StatusCode.SC_INVALID_REQUEST,
+        status: fallbackStatusForHttp(httpStatus),
         message: 'Malformed envelope from gateway',
         httpStatus,
       });
     }
 
-    if (httpStatus !== 200 || parsed.status !== StatusCode.SC_OK) {
+    const rawStatus = typeof parsed.status === 'string' ? parsed.status.trim() : '';
+    if (httpStatus !== 200 || rawStatus !== StatusCode.SC_OK) {
       throw new BaccaratApiError({
         traceId: String(parsed.traceId ?? payload.traceId),
-        status: String(parsed.status ?? StatusCode.SC_INVALID_REQUEST),
+        status: rawStatus || fallbackStatusForHttp(httpStatus),
         message: String(parsed.message ?? `HTTP ${httpStatus}`),
         validation: parsed.validation,
         httpStatus,
@@ -474,14 +494,20 @@ export class Client {
     return this.postSigned('/operator/v1/transaction/list', params);
   }
 
-  async listAllTransactions({
-    fromTime,
-    toTime,
-    pageSize = 2000,
-    rateLimitMaxRetries = 3,
-    rateLimitBackoffMs = 1000,
-    ...rest
-  }) {
+  async listAllTransactions(opts = {}) {
+    if (opts == null || typeof opts !== 'object' || Array.isArray(opts)) {
+      throw new BaccaratSdkError('Invalid [fromTime, toTime] settlement window', 'INVALID_ARGUMENT');
+    }
+    const {
+      fromTime,
+      toTime,
+      pageSize = 2000,
+      rateLimitMaxRetries = 3,
+      rateLimitBackoffMs = 1000,
+      traceId: _ignoredTraceId,
+      ...rest
+    } = opts;
+    void _ignoredTraceId;
     if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > MAX_PAGE_SIZE) {
       throw new BaccaratSdkError(`pageSize must be an integer in 1..${MAX_PAGE_SIZE}`, 'INVALID_ARGUMENT');
     }

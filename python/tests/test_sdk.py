@@ -261,8 +261,8 @@ class TestBaccaratPythonSdk(unittest.TestCase):
         with self.assertRaises(BaccaratSdkError):
             Config(api_key=api_key, hmac_secret=secret, environment=Environment.SANDBOX, timeout_ms=True)  # type: ignore[arg-type]
 
-        # 5. v1.5.2 regressions: send_timestamp, non-JSON 429 -> SC_RATE_LIMITED, list_all_transactions retry + filters,
-        #    WebhookDispatcher.from_credentials (no base_url needed in PRODUCTION)
+        # 5. Regressions: send_timestamp, non-JSON/JSON missing-status 429 & 503 (M1), list_all_transactions retry + filters,
+        #    WebhookDispatcher.from_credentials, dict/list rejection (m6), and 3xx redirect blocking (M7)
         captured_headers: list[dict[str, str]] = []
         p1_calls = {"n": 0}
 
@@ -270,6 +270,12 @@ class TestBaccaratPythonSdk(unittest.TestCase):
             captured_headers.append(headers)
             body = json.loads(raw_body.decode("utf-8"))
             if url.endswith("/operator/v1/ping"):
+                if body.get("traceId") == "m1_json_429":
+                    return 429, json.dumps({"statusCode": 429, "message": "Too Many Requests"})
+                if body.get("traceId") == "m1_json_503":
+                    return 503, json.dumps({"error": "unavailable"})
+                if body.get("traceId") == "m1_empty_429":
+                    return 429, json.dumps({"status": "", "message": "Empty status"})
                 return 429, "Too Many Requests"
             if body.get("pageNo") == 1 and p1_calls["n"] == 0:
                 p1_calls["n"] += 1
@@ -288,6 +294,24 @@ class TestBaccaratPythonSdk(unittest.TestCase):
         self.assertTrue(ctx_429.exception.is_retryable())
         self.assertRegex(captured_headers[0]["X-Timestamp"], r"^\d{13}$")
 
+        with self.assertRaises(BaccaratApiError) as ctx_m1_429:
+            ts_client.ping(trace_id="m1_json_429")
+        self.assertEqual(ctx_m1_429.exception.http_status, 429)
+        self.assertEqual(ctx_m1_429.exception.status, StatusCode.SC_RATE_LIMITED)
+        self.assertTrue(ctx_m1_429.exception.is_retryable())
+
+        with self.assertRaises(BaccaratApiError) as ctx_m1_503:
+            ts_client.ping(trace_id="m1_json_503")
+        self.assertEqual(ctx_m1_503.exception.http_status, 503)
+        self.assertEqual(ctx_m1_503.exception.status, StatusCode.SC_OPERATOR_TIMEOUT)
+        self.assertTrue(ctx_m1_503.exception.is_retryable())
+
+        with self.assertRaises(BaccaratApiError) as ctx_m1_empty:
+            ts_client.ping(trace_id="m1_empty_429")
+        self.assertEqual(ctx_m1_empty.exception.http_status, 429)
+        self.assertEqual(ctx_m1_empty.exception.status, StatusCode.SC_RATE_LIMITED)
+        self.assertTrue(ctx_m1_empty.exception.is_retryable())
+
         retried = ts_client.list_all_transactions(
             from_time=1000,
             to_time=2000,
@@ -303,6 +327,55 @@ class TestBaccaratPythonSdk(unittest.TestCase):
         st_c, b_c = cred_disp.handle("/wallet/balance", api_key, sign_body(bal_raw, secret), bal_raw)
         self.assertEqual(st_c, 200)
         self.assertEqual(b_c["status"], StatusCode.SC_OK)
+
+        # m6: dict / list passed to WebhookDispatcher.handle must be rejected with SC_INVALID_REQUEST
+        st_dict, b_dict = cred_disp.handle("/wallet/bet", api_key, "0" * 64, {"traceId": "t_dict", "amount": "10.00"})  # type: ignore[arg-type]
+        self.assertEqual(st_dict, 200)
+        self.assertEqual(b_dict["status"], StatusCode.SC_INVALID_REQUEST)
+        self.assertEqual(b_dict["traceId"], "t_dict")
+        st_list, b_list = cred_disp.handle("/wallet/bet", api_key, "0" * 64, [1, 2, 3])  # type: ignore[arg-type]
+        self.assertEqual(st_list, 200)
+        self.assertEqual(b_list["status"], StatusCode.SC_INVALID_REQUEST)
+
+        # M7: default transport must NOT follow 3xx redirects (no credential leak)
+        redirect_followed = {"hit": False}
+
+        class RedirectHandler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:
+                return
+
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", "0"))
+                _ = self.rfile.read(length)
+                if self.path == "/leaked":
+                    redirect_followed["hit"] = True
+                    self.send_response(200)
+                    self.end_headers()
+                    return
+                self.send_response(307)
+                self.send_header("Location", "/leaked")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def do_GET(self) -> None:
+                redirect_followed["hit"] = True
+                self.send_response(200)
+                self.end_headers()
+
+        redir_srv = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+        redir_port = redir_srv.server_address[1]
+        rt = threading.Thread(target=redir_srv.serve_forever, daemon=True)
+        rt.start()
+        try:
+            redir_client = Client(Config(api_key=api_key, hmac_secret=secret, base_url=f"http://127.0.0.1:{redir_port}"))
+            with self.assertRaises(BaccaratApiError) as ctx_redir:
+                redir_client.ping()
+            self.assertEqual(ctx_redir.exception.http_status, 307)
+            self.assertEqual(ctx_redir.exception.status, StatusCode.SC_INVALID_REQUEST)
+            self.assertFalse(redirect_followed["hit"])
+        finally:
+            redir_srv.shutdown()
+            redir_srv.server_close()
 
 
 if __name__ == "__main__":

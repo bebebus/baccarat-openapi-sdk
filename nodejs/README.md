@@ -5,10 +5,11 @@
 ## 安装、环境要求与测试
 
 - Node.js >= 18
+- **仅支持 ESM（`"type": "module"`）**：请在宿主项目 `package.json` 中声明 `"type": "module"` 或使用 `.mjs` 文件通过 `import` 引入；若宿主为 CommonJS（`.cjs` / 默认未设 `"type": "module"`），请使用动态 `await import('@bebebus/baccarat-openapi-sdk')`。
 - 引入方式（本 SDK 通过 Git 仓库分发，未发布至 npm 公共注册表）：
 
 ```bash
-git clone --branch v1.5.2 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
+git clone --branch v1.5.3 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
 npm install ./baccarat-openapi-sdk/nodejs
 ```
 

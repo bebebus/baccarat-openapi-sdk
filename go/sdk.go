@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Package baccarat provides a zero-dependency Go SDK for the Baccarat Live Platform
-// B2B Operator Seamless Wallet API (v1.5.2).
+// B2B Operator Seamless Wallet API (v1.5.3).
 package baccarat
 
 import (
@@ -390,7 +390,12 @@ func NewClient(cfg Config) (*Client, error) {
 	}
 	hc := cfg.HTTPClient
 	if hc == nil {
-		hc = &http.Client{Timeout: timeout}
+		hc = &http.Client{
+			Timeout: timeout,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
 	}
 	return &Client{
 		apiKey:        key,
@@ -426,6 +431,16 @@ func marshalNoEscapeHTML(v any) ([]byte, error) {
 func isJSONObjectBytes(raw []byte) bool {
 	trimmed := bytes.TrimSpace(raw)
 	return len(trimmed) >= 2 && trimmed[0] == '{' && trimmed[len(trimmed)-1] == '}'
+}
+
+func fallbackStatusForHttp(httpStatus int) string {
+	if httpStatus == http.StatusTooManyRequests {
+		return SC_RATE_LIMITED
+	}
+	if httpStatus >= 500 || httpStatus == http.StatusRequestTimeout {
+		return SC_OPERATOR_TIMEOUT
+	}
+	return SC_INVALID_REQUEST
 }
 
 type rawEnvelope struct {
@@ -471,22 +486,18 @@ func (c *Client) postSigned(ctx context.Context, route string, reqBody any, trac
 	}
 	var env rawEnvelope
 	if !isJSONObjectBytes(respBytes) || json.Unmarshal(respBytes, &env) != nil {
-		st := SC_INVALID_REQUEST
-		if resp.StatusCode == http.StatusTooManyRequests {
-			st = SC_RATE_LIMITED
-		} else if resp.StatusCode >= 500 || resp.StatusCode == 408 {
-			st = SC_OPERATOR_TIMEOUT
-		}
+		st := fallbackStatusForHttp(resp.StatusCode)
 		return "", &ApiError{TraceID: traceID, Status: st, Message: fmt.Sprintf("non-JSON HTTP %d", resp.StatusCode), HTTPStatus: resp.StatusCode}
 	}
 	effTrace := env.TraceID
 	if effTrace == "" {
 		effTrace = traceID
 	}
-	if resp.StatusCode != http.StatusOK || env.Status != SC_OK {
-		st := env.Status
+	rawStatus := strings.TrimSpace(env.Status)
+	if resp.StatusCode != http.StatusOK || rawStatus != SC_OK {
+		st := rawStatus
 		if st == "" {
-			st = SC_INVALID_REQUEST
+			st = fallbackStatusForHttp(resp.StatusCode)
 		}
 		return effTrace, &ApiError{
 			TraceID:    effTrace,
@@ -657,6 +668,40 @@ type UpdatePlayerLimitsRequest struct {
 	MaxUserDay    *string  `json:"maxUserDay,omitempty"`
 	MaxLossPerDay *string  `json:"maxLossPerDay,omitempty"`
 	CustomChips   []string `json:"customChips,omitempty"`
+	// ClearCustomChips, when true with empty CustomChips, explicitly emits "customChips": []
+	// so Action="SET" clears previously saved custom chips without breaking omitempty semantics.
+	ClearCustomChips bool `json:"-"`
+}
+
+func (r UpdatePlayerLimitsRequest) MarshalJSON() ([]byte, error) {
+	if r.ClearCustomChips && len(r.CustomChips) == 0 {
+		type clearPayload struct {
+			TraceID       string   `json:"traceId"`
+			Username      string   `json:"username"`
+			Currency      string   `json:"currency"`
+			Action        string   `json:"action,omitempty"`
+			MinBet        *string  `json:"minBet,omitempty"`
+			MaxBet        *string  `json:"maxBet,omitempty"`
+			MaxTableRound *string  `json:"maxTableRound,omitempty"`
+			MaxUserDay    *string  `json:"maxUserDay,omitempty"`
+			MaxLossPerDay *string  `json:"maxLossPerDay,omitempty"`
+			CustomChips   []string `json:"customChips"`
+		}
+		return marshalNoEscapeHTML(clearPayload{
+			TraceID:       r.TraceID,
+			Username:      r.Username,
+			Currency:      r.Currency,
+			Action:        r.Action,
+			MinBet:        r.MinBet,
+			MaxBet:        r.MaxBet,
+			MaxTableRound: r.MaxTableRound,
+			MaxUserDay:    r.MaxUserDay,
+			MaxLossPerDay: r.MaxLossPerDay,
+			CustomChips:   []string{},
+		})
+	}
+	type alias UpdatePlayerLimitsRequest
+	return marshalNoEscapeHTML(alias(r))
 }
 
 func (c *Client) UpdatePlayerLimits(ctx context.Context, req UpdatePlayerLimitsRequest) (map[string]any, string, error) {
@@ -953,6 +998,8 @@ type WalletHandler interface {
 type AccountInit struct {
 	Currency string
 	Balance  string
+	// Exponent is the currency display decimal precision (e.g. 2 for USD/CNY, 0 for JPY/KRW).
+	// NOTE: Go's zero value is 0; for 2-decimal currencies such as USD you MUST explicitly set Exponent: 2.
 	Exponent int
 	Tokens   []string
 	Disabled bool
@@ -1305,8 +1352,8 @@ func (d *WebhookDispatcher) HandleRaw(ctx context.Context, routePath, apiKeyHead
 	}
 	_ = json.Unmarshal(rawBody, &traceProbe)
 	traceID := strings.TrimSpace(traceProbe.TraceID)
-	if len(traceID) > 128 {
-		traceID = traceID[:128]
+	if runes := []rune(traceID); len(runes) > 128 {
+		traceID = string(runes[:128])
 	}
 
 	clean := strings.TrimRight(strings.SplitN(routePath, "?", 2)[0], "/")

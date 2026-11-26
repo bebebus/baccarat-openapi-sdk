@@ -3,6 +3,8 @@ package cloud.cniia.baccarat.sdk;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.math.BigInteger;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -29,6 +31,7 @@ public final class BaccaratSdk {
     public static final long MAX_DETAIL_WINDOW_MS = 604_800_000L;
     public static final int MAX_PAGE_SIZE = 20_000;
     public static final int MAX_WEBHOOK_BODY_BYTES = 1_048_576;
+    private static final int MAX_HTTP_RESPONSE_BYTES = 16 * 1024 * 1024;
 
     private static final Pattern HEX64_RE = Pattern.compile("^[0-9a-fA-F]{64}$");
     private static final Pattern DECIMAL_RE = Pattern.compile("^(-?)(\\d+)(?:\\.(\\d+))?$");
@@ -328,6 +331,27 @@ public final class BaccaratSdk {
                     .build();
         }
 
+        private static String fallbackStatusForHttp(int httpStatus) {
+            if (httpStatus == 429) return StatusCode.SC_RATE_LIMITED;
+            if (httpStatus >= 500 || httpStatus == 408) return StatusCode.SC_OPERATOR_TIMEOUT;
+            return StatusCode.SC_INVALID_REQUEST;
+        }
+
+        private static String readBoundedBody(InputStream is) throws Exception {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream(1024);
+            byte[] buf = new byte[8192];
+            int total = 0;
+            int n;
+            while ((n = is.read(buf)) != -1) {
+                total += n;
+                if (total > MAX_HTTP_RESPONSE_BYTES) {
+                    throw new SdkException(StatusCode.SC_INVALID_REQUEST, "Gateway response exceeded 16 MiB limit");
+                }
+                baos.write(buf, 0, n);
+            }
+            return baos.toString(StandardCharsets.UTF_8);
+        }
+
         @SuppressWarnings("unchecked")
         public Map<String, Object> postSigned(String routePath, Map<String, Object> input) {
             Map<String, Object> payload = new LinkedHashMap<>();
@@ -354,9 +378,16 @@ public final class BaccaratSdk {
                     .POST(HttpRequest.BodyPublishers.ofByteArray(rawBytes))
                     .build();
 
-            HttpResponse<String> resp;
+            int statusCode;
+            String responseBody;
             try {
-                resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+                HttpResponse<InputStream> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofInputStream());
+                statusCode = resp.statusCode();
+                try (InputStream is = resp.body()) {
+                    responseBody = is == null ? "" : readBoundedBody(is);
+                }
+            } catch (SdkException e) {
+                throw e;
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new SdkException(StatusCode.SC_OPERATOR_TIMEOUT, "Request interrupted: " + e.getMessage());
@@ -366,22 +397,14 @@ public final class BaccaratSdk {
 
             Map<String, Object> parsed;
             try {
-                parsed = JsonCodec.parseObject(resp.body());
+                parsed = JsonCodec.parseObject(responseBody);
             } catch (Exception e) {
-                String st;
-                if (resp.statusCode() == 429) {
-                    st = StatusCode.SC_RATE_LIMITED;
-                } else if (resp.statusCode() >= 500 || resp.statusCode() == 408) {
-                    st = StatusCode.SC_OPERATOR_TIMEOUT;
-                } else {
-                    st = StatusCode.SC_INVALID_REQUEST;
-                }
-                throw new ApiException(st, "Non-JSON HTTP " + resp.statusCode(), traceId, null, resp.statusCode());
+                throw new ApiException(fallbackStatusForHttp(statusCode), "Non-JSON HTTP " + statusCode, traceId, null, statusCode);
             }
 
-            String respStatus = str(parsed, "status");
+            String respStatus = str(parsed, "status").trim();
             String effTrace = str(parsed, "traceId").isEmpty() ? traceId : str(parsed, "traceId");
-            if (resp.statusCode() != 200 || !StatusCode.SC_OK.equals(respStatus)) {
+            if (statusCode != 200 || !StatusCode.SC_OK.equals(respStatus)) {
                 Map<String, String> valMap = null;
                 if (parsed.get("validation") instanceof Map<?, ?> vm) {
                     valMap = new LinkedHashMap<>();
@@ -390,11 +413,11 @@ public final class BaccaratSdk {
                     }
                 }
                 throw new ApiException(
-                        respStatus.isEmpty() ? StatusCode.SC_INVALID_REQUEST : respStatus,
+                        respStatus.isEmpty() ? fallbackStatusForHttp(statusCode) : respStatus,
                         str(parsed, "message"),
                         effTrace,
                         valMap,
-                        resp.statusCode()
+                        statusCode
                 );
             }
             Map<String, Object> out = new LinkedHashMap<>();
@@ -458,6 +481,7 @@ public final class BaccaratSdk {
             while (true) {
                 Map<String, Object> p = new LinkedHashMap<>();
                 if (filters != null) p.putAll(filters);
+                p.remove("traceId");
                 p.put("fromTime", fromTime);
                 p.put("toTime", toTime);
                 p.put("pageNo", pageNo);

@@ -1,6 +1,6 @@
 > 中文 | [English](./INTERFACES.en.md)
 
-# B2B 运营商单一无缝钱包接口与状态码字典（v1.5.2）
+# B2B 运营商单一无缝钱包接口与状态码字典（v1.5.3）
 
 在线交互式文档与 OpenAPI 3.1 规范：`https://openapi.lt.cniia.cloud`
 
@@ -23,7 +23,7 @@
 | `listUnsettledTransactions` / `list_unsettled_transactions` / `ListUnsettledTransactions` | `POST /operator/v1/transaction/unsettled` | — | `fromTime, toTime`（非负整数，不可传 `null`）, `username, tableId, pageNo (1..1000000), pageSize (1..5000)`；频控 `120 次 / 60s` | `transactions[], pageNo, pageSize, total` |
 | `getWalletTransactionStatus` / `get_wallet_transaction_status` / `GetWalletTransactionStatus` | `POST /operator/v1/wallet/transaction-status` | `transactionId`、`betId` 或 `username` 三选一 | `fromTime, toTime`（非负整数不可传 `null`；仅传 `username` 时必填且跨度 `<= 86400000` ms） | `transactions[]`（按 `createdAt ASC` 最多返回 **200 条**，无分页；出站状态、重试计数与牌局状态） |
 
-此外每套 SDK 均提供 `listAllTransactions` / `list_all_transactions` / `ListAllTransactions` 自动翻页拉取器（支持命中 `SC_RATE_LIMITED` 自动退避重试），按 `(settledAt ASC, ticketId ASC)` 拉齐指定时间区间内的全部对账流水。
+此外每套 SDK 均提供 `listAllTransactions` / `list_all_transactions` / `ListAllTransactions` 自动翻页拉取器（支持命中 `SC_RATE_LIMITED` 自动退避重试；Go 如需传入可选过滤条件与自定义重试退避请使用 `ListAllTransactionsWithOptions`，Rust 请使用 `list_all_transactions_with_options`），按 `(settledAt ASC, ticketId ASC)` 拉齐指定时间区间内的全部对账流水。
 
 ## 2. 出站无缝钱包回调（平台 → 商户 `{callbackUrl}/wallet/*`）
 

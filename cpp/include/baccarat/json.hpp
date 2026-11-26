@@ -89,8 +89,8 @@ public:
     const Json& at(const std::string& key) const {
         static const Json null_json;
         if (type_ != Type::Object) return null_json;
-        for (const auto& kv : obj_val_) {
-            if (kv.first == key) return kv.second;
+        for (auto it = obj_val_.rbegin(); it != obj_val_.rend(); ++it) {
+            if (it->first == key) return it->second;
         }
         return null_json;
     }
@@ -107,6 +107,17 @@ public:
             }
         }
         obj_val_.emplace_back(key, std::move(val));
+    }
+
+    void erase(const std::string& key) {
+        if (type_ != Type::Object) return;
+        for (auto it = obj_val_.begin(); it != obj_val_.end(); ) {
+            if (it->first == key) {
+                it = obj_val_.erase(it);
+            } else {
+                ++it;
+            }
+        }
     }
 
     std::string dump() const {
@@ -374,7 +385,17 @@ private:
                 if (pos >= s.size() || s[pos] != ':') throw std::runtime_error("Expected ':'");
                 ++pos;
                 Json v = read_value(depth);
-                obj.emplace_back(std::move(k), std::move(v));
+                bool replaced = false;
+                for (auto& kv : obj) {
+                    if (kv.first == k) {
+                        kv.second = std::move(v);
+                        replaced = true;
+                        break;
+                    }
+                }
+                if (!replaced) {
+                    obj.emplace_back(std::move(k), std::move(v));
+                }
                 skip_ws();
                 if (pos < s.size() && s[pos] == ',') { ++pos; }
                 else if (pos < s.size() && s[pos] == '}') { ++pos; return Json(std::move(obj)); }

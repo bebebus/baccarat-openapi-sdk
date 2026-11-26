@@ -72,7 +72,7 @@ impl Json {
     pub fn get(&self, key: &str) -> &Json {
         static NULL: Json = Json::Null;
         if let Json::Obj(entries) = self {
-            for (k, v) in entries {
+            for (k, v) in entries.iter().rev() {
                 if k == key {
                     return v;
                 }
@@ -102,6 +102,12 @@ impl Json {
                 }
             }
             entries.push((k, val));
+        }
+    }
+
+    pub fn remove(&mut self, key: &str) {
+        if let Json::Obj(entries) = self {
+            entries.retain(|(ek, _)| ek != key);
         }
     }
 
@@ -412,7 +418,11 @@ impl<'a> Parser<'a> {
             }
             self.pos += 1;
             let v = self.read_value(depth)?;
-            entries.push((k, v));
+            if let Some((_, existing)) = entries.iter_mut().find(|(ek, _)| *ek == k) {
+                *existing = v;
+            } else {
+                entries.push((k, v));
+            }
             self.skip_ws();
             if self.pos < self.b.len() && self.b[self.pos] == b',' {
                 self.pos += 1;

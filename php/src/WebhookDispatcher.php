@@ -34,6 +34,15 @@ final class WebhookDispatcher
         return '';
     }
 
+    private static function truncateUtf8(string $s, int $maxChars): string
+    {
+        if (function_exists('mb_substr')) {
+            return mb_substr($s, 0, $maxChars, 'UTF-8');
+        }
+        $out = preg_replace('/^(.{0,' . $maxChars . '}).*/us', '$1', $s);
+        return is_string($out) ? $out : substr($s, 0, $maxChars);
+    }
+
     /** @return array{statusCode: int, body: array<string, mixed>} */
     public function handle(
         string $routePath,
@@ -74,10 +83,10 @@ final class WebhookDispatcher
         /** @var array<string, mixed> $decoded */
         $decoded = json_decode($rawBody, true, 64);
         $traceId = isset($decoded['traceId']) && is_string($decoded['traceId'])
-            ? substr(trim($decoded['traceId']), 0, 128)
+            ? self::truncateUtf8(trim($decoded['traceId']), 128)
             : '';
 
-        $clean = rtrim((string) strtok($routePath, '?'), '/');
+        $clean = rtrim(explode('?', $routePath, 2)[0], '/');
         try {
             if (str_ends_with($clean, '/wallet/balance')) {
                 return ['statusCode' => 200, 'body' => $this->wallet->onBalance($decoded)];
@@ -92,6 +101,9 @@ final class WebhookDispatcher
                 return ['statusCode' => 200, 'body' => $this->wallet->onRollback($decoded)];
             }
             if (str_ends_with($clean, '/wallet/adjustment')) {
+                if ($this->wallet instanceof WalletAdjustmentHandlerInterface) {
+                    return ['statusCode' => 200, 'body' => $this->wallet->onAdjustment($decoded)];
+                }
                 if (!method_exists($this->wallet, 'onAdjustment')) {
                     return ['statusCode' => 200, 'body' => ['traceId' => $traceId, 'status' => StatusCode::SC_INVALID_REQUEST, 'message' => 'onAdjustment not implemented']];
                 }

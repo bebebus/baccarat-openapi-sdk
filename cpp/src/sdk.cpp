@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cctype>
 #include <cstdio>
+#include <limits>
 #include <sstream>
 #include <thread>
 
@@ -170,19 +171,53 @@ std::string uuid_v4() {
     return std::string(out);
 }
 
+struct CurlWriteState {
+    std::string body;
+    bool overflow = false;
+};
+
 size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) noexcept {
+    if (!ptr || !userdata) return 0;
+    auto* state = static_cast<CurlWriteState*>(userdata);
+    if (size != 0 && nmemb > (std::numeric_limits<size_t>::max)() / size) {
+        state->overflow = true;
+        return 0;
+    }
     size_t total = size * nmemb;
-    if (total == 0 || !ptr || !userdata) return 0;
+    if (total == 0) return 0;
     try {
-        auto* out = static_cast<std::string*>(userdata);
-        if (out->size() + total > MAX_HTTP_RESPONSE_BYTES) {
+        if (total > MAX_HTTP_RESPONSE_BYTES || state->body.size() > MAX_HTTP_RESPONSE_BYTES - total) {
+            state->overflow = true;
             return 0; // abort transfer cleanly in libcurl
         }
-        out->append(ptr, total);
+        state->body.append(ptr, total);
         return total;
     } catch (...) {
         return 0;
     }
+}
+
+std::string fallback_status_for_http(long http_status) {
+    if (http_status == 429) return StatusCode::SC_RATE_LIMITED;
+    if (http_status >= 500 || http_status == 408) return StatusCode::SC_OPERATOR_TIMEOUT;
+    return StatusCode::SC_INVALID_REQUEST;
+}
+
+std::string truncate_utf8(const std::string& s, size_t max_chars) {
+    size_t i = 0;
+    size_t chars = 0;
+    while (i < s.size() && chars < max_chars) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        size_t step = 1;
+        if ((c & 0x80u) == 0u) step = 1;
+        else if ((c & 0xE0u) == 0xC0u) step = 2;
+        else if ((c & 0xF0u) == 0xE0u) step = 3;
+        else if ((c & 0xF8u) == 0xF0u) step = 4;
+        if (i + step > s.size()) break;
+        i += step;
+        ++chars;
+    }
+    return s.substr(0, i);
 }
 
 std::string extract_trace_hint(const std::string& raw_body) {
@@ -468,7 +503,7 @@ Json Client::post_signed(const std::string& route_path, Json payload) const {
         guard.headers = curl_slist_append(guard.headers, hdr_ts.c_str());
     }
 
-    std::string resp_body;
+    CurlWriteState write_state;
     curl_easy_setopt(guard.curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(guard.curl, CURLOPT_POST, 1L);
     curl_easy_setopt(guard.curl, CURLOPT_NOSIGNAL, 1L);
@@ -478,34 +513,29 @@ Json Client::post_signed(const std::string& route_path, Json payload) const {
     curl_easy_setopt(guard.curl, CURLOPT_TIMEOUT_MS, timeout_ms_);
     curl_easy_setopt(guard.curl, CURLOPT_CONNECTTIMEOUT_MS, std::min<long>(timeout_ms_, 5000L));
     curl_easy_setopt(guard.curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
-    curl_easy_setopt(guard.curl, CURLOPT_WRITEDATA, &resp_body);
+    curl_easy_setopt(guard.curl, CURLOPT_WRITEDATA, &write_state);
 
     CURLcode rc = curl_easy_perform(guard.curl);
     long http_code = 0;
     curl_easy_getinfo(guard.curl, CURLINFO_RESPONSE_CODE, &http_code);
 
+    if (write_state.overflow) {
+        throw SdkError(StatusCode::SC_INVALID_REQUEST, "Gateway response exceeded 16 MiB limit");
+    }
     if (rc != CURLE_OK) {
         throw SdkError(StatusCode::SC_OPERATOR_TIMEOUT, std::string("curl error: ") + curl_easy_strerror(rc));
     }
 
     Json parsed;
     try {
-        parsed = Json::parse(resp_body);
+        parsed = Json::parse(write_state.body);
     } catch (...) {
-        std::string st;
-        if (http_code == 429) {
-            st = StatusCode::SC_RATE_LIMITED;
-        } else if (http_code >= 500 || http_code == 408) {
-            st = StatusCode::SC_OPERATOR_TIMEOUT;
-        } else {
-            st = StatusCode::SC_INVALID_REQUEST;
-        }
-        throw ApiError(st, "Non-JSON response", trace_id, static_cast<int>(http_code));
+        throw ApiError(fallback_status_for_http(http_code), "Non-JSON response", trace_id, static_cast<int>(http_code));
     }
     if (!parsed.is_object()) {
-        throw ApiError(StatusCode::SC_INVALID_REQUEST, "Malformed envelope object", trace_id, static_cast<int>(http_code));
+        throw ApiError(fallback_status_for_http(http_code), "Malformed envelope object", trace_id, static_cast<int>(http_code));
     }
-    std::string st = parsed.at("status").as_string();
+    std::string st = trim(parsed.at("status").as_string());
     std::string eff_trace = parsed.at("traceId").as_string().empty() ? trace_id : parsed.at("traceId").as_string();
     if (http_code != 200 || st != StatusCode::SC_OK) {
         std::map<std::string, std::string> val_map;
@@ -516,7 +546,7 @@ Json Client::post_signed(const std::string& route_path, Json payload) const {
             }
         }
         throw ApiError(
-            st.empty() ? StatusCode::SC_INVALID_REQUEST : st,
+            st.empty() ? fallback_status_for_http(http_code) : st,
             parsed.at("message").as_string(),
             eff_trace,
             static_cast<int>(http_code),
@@ -564,6 +594,7 @@ std::vector<Json> Client::list_all_transactions(
     int page_no = 1;
     while (true) {
         Json p = filters.is_object() ? filters : Json::object();
+        p.erase("traceId");
         p.set("fromTime", Json(from_time));
         p.set("toTime", Json(to_time));
         p.set("pageNo", Json(page_no));
@@ -930,7 +961,7 @@ Json WebhookDispatcher::handle(
     if (!parsed.is_object()) {
         return make_err_json("", StatusCode::SC_INVALID_REQUEST, "Invalid JSON object");
     }
-    std::string trace_id = trim(parsed.at("traceId").as_string()).substr(0, 128);
+    std::string trace_id = truncate_utf8(trim(parsed.at("traceId").as_string()), 128);
 
     std::string clean = route_path.substr(0, route_path.find('?'));
     while (!clean.empty() && clean.back() == '/') clean.pop_back();

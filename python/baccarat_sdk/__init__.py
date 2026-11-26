@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.2)."""
+"""Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.3)."""
 
 from __future__ import annotations
 
@@ -323,10 +323,26 @@ class Config:
 TransportFn = Callable[[str, Dict[str, str], bytes, int], Tuple[int, str]]
 
 
+def _fallback_status_for_http(http_status: int) -> str:
+    if http_status == 429:
+        return StatusCode.SC_RATE_LIMITED
+    if http_status >= 500 or http_status == 408:
+        return StatusCode.SC_OPERATOR_TIMEOUT
+    return StatusCode.SC_INVALID_REQUEST
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler())
+
+
 def _default_transport(url: str, headers: Dict[str, str], raw_body: bytes, timeout_ms: int) -> Tuple[int, str]:
     req = urllib.request.Request(url, data=raw_body, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=timeout_ms / 1000.0) as resp:
+        with _NO_REDIRECT_OPENER.open(req, timeout=timeout_ms / 1000.0) as resp:
             chunk = resp.read(MAX_HTTP_RESPONSE_BYTES + 1)
             if len(chunk) > MAX_HTTP_RESPONSE_BYTES:
                 raise BaccaratSdkError("Gateway response exceeded 16 MiB limit", StatusCode.SC_INVALID_REQUEST)
@@ -377,20 +393,26 @@ class Client:
         try:
             parsed = json.loads(resp_text)
         except Exception as exc:
-            if http_status == 429:
-                status = StatusCode.SC_RATE_LIMITED
-            elif http_status >= 500 or http_status == 408:
-                status = StatusCode.SC_OPERATOR_TIMEOUT
-            else:
-                status = StatusCode.SC_INVALID_REQUEST
-            raise BaccaratApiError(status=status, message=f"Non-JSON HTTP {http_status}", trace_id=trace_id, http_status=http_status) from exc
+            raise BaccaratApiError(
+                status=_fallback_status_for_http(http_status),
+                message=f"Non-JSON HTTP {http_status}",
+                trace_id=trace_id,
+                http_status=http_status,
+            ) from exc
 
         if not isinstance(parsed, dict):
-            raise BaccaratApiError(status=StatusCode.SC_INVALID_REQUEST, message="Malformed envelope", trace_id=trace_id, http_status=http_status)
-
-        if http_status != 200 or parsed.get("status") != StatusCode.SC_OK:
             raise BaccaratApiError(
-                status=str(parsed.get("status") or StatusCode.SC_INVALID_REQUEST),
+                status=_fallback_status_for_http(http_status),
+                message="Malformed envelope",
+                trace_id=trace_id,
+                http_status=http_status,
+            )
+
+        raw_status = parsed.get("status")
+        resp_status = raw_status.strip() if isinstance(raw_status, str) else ""
+        if http_status != 200 or resp_status != StatusCode.SC_OK:
+            raise BaccaratApiError(
+                status=resp_status or _fallback_status_for_http(http_status),
                 message=str(parsed.get("message") or f"HTTP {http_status}"),
                 trace_id=str(parsed.get("traceId") or trace_id),
                 validation=parsed.get("validation"),
@@ -990,6 +1012,13 @@ class WebhookDispatcher:
         signature_header: Optional[str],
         raw_body: Union[bytes, bytearray, str],
     ) -> Tuple[int, Dict[str, Any]]:
+        if isinstance(raw_body, (dict, list)):
+            trace_hint = raw_body.get("traceId") if isinstance(raw_body, dict) and isinstance(raw_body.get("traceId"), str) else ""
+            return 200, {
+                "traceId": trace_hint.strip()[:128],
+                "status": StatusCode.SC_INVALID_REQUEST,
+                "message": "raw_body must be raw bytes or str, not parsed dict/list",
+            }
         raw_bytes = _to_utf8_bytes(raw_body)
         if len(raw_bytes) > MAX_WEBHOOK_BODY_BYTES:
             return 200, {"traceId": "", "status": StatusCode.SC_INVALID_REQUEST, "message": "Request body exceeds 1 MiB limit"}

@@ -58,25 +58,44 @@ impl Drop for CurlGuard {
     }
 }
 
+pub enum CurlError {
+    Overflow(u16),
+    Transport(String),
+}
+
+struct WriteState {
+    buf: Vec<u8>,
+    overflow: bool,
+}
+
 extern "C" fn write_callback(ptr: *const u8, size: usize, nmemb: usize, userdata: *mut c_void) -> usize {
-    let Some(total) = size.checked_mul(nmemb) else {
-        return 0;
-    };
-    if total == 0 || ptr.is_null() || userdata.is_null() {
+    if ptr.is_null() || userdata.is_null() {
         return 0;
     }
     unsafe {
-        let buf = &mut *(userdata as *mut Vec<u8>);
-        let Some(new_len) = buf.len().checked_add(total) else {
+        let state = &mut *(userdata as *mut WriteState);
+        let Some(total) = size.checked_mul(nmemb) else {
+            state.overflow = true;
             return 0;
         };
-        if new_len > MAX_HTTP_RESPONSE_BYTES || buf.try_reserve(total).is_err() {
+        if total == 0 {
+            return 0;
+        }
+        let Some(new_len) = state.buf.len().checked_add(total) else {
+            state.overflow = true;
+            return 0;
+        };
+        if new_len > MAX_HTTP_RESPONSE_BYTES {
+            state.overflow = true;
             return 0; // signal write failure to libcurl without unwinding across extern "C"
         }
+        if state.buf.try_reserve(total).is_err() {
+            return 0;
+        }
         let slice = std::slice::from_raw_parts(ptr, total);
-        buf.extend_from_slice(slice);
+        state.buf.extend_from_slice(slice);
+        total
     }
-    total
 }
 
 pub fn libcurl_post_json(
@@ -86,30 +105,39 @@ pub fn libcurl_post_json(
     timestamp: Option<&str>,
     raw_body: &[u8],
     timeout_ms: u64,
-) -> Result<(u16, Vec<u8>), String> {
+) -> Result<(u16, Vec<u8>), CurlError> {
     CURL_INIT.call_once(|| unsafe {
         let _ = curl_global_init(CURL_GLOBAL_DEFAULT);
     });
 
-    let c_url = CString::new(url).map_err(|_| "NUL byte in URL".to_string())?;
+    let c_url = CString::new(url).map_err(|_| CurlError::Transport("NUL byte in URL".to_string()))?;
     let h_ct = CString::new("Content-Type: application/json").unwrap();
     let h_acc = CString::new("Accept: application/json").unwrap();
-    let h_key = CString::new(format!("X-API-Key: {}", api_key)).map_err(|_| "NUL in API key".to_string())?;
-    let h_sig = CString::new(format!("X-Signature: {}", signature)).map_err(|_| "NUL in signature".to_string())?;
+    let h_key = CString::new(format!("X-API-Key: {}", api_key))
+        .map_err(|_| CurlError::Transport("NUL in API key".to_string()))?;
+    let h_sig = CString::new(format!("X-Signature: {}", signature))
+        .map_err(|_| CurlError::Transport("NUL in signature".to_string()))?;
     let h_ts = match timestamp {
-        Some(ts) => Some(CString::new(format!("X-Timestamp: {}", ts)).map_err(|_| "NUL in timestamp".to_string())?),
+        Some(ts) => Some(
+            CString::new(format!("X-Timestamp: {}", ts))
+                .map_err(|_| CurlError::Transport("NUL in timestamp".to_string()))?,
+        ),
         None => None,
     };
 
     let clamped_timeout = timeout_ms.min(i32::MAX as u64) as c_long;
     let clamped_connect = timeout_ms.min(5000) as c_long;
-    let body_len = i64::try_from(raw_body.len()).map_err(|_| "request body too large".to_string())?;
+    let body_len = i64::try_from(raw_body.len())
+        .map_err(|_| CurlError::Transport("request body too large".to_string()))?;
 
-    let mut resp_buf: Vec<u8> = Vec::with_capacity(512);
+    let mut state = WriteState {
+        buf: Vec::with_capacity(512),
+        overflow: false,
+    };
     unsafe {
         let handle = curl_easy_init();
         if handle.is_null() {
-            return Err("curl_easy_init failed".into());
+            return Err(CurlError::Transport("curl_easy_init failed".into()));
         }
         let mut guard = CurlGuard {
             handle,
@@ -133,15 +161,18 @@ pub fn libcurl_post_json(
         curl_easy_setopt(guard.handle, CURLOPT_CONNECTTIMEOUT_MS, clamped_connect);
         let write_fn: extern "C" fn(*const u8, usize, usize, *mut c_void) -> usize = write_callback;
         curl_easy_setopt(guard.handle, CURLOPT_WRITEFUNCTION, write_fn);
-        curl_easy_setopt(guard.handle, CURLOPT_WRITEDATA, (&mut resp_buf) as *mut Vec<u8> as *mut c_void);
+        curl_easy_setopt(guard.handle, CURLOPT_WRITEDATA, (&mut state) as *mut WriteState as *mut c_void);
 
         let rc = curl_easy_perform(guard.handle);
         let mut status_code: c_long = 0;
         curl_easy_getinfo(guard.handle, CURLINFO_RESPONSE_CODE, &mut status_code as *mut c_long);
 
-        if rc != 0 {
-            return Err(format!("libcurl perform failed with code {}", rc));
+        if state.overflow {
+            return Err(CurlError::Overflow(status_code as u16));
         }
-        Ok((status_code as u16, resp_buf))
+        if rc != 0 {
+            return Err(CurlError::Transport(format!("libcurl perform failed with code {}", rc)));
+        }
+        Ok((status_code as u16, state.buf))
     }
 }

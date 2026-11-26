@@ -75,6 +75,17 @@ final class Client
         return vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($bytes), 4));
     }
 
+    private static function fallbackStatusForHttp(int $httpStatus): string
+    {
+        if ($httpStatus === 429) {
+            return StatusCode::SC_RATE_LIMITED;
+        }
+        if ($httpStatus >= 500 || $httpStatus === 408) {
+            return StatusCode::SC_OPERATOR_TIMEOUT;
+        }
+        return StatusCode::SC_INVALID_REQUEST;
+    }
+
     /**
      * @param array<string, mixed> $payload
      * @return array<string, mixed>
@@ -109,19 +120,14 @@ final class Client
 
         $probeObj = json_decode($rawResp, false, 64);
         if (!($probeObj instanceof \stdClass)) {
-            if ($httpStatus === 429) {
-                $st = StatusCode::SC_RATE_LIMITED;
-            } elseif ($httpStatus >= 500 || $httpStatus === 408) {
-                $st = StatusCode::SC_OPERATOR_TIMEOUT;
-            } else {
-                $st = StatusCode::SC_INVALID_REQUEST;
-            }
+            $st = self::fallbackStatusForHttp($httpStatus);
             throw new BaccaratApiException($st, "Non-JSON-object HTTP {$httpStatus}", $traceId, null, $httpStatus);
         }
         /** @var array<string, mixed> $decoded */
         $decoded = json_decode($rawResp, true, 64);
 
-        $respStatus = (string) ($decoded['status'] ?? StatusCode::SC_INVALID_REQUEST);
+        $rawStatus = is_string($decoded['status'] ?? null) ? trim($decoded['status']) : '';
+        $respStatus = $rawStatus !== '' ? $rawStatus : self::fallbackStatusForHttp($httpStatus);
         if ($httpStatus !== 200 || $respStatus !== StatusCode::SC_OK) {
             /** @var array<string, string>|null $val */
             $val = isset($decoded['validation']) && is_array($decoded['validation']) ? $decoded['validation'] : null;
@@ -206,6 +212,7 @@ final class Client
         }
         $maxRetries = max(0, $rateLimitMaxRetries);
         $backoffMs = max(0, $rateLimitBackoffMs);
+        unset($filters['traceId']);
         $all = [];
         $pageNo = 1;
         while (true) {

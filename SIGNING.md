@@ -1,6 +1,6 @@
 > 中文 | [English](./SIGNING.en.md)
 
-# 原始字节 HMAC-SHA256 签名与幂等冲突指纹规范（v1.5.2）
+# 原始字节 HMAC-SHA256 签名与幂等冲突指纹规范（v1.5.3）
 
 本文件是 `bebebus/baccarat-openapi-sdk` 七套语言 SDK（Node.js、Python、PHP、Go、Java、C++、Rust）共享的密码学与幂等核验唯一事实源，100% 对齐在线契约 `https://openapi.lt.cniia.cloud/openapi.yaml`。
 
@@ -11,7 +11,7 @@
 - `Content-Type: application/json`
 - `X-API-Key: ak_<32位小写hex>`（共 35 字符，上限 128 字符，首尾自动 trim）
 - `X-Signature: <64位十六进制>`
-- `X-Timestamp`（入站 S2S 可选防重放）：10 位 Unix 秒或 13 位 Unix 毫秒时间戳（`±300s` 时间窗；7 套 SDK 均可通过配置项 `sendTimestamp` / `send_timestamp` / `SendTimestamp` 按需自动附加，`X-Signature` 仍仅对原始请求体字节计算）
+- `X-Timestamp`（入站 S2S 可选防重放）：10 位 Unix 秒或 13 位 Unix 毫秒时间戳（`±300s` 时间窗；Node.js / PHP / Java 通过 `sendTimestamp`、Python / C++ 通过 `send_timestamp`、Go 通过 `SendTimestamp` 配置项启用，**Rust 通过 `Client::with_send_timestamp(true)` 启用**以保持 `Config` 结构体字面量向后兼容；`X-Signature` 仍仅对原始请求体字节计算）
 
 ## 2. 签名计算铁律（最常见踩坑点）
 

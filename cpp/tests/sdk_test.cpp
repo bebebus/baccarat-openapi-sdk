@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <csignal>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -47,6 +48,7 @@ std::string to_lower_ascii(std::string s) {
 } // namespace
 
 int main() {
+    std::signal(SIGPIPE, SIG_IGN);
     Json doc = Json::parse(read_file("../test-vectors.json"));
 
     // 1. HMAC & header verification vectors
@@ -136,6 +138,7 @@ int main() {
     std::atomic<bool> stop_srv{false};
     std::atomic<int> rl_p1_calls{0};
     std::string last_ts_hdr;
+    std::vector<std::string> list_traces;
     std::mutex hdr_mu;
     std::thread server_thread([&]() {
         while (!stop_srv.load()) {
@@ -195,6 +198,40 @@ int main() {
             }
 
             if (path == "/operator/v1/ping") {
+                Json ping_body = Json::parse(raw_body);
+                std::string ptid = ping_body.at("traceId").as_string();
+                if (ptid == "m1_json_429") {
+                    std::string body_429 = "{\"statusCode\":429,\"message\":\"Too Many Requests\"}";
+                    std::string http_429 = "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: "
+                        + std::to_string(body_429.size()) + "\r\n\r\n" + body_429;
+                    (void)::write(cfd, http_429.data(), http_429.size());
+                    ::close(cfd);
+                    continue;
+                }
+                if (ptid == "m1_json_503") {
+                    std::string body_503 = "{\"error\":\"unavailable\"}";
+                    std::string http_503 = "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: "
+                        + std::to_string(body_503.size()) + "\r\n\r\n" + body_503;
+                    (void)::write(cfd, http_503.data(), http_503.size());
+                    ::close(cfd);
+                    continue;
+                }
+                if (ptid == "m2_overflow") {
+                    const size_t total_len = 16 * 1024 * 1024 + 65536;
+                    std::string hdr = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: "
+                        + std::to_string(total_len) + "\r\n\r\n";
+                    if (::write(cfd, hdr.data(), hdr.size()) > 0) {
+                        std::string chunk(65536, 'a');
+                        size_t sent = 0;
+                        while (sent < total_len) {
+                            ssize_t w = ::write(cfd, chunk.data(), std::min(chunk.size(), total_len - sent));
+                            if (w <= 0) break;
+                            sent += static_cast<size_t>(w);
+                        }
+                    }
+                    ::close(cfd);
+                    continue;
+                }
                 std::string raw_429 = "Too Many Requests";
                 std::string http_429 = "HTTP/1.1 429 Too Many Requests\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: "
                     + std::to_string(raw_429.size()) + "\r\n\r\n" + raw_429;
@@ -268,6 +305,10 @@ int main() {
                     data.set("transactions", Json(Json::Array{row}));
                     resp.set("data", data);
                 } else if (path == "/operator/v1/transaction/list") {
+                    if (body.at("username").as_string() == "rl_user") {
+                        std::lock_guard<std::mutex> lk(hdr_mu);
+                        list_traces.push_back(body.at("traceId").as_string());
+                    }
                     int64_t pno = body.at("pageNo").as_int(1);
                     if (pno == 1 && body.at("username").as_string() == "rl_user" && rl_p1_calls.fetch_add(1) == 0) {
                         resp.set("status", Json("SC_RATE_LIMITED"));
@@ -414,7 +455,8 @@ int main() {
         client.list_unsettled_transactions(p);
     }, "s2s:unsettledNullFrom");
 
-    // v1.5.2 regressions: send_timestamp X-Timestamp, non-JSON 429 -> SC_RATE_LIMITED, list_all_transactions backoff + filters
+    // Regressions: send_timestamp X-Timestamp, non-JSON & JSON missing-status 429/503 (M1),
+    // 16 MiB overflow non-retryable (m2), list_all_transactions backoff + filters + traceId stripping (m1)
     Config ts_cfg{api_key, secret, Environment::Production, "http://127.0.0.1:" + std::to_string(port), 5000, true};
     Client ts_client(ts_cfg);
     bool caught_429 = false;
@@ -428,10 +470,49 @@ int main() {
         std::lock_guard<std::mutex> lk(hdr_mu);
         require_true(last_ts_hdr.size() >= 13, "s2s:xTimestamp");
     }
+
+    // M1: JSON 429 & 503 with missing status field
+    bool caught_m1_429 = false;
+    try {
+        Json p = Json::object(); p.set("traceId", Json("m1_json_429"));
+        ts_client.ping(p);
+    } catch (const ApiError& e) {
+        caught_m1_429 = (e.http_status == 429 && e.status == StatusCode::SC_RATE_LIMITED && e.is_retryable());
+    }
+    require_true(caught_m1_429, "s2s:m1Json429");
+
+    bool caught_m1_503 = false;
+    try {
+        Json p = Json::object(); p.set("traceId", Json("m1_json_503"));
+        ts_client.ping(p);
+    } catch (const ApiError& e) {
+        caught_m1_503 = (e.http_status == 503 && e.status == StatusCode::SC_OPERATOR_TIMEOUT && e.is_retryable());
+    }
+    require_true(caught_m1_503, "s2s:m1Json503");
+
+    // m2: >16 MiB response throws non-retryable SC_INVALID_REQUEST instead of SC_OPERATOR_TIMEOUT
+    bool caught_m2_overflow = false;
+    try {
+        Json p = Json::object(); p.set("traceId", Json("m2_overflow"));
+        ts_client.ping(p);
+    } catch (const SdkError& e) {
+        caught_m2_overflow = (e.code == StatusCode::SC_INVALID_REQUEST && !is_retryable_status(e.code));
+    }
+    require_true(caught_m2_overflow, "s2s:m2OverflowNonRetryable");
+
+    // m1: caller-supplied traceId in filters is stripped so every page & retry gets a fresh unique UUID
     Json rl_filters = Json::object();
     rl_filters.set("username", Json("rl_user"));
+    rl_filters.set("traceId", Json("caller-fixed-trace"));
     auto retried_tx = ts_client.list_all_transactions(1000, 2000, 2, rl_filters, 3, 0);
     require_true(retried_tx.size() == 3 && rl_p1_calls.load() == 2, "s2s:listAllRateLimitRetry");
+    {
+        std::lock_guard<std::mutex> lk(hdr_mu);
+        require_true(list_traces.size() == 3, "s2s:m1TraceCount");
+        std::set<std::string> uniq(list_traces.begin(), list_traces.end());
+        require_true(uniq.size() == 3, "s2s:m1UniqueTraces");
+        require_true(uniq.count("caller-fixed-trace") == 0, "s2s:m1StrippedCallerTrace");
+    }
 
     stop_srv.store(true);
     ::shutdown(srv_fd, SHUT_RDWR);
@@ -498,6 +579,23 @@ int main() {
     WebhookDispatcher cred_disp(api_key, secret, wallet);
     std::string bal_raw = bal_req.dump();
     require_eq(cred_disp.handle("/wallet/balance", api_key, sign_body(bal_raw, secret), bal_raw).at("status").as_string(), "SC_OK", "wb:credCtor");
+
+    // m9: duplicate JSON object keys follow last-key-wins
+    Json dup = Json::parse(R"({"k":"first","k":"second","nested":{"x":1,"x":2}})");
+    require_eq(dup.at("k").as_string(), "second", "json:m9DupKeyLastWins");
+    require_true(dup.at("nested").at("x").as_int() == 2, "json:m9NestedDupKeyLastWins");
+
+    // m10: UTF-8 multi-byte traceId > 128 bytes/chars truncates cleanly on character boundary
+    std::string utf8_trace;
+    for (int i = 0; i < 140; ++i) utf8_trace += "\xE4\xB8\xAD"; // '中' (3 UTF-8 bytes)
+    Json utf8_req = Json::object();
+    utf8_req.set("traceId", Json(utf8_trace));
+    std::string utf8_raw = utf8_req.dump();
+    Json utf8_res = cred_disp.handle("/wallet/unknown", api_key, sign_body(utf8_raw, secret), utf8_raw);
+    std::string expected_trunc;
+    for (int i = 0; i < 128; ++i) expected_trunc += "\xE4\xB8\xAD";
+    require_eq(utf8_res.at("status").as_string(), StatusCode::SC_INVALID_REQUEST, "wb:m10Utf8Status");
+    require_eq(utf8_res.at("traceId").as_string(), expected_trunc, "wb:m10Utf8Truncated128Chars");
 
     std::cout << "C++17 SDK: ALL TESTS PASSED\n";
     return 0;

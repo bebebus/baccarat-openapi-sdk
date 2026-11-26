@@ -308,10 +308,14 @@ public final class SdkTestRunner {
         try { JsonCodec.parseObject("{\"bad\":\"\\uD800\"}"); } catch (IllegalArgumentException e) { loneSurrThrew = true; }
         check(loneSurrThrew, "json:loneSurrogate");
 
-        // 4. v1.5.2 regressions: JsonCodec array serialization, WebhookDispatcher(apiKey, secret, wallet),
-        //    sendTimestamp X-Timestamp, non-JSON 429 -> SC_RATE_LIMITED, listAllTransactions rate-limit retry + filters
+        // 4. Regressions: JsonCodec array serialization & ASCII digits (m7), WebhookDispatcher(apiKey, secret, wallet),
+        //    sendTimestamp X-Timestamp, non-JSON & JSON missing-status 429/503 (M1), 16 MiB cap (M4),
+        //    listAllTransactions rate-limit retry + filters + traceId stripping (m1)
         checkEq(JsonCodec.stringify(new String[]{"50.00", "100.00"}), "[\"50.00\",\"100.00\"]", "json:stringArray");
         checkEq(JsonCodec.stringify(new int[]{1, 2, 3}), "[1,2,3]", "json:intArray");
+        boolean nonAsciiDigitThrew = false;
+        try { JsonCodec.parseObject("{\"n\":1\u0660}"); } catch (IllegalArgumentException e) { nonAsciiDigitThrew = true; }
+        check(nonAsciiDigitThrew, "json:m7NonAsciiDigitRejected");
 
         BaccaratSdk.WebhookDispatcher credDisp = new BaccaratSdk.WebhookDispatcher(apiKey, secret, wallet);
         byte[] credRaw = JsonCodec.stringify(Map.of("traceId", "t_cred", "username", "player_9527", "currency", "USD", "token", tok)).getBytes(StandardCharsets.UTF_8);
@@ -319,6 +323,7 @@ public final class SdkTestRunner {
 
         java.util.concurrent.atomic.AtomicInteger p1Count = new java.util.concurrent.atomic.AtomicInteger(0);
         java.util.concurrent.atomic.AtomicReference<String> lastTs = new java.util.concurrent.atomic.AtomicReference<>("");
+        java.util.List<String> listTraces = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
         HttpServer rlSrv = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         rlSrv.createContext("/operator/v1/", ex -> {
             lastTs.set(ex.getRequestHeaders().getFirst("X-Timestamp"));
@@ -326,12 +331,44 @@ public final class SdkTestRunner {
             Map<String, Object> body = JsonCodec.parseObject(new String(reqBytes, StandardCharsets.UTF_8));
             String path = ex.getRequestURI().getPath();
             if ("/operator/v1/ping".equals(path)) {
+                String tid = String.valueOf(body.get("traceId"));
+                if ("m1_json_429".equals(tid)) {
+                    byte[] out = "{\"statusCode\":429,\"message\":\"Too Many Requests\"}".getBytes(StandardCharsets.UTF_8);
+                    ex.getResponseHeaders().set("Content-Type", "application/json");
+                    ex.sendResponseHeaders(429, out.length);
+                    ex.getResponseBody().write(out);
+                    ex.close();
+                    return;
+                }
+                if ("m1_json_503".equals(tid)) {
+                    byte[] out = "{\"error\":\"unavailable\"}".getBytes(StandardCharsets.UTF_8);
+                    ex.getResponseHeaders().set("Content-Type", "application/json");
+                    ex.sendResponseHeaders(503, out.length);
+                    ex.getResponseBody().write(out);
+                    ex.close();
+                    return;
+                }
+                if ("m4_overflow".equals(tid)) {
+                    ex.getResponseHeaders().set("Content-Type", "application/json");
+                    ex.sendResponseHeaders(200, 0);
+                    byte[] chunk = new byte[65536];
+                    java.util.Arrays.fill(chunk, (byte) 'a');
+                    try (var os = ex.getResponseBody()) {
+                        for (int i = 0; i < 260; i++) {
+                            os.write(chunk);
+                        }
+                    } catch (Exception ignored) {
+                    }
+                    ex.close();
+                    return;
+                }
                 byte[] out = "Too Many Requests".getBytes(StandardCharsets.UTF_8);
                 ex.sendResponseHeaders(429, out.length);
                 ex.getResponseBody().write(out);
                 ex.close();
                 return;
             }
+            listTraces.add(String.valueOf(body.get("traceId")));
             int pNo = ((Number) body.get("pageNo")).intValue();
             Map<String, Object> resp = new LinkedHashMap<>();
             resp.put("traceId", body.get("traceId"));
@@ -361,9 +398,46 @@ public final class SdkTestRunner {
             }
             check(caught429, "s2s:nonJson429");
             check(lastTs.get() != null && lastTs.get().matches("^\\d{13}$"), "s2s:xTimestamp");
-            List<Map<String, Object>> retried = tsClient.listAllTransactions(1000L, 2000L, 2, Map.of("username", "player_9527"), 3, 0L);
+
+            // M1: JSON 429 & 503 with missing status field
+            boolean caughtM1429 = false;
+            try {
+                tsClient.ping(Map.of("traceId", "m1_json_429"));
+            } catch (BaccaratSdk.ApiException ex) {
+                caughtM1429 = ex.httpStatus == 429 && "SC_RATE_LIMITED".equals(ex.status) && ex.isRetryable();
+            }
+            check(caughtM1429, "s2s:m1Json429");
+
+            boolean caughtM1503 = false;
+            try {
+                tsClient.ping(Map.of("traceId", "m1_json_503"));
+            } catch (BaccaratSdk.ApiException ex) {
+                caughtM1503 = ex.httpStatus == 503 && "SC_OPERATOR_TIMEOUT".equals(ex.status) && ex.isRetryable();
+            }
+            check(caughtM1503, "s2s:m1Json503");
+
+            // M4: >16 MiB response body rejected with non-retryable SC_INVALID_REQUEST
+            boolean caughtM4Overflow = false;
+            try {
+                tsClient.ping(Map.of("traceId", "m4_overflow"));
+            } catch (BaccaratSdk.SdkException ex) {
+                caughtM4Overflow = !(ex instanceof BaccaratSdk.ApiException)
+                        && BaccaratSdk.StatusCode.SC_INVALID_REQUEST.equals(ex.code)
+                        && !BaccaratSdk.StatusCode.isRetryable(ex.code);
+            }
+            check(caughtM4Overflow, "s2s:m4Overflow16MiB");
+
+            // m1: traceId in filters is stripped so every page & retry gets a distinct fresh UUID
+            List<Map<String, Object>> retried = tsClient.listAllTransactions(
+                    1000L, 2000L, 2,
+                    Map.of("username", "player_9527", "traceId", "caller-fixed-trace"),
+                    3, 0L
+            );
             checkEq(retried.size(), 3, "s2s:listAllRateLimitRetry");
             checkEq(p1Count.get(), 2, "s2s:p1Attempts");
+            checkEq(listTraces.size(), 3, "s2s:m1TraceCount");
+            checkEq(new java.util.HashSet<>(listTraces).size(), 3, "s2s:m1UniqueTraces");
+            check(!listTraces.contains("caller-fixed-trace"), "s2s:m1StrippedCallerTrace");
         } finally {
             rlSrv.stop(0);
         }

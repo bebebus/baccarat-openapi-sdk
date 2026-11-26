@@ -5,11 +5,13 @@
 ## 安装、编译与单测
 
 ```bash
-git clone --branch v1.5.2 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
+git clone --branch v1.5.3 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
 cd baccarat-openapi-sdk/java
 bash run-tests.sh          # 零 Maven 依赖直接编译并运行全部单测
 # 或安装至本地 ~/.m2：mvn install
 ```
+
+> **测试提示**：由于本模块保持零第三方依赖（`pom.xml` 未引入 JUnit / Surefire 测试框架），`mvn test` 与 `mvn install` 会跳过独立的 `SdkTestRunner`；请务必运行 `bash run-tests.sh` 执行全部单元测试与跨语言黄金向量校验。
 
 ## 快速开始（S2S 客户端）
 

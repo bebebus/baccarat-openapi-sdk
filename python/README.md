@@ -8,7 +8,7 @@
 - 安装（通过 Git 标签安装子目录包）：
 
 ```bash
-pip install "git+https://github.com/bebebus/baccarat-openapi-sdk.git@v1.5.2#subdirectory=python"
+pip install "git+https://github.com/bebebus/baccarat-openapi-sdk.git@v1.5.3#subdirectory=python"
 ```
 
 - 单测命令：`cd python && python3 -m unittest discover -s tests -v`
@@ -53,6 +53,7 @@ print(launch["data"]["gameUrl"])
 import os
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 from baccarat_sdk import InMemoryWallet, WebhookDispatcher
 
 app = FastAPI()
@@ -62,7 +63,9 @@ dispatcher = WebhookDispatcher.from_credentials(os.environ["B2B_API_KEY"], os.en
 @app.post("/wallet/{action}")
 async def wallet_webhook(request: Request):
     raw_bytes = await request.body()
-    status_code, resp_json = dispatcher.handle(
+    # WalletHandler 为同步接口，在 async 路由中务必通过 run_in_threadpool 卸载阻塞 DB/IO 调用
+    status_code, resp_json = await run_in_threadpool(
+        dispatcher.handle,
         request.url.path,
         request.headers.get("x-api-key"),
         request.headers.get("x-signature"),

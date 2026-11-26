@@ -1,10 +1,19 @@
 # SPDX-License-Identifier: MIT
 cmake_minimum_required(VERSION 3.16)
-project(baccarat_sdk LANGUAGES CXX)
+project(baccarat_sdk VERSION 1.5.3 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+if(DEFINED PROJECT_IS_TOP_LEVEL)
+  set(_BACCARAT_DEFAULT_TESTS ${PROJECT_IS_TOP_LEVEL})
+elseif(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
+  set(_BACCARAT_DEFAULT_TESTS ON)
+else()
+  set(_BACCARAT_DEFAULT_TESTS OFF)
+endif()
+option(BACCARAT_BUILD_TESTS "Build baccarat_sdk tests" ${_BACCARAT_DEFAULT_TESTS})
 
 if(APPLE AND NOT OPENSSL_ROOT_DIR)
   if(EXISTS "/opt/homebrew/opt/openssl@3")
@@ -21,14 +30,20 @@ find_package(Threads REQUIRED)
 add_library(baccarat_sdk STATIC src/sdk.cpp)
 target_include_directories(baccarat_sdk PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(baccarat_sdk PUBLIC OpenSSL::Crypto CURL::libcurl Threads::Threads)
-target_compile_options(baccarat_sdk PRIVATE -Wall -Wextra -Wpedantic)
+if(NOT MSVC)
+  target_compile_options(baccarat_sdk PRIVATE -Wall -Wextra -Wpedantic)
+endif()
 
-enable_testing()
-add_executable(baccarat_sdk_tests tests/sdk_test.cpp)
-target_link_libraries(baccarat_sdk_tests PRIVATE baccarat_sdk)
-target_compile_options(baccarat_sdk_tests PRIVATE -Wall -Wextra -Wpedantic)
-add_test(
-  NAME baccarat_sdk_tests
-  COMMAND baccarat_sdk_tests
-  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-)
+if(BACCARAT_BUILD_TESTS)
+  enable_testing()
+  add_executable(baccarat_sdk_tests tests/sdk_test.cpp)
+  target_link_libraries(baccarat_sdk_tests PRIVATE baccarat_sdk)
+  if(NOT MSVC)
+    target_compile_options(baccarat_sdk_tests PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+  add_test(
+    NAME baccarat_sdk_tests
+    COMMAND baccarat_sdk_tests
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  )
+endif()

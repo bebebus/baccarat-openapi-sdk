@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.2).
+//! Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.3).
 
 pub mod crypto;
 mod curl_ffi;
@@ -315,11 +315,29 @@ pub trait HttpTransport: Send + Sync {
         url: &str,
         api_key: &str,
         signature: &str,
-        _timestamp: Option<&str>,
+        timestamp: Option<&str>,
         raw_body: &[u8],
         timeout_ms: u64,
     ) -> Result<(u16, Vec<u8>), SdkError> {
+        if timestamp.is_some() {
+            return Err(SdkError::Config(
+                "custom HttpTransport must implement post_json_with_timestamp when send_timestamp is enabled".into(),
+            ));
+        }
         self.post_json(url, api_key, signature, raw_body, timeout_ms)
+    }
+}
+
+fn map_curl_err(err: curl_ffi::CurlError) -> SdkError {
+    match err {
+        curl_ffi::CurlError::Overflow(http_status) => SdkError::Api {
+            trace_id: String::new(),
+            status: status_code::SC_INVALID_REQUEST.into(),
+            message: "Gateway response exceeded 16 MiB limit".into(),
+            validation: None,
+            http_status,
+        },
+        curl_ffi::CurlError::Transport(m) => SdkError::Transport(m),
     }
 }
 
@@ -334,8 +352,7 @@ impl HttpTransport for LibCurlTransport {
         raw_body: &[u8],
         timeout_ms: u64,
     ) -> Result<(u16, Vec<u8>), SdkError> {
-        curl_ffi::libcurl_post_json(url, api_key, signature, None, raw_body, timeout_ms)
-            .map_err(SdkError::Transport)
+        curl_ffi::libcurl_post_json(url, api_key, signature, None, raw_body, timeout_ms).map_err(map_curl_err)
     }
 
     fn post_json_with_timestamp(
@@ -347,8 +364,7 @@ impl HttpTransport for LibCurlTransport {
         raw_body: &[u8],
         timeout_ms: u64,
     ) -> Result<(u16, Vec<u8>), SdkError> {
-        curl_ffi::libcurl_post_json(url, api_key, signature, timestamp, raw_body, timeout_ms)
-            .map_err(SdkError::Transport)
+        curl_ffi::libcurl_post_json(url, api_key, signature, timestamp, raw_body, timeout_ms).map_err(map_curl_err)
     }
 }
 
@@ -433,6 +449,16 @@ fn next_trace_uuid() -> String {
     )
 }
 
+fn fallback_status_for_http(http_status: u16) -> &'static str {
+    if http_status == 429 {
+        status_code::SC_RATE_LIMITED
+    } else if http_status >= 500 || http_status == 408 {
+        status_code::SC_OPERATOR_TIMEOUT
+    } else {
+        status_code::SC_INVALID_REQUEST
+    }
+}
+
 pub struct Client {
     api_key: String,
     hmac_secret: String,
@@ -506,19 +532,13 @@ impl Client {
             .filter(Json::is_object)
             .ok_or_else(|| SdkError::Api {
                 trace_id: trace_id.clone(),
-                status: if http_status == 429 {
-                    status_code::SC_RATE_LIMITED.into()
-                } else if http_status >= 500 || http_status == 408 {
-                    status_code::SC_OPERATOR_TIMEOUT.into()
-                } else {
-                    status_code::SC_INVALID_REQUEST.into()
-                },
+                status: fallback_status_for_http(http_status).into(),
                 message: format!("Non-JSON-object HTTP {}", http_status),
                 validation: None,
                 http_status,
             })?;
 
-        let st = parsed.get("status").as_str().unwrap_or(status_code::SC_INVALID_REQUEST);
+        let raw_st = parsed.get("status").as_str().map(str::trim).unwrap_or("");
         let eff_trace = parsed
             .get("traceId")
             .as_str()
@@ -526,7 +546,12 @@ impl Client {
             .unwrap_or(&trace_id)
             .to_string();
 
-        if http_status != 200 || st != status_code::SC_OK {
+        if http_status != 200 || raw_st != status_code::SC_OK {
+            let st = if raw_st.is_empty() {
+                fallback_status_for_http(http_status)
+            } else {
+                raw_st
+            };
             let validation = parsed.get("validation").as_object_entries().map(|entries| {
                 entries
                     .iter()
@@ -606,6 +631,7 @@ impl Client {
         let mut page_no = 1_i64;
         loop {
             let mut p = if filters.is_object() { filters.clone() } else { Json::object() };
+            p.remove("traceId");
             p.set("fromTime", Json::Int(from_time));
             p.set("toTime", Json::Int(to_time));
             p.set("pageNo", Json::Int(page_no));
@@ -1241,6 +1267,7 @@ pub struct WebhookDispatcher<'a> {
 }
 
 impl<'a> WebhookDispatcher<'a> {
+    /// Note: does not validate empty credentials; prefer [`Self::try_new`] or [`Self::from_credentials`].
     pub fn new(config: &Config, wallet: &'a dyn WalletHandler) -> Self {
         Self {
             api_key: config.api_key.trim().to_string(),
@@ -1748,9 +1775,10 @@ mod tests {
     }
 
     #[test]
-    fn v152_timestamp_ratelimit_and_static_dispatcher() {
+    fn hardening_timestamp_ratelimit_overflow_and_json_regressions() {
         struct MockTransport {
             last_ts: Mutex<Option<String>>,
+            list_traces: Mutex<Vec<String>>,
             p1_calls: AtomicU64,
         }
         impl HttpTransport for MockTransport {
@@ -1775,10 +1803,19 @@ mod tests {
                 _timeout_ms: u64,
             ) -> Result<(u16, Vec<u8>), SdkError> {
                 *self.last_ts.lock().unwrap() = timestamp.map(String::from);
-                if url.ends_with("/operator/v1/ping") {
-                    return Ok((429, b"Too Many Requests".to_vec()));
-                }
                 let body = Json::parse(&String::from_utf8_lossy(raw_body)).unwrap();
+                if url.ends_with("/operator/v1/ping") {
+                    match body.get("traceId").as_str().unwrap_or("") {
+                        "m1_json_429" => return Ok((429, br#"{"statusCode":429,"message":"Too Many Requests"}"#.to_vec())),
+                        "m1_empty_429" => return Ok((429, br#"{"status":"","message":"Empty"}"#.to_vec())),
+                        "m1_json_503" => return Ok((503, br#"{"error":"unavailable"}"#.to_vec())),
+                        _ => return Ok((429, b"Too Many Requests".to_vec())),
+                    }
+                }
+                self.list_traces
+                    .lock()
+                    .unwrap()
+                    .push(body.get("traceId").as_str().unwrap_or("").to_string());
                 let pno = body.get("pageNo").as_i64().unwrap_or(1);
                 let mut resp = Json::object();
                 resp.set("traceId", body.get("traceId").clone());
@@ -1808,6 +1845,7 @@ mod tests {
         let secret = "dGVzdF9zZWNyZXRfNDBfY2hhcnNfYmFzZTY0dXJsX2s";
         let transport = Arc::new(MockTransport {
             last_ts: Mutex::new(None),
+            list_traces: Mutex::new(Vec::new()),
             p1_calls: AtomicU64::new(0),
         });
         let client = Client::with_transport(
@@ -1829,13 +1867,101 @@ mod tests {
         let ts_val = transport.last_ts.lock().unwrap().clone().unwrap();
         assert!(ts_val.len() >= 13 && ts_val.bytes().all(|b| b.is_ascii_digit()));
 
+        // M1: JSON 429 / 503 with missing or empty status
+        for (tid, exp_http, exp_st) in [
+            ("m1_json_429", 429u16, status_code::SC_RATE_LIMITED),
+            ("m1_empty_429", 429u16, status_code::SC_RATE_LIMITED),
+            ("m1_json_503", 503u16, status_code::SC_OPERATOR_TIMEOUT),
+        ] {
+            let mut p = Json::object();
+            p.set("traceId", Json::Str(tid.into()));
+            let e = client.ping(p).unwrap_err();
+            assert!(matches!(e, SdkError::Api { http_status, ref status, .. } if http_status == exp_http && status == exp_st));
+            assert!(e.is_retryable());
+        }
+
+        // M3: custom HttpTransport that omits post_json_with_timestamp returns SdkError::Config when send_timestamp=true
+        struct LegacyOnlyTransport;
+        impl HttpTransport for LegacyOnlyTransport {
+            fn post_json(&self, _u: &str, _k: &str, _s: &str, _b: &[u8], _t: u64) -> Result<(u16, Vec<u8>), SdkError> {
+                Ok((200, br#"{"traceId":"t","status":"SC_OK","data":{}}"#.to_vec()))
+            }
+        }
+        let legacy_client = Client::with_transport(
+            Config {
+                api_key: api_key.into(),
+                hmac_secret: secret.into(),
+                environment: Environment::Sandbox,
+                base_url: None,
+                timeout_ms: 5000,
+            },
+            Arc::new(LegacyOnlyTransport),
+        )
+        .unwrap()
+        .with_send_timestamp(true);
+        let cfg_err = legacy_client.ping(Json::object()).unwrap_err();
+        assert!(matches!(cfg_err, SdkError::Config(_)));
+        assert!(!cfg_err.is_retryable());
+
+        // m1: caller-supplied traceId in filters is stripped so every page & retry gets a distinct fresh UUID
         let mut filters = Json::object();
         filters.set("username", Json::Str("player_9527".into()));
+        filters.set("traceId", Json::Str("caller-fixed-trace".into()));
         let rows = client
             .list_all_transactions_with_options(1000, 2000, 2, filters, 3, 0)
             .unwrap();
         assert_eq!(rows.len(), 3);
         assert_eq!(transport.p1_calls.load(Ordering::Relaxed), 2);
+        {
+            let traces = transport.list_traces.lock().unwrap();
+            assert_eq!(traces.len(), 3);
+            let uniq: HashSet<&String> = traces.iter().collect();
+            assert_eq!(uniq.len(), 3);
+            assert!(!uniq.contains(&"caller-fixed-trace".to_string()));
+        }
+
+        // m9: duplicate JSON object keys follow last-key-wins
+        let dup = Json::parse(r#"{"k":"first","k":"second","nested":{"x":1,"x":2}}"#).unwrap();
+        assert_eq!(dup.get("k").as_str(), Some("second"));
+        assert_eq!(dup.get("nested").get("x").as_i64(), Some(2));
+
+        // m2: libcurl >16 MiB response returns non-retryable SC_INVALID_REQUEST (not retryable Transport)
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let srv = thread::spawn(move || {
+            if let Ok((mut s, _)) = listener.accept() {
+                let mut tmp = [0u8; 4096];
+                let _ = s.read(&mut tmp);
+                let total_len: usize = 16 * 1024 * 1024 + 65536;
+                let hdr = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+                    total_len
+                );
+                if s.write_all(hdr.as_bytes()).is_ok() {
+                    let chunk = vec![b'a'; 65536];
+                    let mut sent = 0usize;
+                    while sent < total_len {
+                        let to_send = (total_len - sent).min(chunk.len());
+                        if s.write_all(&chunk[..to_send]).is_err() {
+                            break;
+                        }
+                        sent += to_send;
+                    }
+                }
+            }
+        });
+        let ov_client = Client::new(Config {
+            api_key: api_key.into(),
+            hmac_secret: secret.into(),
+            environment: Environment::Production,
+            base_url: Some(format!("http://127.0.0.1:{}", port)),
+            timeout_ms: 5000,
+        })
+        .unwrap();
+        let ov_err = ov_client.ping(Json::object()).unwrap_err();
+        assert!(matches!(ov_err, SdkError::Api { ref status, .. } if status == status_code::SC_INVALID_REQUEST));
+        assert!(!ov_err.is_retryable());
+        let _ = srv.join();
 
         // Verify SharedWebhookDispatcher is 'static + Send + Sync without base_url
         fn assert_static_send_sync<T: 'static + Send + Sync>(_: &T) {}

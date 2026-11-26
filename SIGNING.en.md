@@ -1,6 +1,6 @@
 > [中文](./SIGNING.md) | English
 
-# Raw-Byte HMAC-SHA256 Signing & Idempotency Fingerprint Specification (v1.5.2)
+# Raw-Byte HMAC-SHA256 Signing & Idempotency Fingerprint Specification (v1.5.3)
 
 This document is the authoritative cryptographic and idempotency specification shared across all 7 SDKs in `bebebus/baccarat-openapi-sdk` (Node.js, Python, PHP, Go, Java, C++, and Rust), aligned 100% with `https://openapi.lt.cniia.cloud/openapi.yaml`.
 
@@ -11,7 +11,7 @@ Both inbound S2S calls (Merchant -> Platform `/operator/v1/*`) and outbound seam
 - `Content-Type: application/json`
 - `X-API-Key: ak_<32-lowercase-hex>` (35 chars, max 128 chars, trimmed)
 - `X-Signature: <64-hex-chars>`
-- `X-Timestamp` (optional inbound S2S anti-replay): 10-digit Unix seconds or 13-digit Unix ms (`±300s` skew window; enabled via `sendTimestamp` / `send_timestamp` / `SendTimestamp` config flag across all 7 SDKs; `X-Signature` is still computed strictly over raw body bytes)
+- `X-Timestamp` (optional inbound S2S anti-replay): 10-digit Unix seconds or 13-digit Unix ms (`±300s` skew window; enabled via `sendTimestamp` in Node.js/PHP/Java, `send_timestamp` in Python/C++, `SendTimestamp` in Go, and **`Client::with_send_timestamp(true)` in Rust** to preserve backwards-compatible `Config` struct literals; `X-Signature` is still computed strictly over raw body bytes)
 
 ## 2. Signing Invariants
 

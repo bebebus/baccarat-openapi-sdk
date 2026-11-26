@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Bebebus\BaccaratSdk;
 
-final class InMemoryWallet implements WalletHandlerInterface
+final class InMemoryWallet implements WalletHandlerInterface, WalletAdjustmentHandlerInterface
 {
     /** @var array<string, array{currency: string, exponent: int, balanceUnits: string, tokens: array<string, bool>, disabled: bool}> */
     private array $accounts = [];

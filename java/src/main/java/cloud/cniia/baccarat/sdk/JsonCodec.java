@@ -272,39 +272,43 @@ public final class JsonCodec {
         throw new IllegalArgumentException("Unterminated string");
     }
 
+    private static boolean isAsciiDigit(char c) {
+        return c >= '0' && c <= '9';
+    }
+
     private Number readNumber() {
         int start = pos;
         if (s.charAt(pos) == '-') {
             pos++;
-            if (pos >= s.length() || !Character.isDigit(s.charAt(pos))) {
+            if (pos >= s.length() || !isAsciiDigit(s.charAt(pos))) {
                 throw new IllegalArgumentException("Malformed negative number at " + start);
             }
         }
         if (s.charAt(pos) == '0') {
             pos++;
-            if (pos < s.length() && Character.isDigit(s.charAt(pos))) {
+            if (pos < s.length() && isAsciiDigit(s.charAt(pos))) {
                 throw new IllegalArgumentException("Leading zeros forbidden in JSON number at " + start);
             }
         } else {
-            while (pos < s.length() && Character.isDigit(s.charAt(pos))) pos++;
+            while (pos < s.length() && isAsciiDigit(s.charAt(pos))) pos++;
         }
         boolean isFloat = false;
         if (pos < s.length() && s.charAt(pos) == '.') {
             isFloat = true;
             pos++;
-            if (pos >= s.length() || !Character.isDigit(s.charAt(pos))) {
+            if (pos >= s.length() || !isAsciiDigit(s.charAt(pos))) {
                 throw new IllegalArgumentException("Malformed fractional part in JSON number at " + start);
             }
-            while (pos < s.length() && Character.isDigit(s.charAt(pos))) pos++;
+            while (pos < s.length() && isAsciiDigit(s.charAt(pos))) pos++;
         }
         if (pos < s.length() && (s.charAt(pos) == 'e' || s.charAt(pos) == 'E')) {
             isFloat = true;
             pos++;
             if (pos < s.length() && (s.charAt(pos) == '+' || s.charAt(pos) == '-')) pos++;
-            if (pos >= s.length() || !Character.isDigit(s.charAt(pos))) {
+            if (pos >= s.length() || !isAsciiDigit(s.charAt(pos))) {
                 throw new IllegalArgumentException("Malformed exponent in JSON number at " + start);
             }
-            while (pos < s.length() && Character.isDigit(s.charAt(pos))) pos++;
+            while (pos < s.length() && isAsciiDigit(s.charAt(pos))) pos++;
         }
         String raw = s.substring(start, pos);
         if (!isFloat) {

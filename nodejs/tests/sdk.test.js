@@ -343,9 +343,10 @@ test('WebhookDispatcher & InMemoryWallet full seamless wallet lifecycle', async 
     assert.match(tid, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   }
 
-  // 8. v1.5.2 regressions: sendTimestamp X-Timestamp, non-JSON 429 -> SC_RATE_LIMITED, listAllTransactions backoff,
-  //    webhook-only PRODUCTION without baseUrl, and plain-object rawBody rejection
+  // 8. Regressions: sendTimestamp X-Timestamp, non-JSON 429 -> SC_RATE_LIMITED, listAllTransactions backoff + traceId stripping,
+  //    JSON missing/empty status fallback (M1), no-arg listAllTransactions (M2), webhook-only PRODUCTION without baseUrl, and plain-object rawBody rejection
   const capturedHeaders = [];
+  const capturedListTraces = [];
   let page1Calls = 0;
   const tsClient = new Client(
     { apiKey, hmacSecret: secret, environment: Environment.SANDBOX, sendTimestamp: true },
@@ -354,8 +355,18 @@ test('WebhookDispatcher & InMemoryWallet full seamless wallet lifecycle', async 
         capturedHeaders.push(headers);
         const p = JSON.parse(rawBuf.toString('utf8'));
         if (url.endsWith('/operator/v1/ping')) {
+          if (p.traceId === 'm1_json_429') {
+            return { httpStatus: 429, rawBody: JSON.stringify({ statusCode: 429, message: 'Too Many Requests' }) };
+          }
+          if (p.traceId === 'm1_json_503') {
+            return { httpStatus: 503, rawBody: JSON.stringify({ error: 'unavailable' }) };
+          }
+          if (p.traceId === 'm1_empty_429') {
+            return { httpStatus: 429, rawBody: JSON.stringify({ status: '', message: 'Empty status' }) };
+          }
           return { httpStatus: 429, rawBody: 'Too Many Requests' };
         }
+        capturedListTraces.push(p.traceId);
         if (p.pageNo === 1 && page1Calls === 0) {
           page1Calls += 1;
           return { httpStatus: 200, rawBody: JSON.stringify({ traceId: p.traceId, status: 'SC_RATE_LIMITED', message: 'slow down' }) };
@@ -371,18 +382,72 @@ test('WebhookDispatcher & InMemoryWallet full seamless wallet lifecycle', async 
   );
   assert.match(capturedHeaders[0]['X-Timestamp'], /^\d{13}$/);
 
+  await assert.rejects(
+    () => tsClient.ping({ traceId: 'm1_json_429' }),
+    (err) => err instanceof BaccaratApiError && err.httpStatus === 429 && err.status === StatusCode.SC_RATE_LIMITED && err.isRetryable(),
+  );
+  await assert.rejects(
+    () => tsClient.ping({ traceId: 'm1_json_503' }),
+    (err) => err instanceof BaccaratApiError && err.httpStatus === 503 && err.status === StatusCode.SC_OPERATOR_TIMEOUT && err.isRetryable(),
+  );
+  await assert.rejects(
+    () => tsClient.ping({ traceId: 'm1_empty_429' }),
+    (err) => err instanceof BaccaratApiError && err.httpStatus === 429 && err.status === StatusCode.SC_RATE_LIMITED && err.isRetryable(),
+  );
+
+  // M2: calling listAllTransactions with no args rejects with BaccaratSdkError (not TypeError)
+  await assert.rejects(() => tsClient.listAllTransactions(), (err) => err instanceof BaccaratSdkError && err.code === 'INVALID_ARGUMENT');
+
+  // m1: caller-supplied traceId is stripped so every page & retry attempt gets a fresh unique UUID
   const retriedRows = await tsClient.listAllTransactions({
     fromTime: 1000,
     toTime: 2000,
     pageSize: 2,
     username: 'player_9527',
+    traceId: 'caller-fixed-trace',
     rateLimitBackoffMs: 0,
   });
   assert.equal(retriedRows.length, 3);
   assert.equal(page1Calls, 1);
+  assert.equal(capturedListTraces.length, 3);
+  assert.equal(new Set(capturedListTraces).size, 3);
+  assert(!capturedListTraces.includes('caller-fixed-trace'));
 
   const prodWebhookOnly = new WebhookDispatcher({ apiKey, hmacSecret: secret }, wallet);
   const parsedObjRes = await prodWebhookOnly.handle('/wallet/bet', apiKey, '0'.repeat(64), { traceId: 't_obj', amount: '10.00' });
   assert.equal(parsedObjRes.body.status, StatusCode.SC_INVALID_REQUEST);
   assert.equal(parsedObjRes.body.traceId, 't_obj');
+
+  // M2: real HTTP transport total-deadline timeout & mid-body TCP reset do not hang or crash process
+  const edgeSrv = http.createServer((req, res) => {
+    req.resume();
+    if (req.url === '/operator/v1/ping') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.write('{"partial":');
+      const iv = setInterval(() => {
+        if (!res.destroyed) res.write(' ');
+      }, 30);
+      res.on('close', () => clearInterval(iv));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': '1024' });
+    res.write('{"partial":');
+    setTimeout(() => req.socket.destroy(), 15);
+  });
+  await new Promise((resolve) => edgeSrv.listen(0, '127.0.0.1', resolve));
+  try {
+    const edgePort = edgeSrv.address().port;
+    const deadlineClient = new Client({ apiKey, hmacSecret: secret, baseUrl: `http://127.0.0.1:${edgePort}`, timeoutMs: 120 });
+    await assert.rejects(
+      () => deadlineClient.ping(),
+      (err) => err instanceof BaccaratSdkError && err.code === StatusCode.SC_OPERATOR_TIMEOUT,
+    );
+    const resetClient = new Client({ apiKey, hmacSecret: secret, baseUrl: `http://127.0.0.1:${edgePort}`, timeoutMs: 2000 });
+    await assert.rejects(
+      () => resetClient.listTables(),
+      (err) => err instanceof BaccaratSdkError && err.code === StatusCode.SC_OPERATOR_TIMEOUT,
+    );
+  } finally {
+    edgeSrv.close();
+  }
 });

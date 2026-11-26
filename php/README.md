@@ -5,11 +5,11 @@
 ## 安装与单测
 
 ```bash
-git clone --branch v1.5.2 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
+git clone --branch v1.5.3 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
 cd baccarat-openapi-sdk/php && php tests/run.php
 ```
 
-在项目 `composer.json` 中使用 `path` 仓库引入（本 SDK 未发布至 Packagist）：
+在项目 `composer.json` 中使用 `path` 仓库引入（本 SDK 未发布至 Packagist；若直接拷贝/vendor `php/` 目录且不包含 `.git` 目录，请在 `php/composer.json` 中补充 `"version": "1.5.3"` 字段，以便 Composer 解析版本约束）：
 
 ```json
 {
@@ -22,12 +22,14 @@ cd baccarat-openapi-sdk/php && php tests/run.php
 }
 ```
 
+> 自动加载入口：通过 Composer 安装时在业务代码中引入 `require __DIR__ . '/vendor/autoload.php';`；直接克隆源码独立运行时引入 `require __DIR__ . '/autoload.php';`。
+
 ## 快速开始（S2S 客户端）
 
 ```php
 <?php
 declare(strict_types=1);
-require __DIR__ . '/autoload.php';
+require __DIR__ . '/vendor/autoload.php'; // 独立克隆使用：require __DIR__ . '/autoload.php';
 
 use Bebebus\BaccaratSdk\Client;
 use Bebebus\BaccaratSdk\Config;
@@ -62,18 +64,19 @@ echo $res['data']['gameUrl'] . PHP_EOL;
 
 ## PHP-FPM 钱包回调接入（务必使用持久化数据库存储）
 
-> **严重警告**：PHP-FPM 每个 HTTP 请求结束后进程内存都会释放，**严禁在 PHP-FPM 回调入口使用 `InMemoryWallet`**（`InMemoryWallet` 仅用于 CLI 与单元测试）。生产环境请实现基于数据库唯一索引（`UNIQUE(transaction_id)`）的 `WalletHandlerInterface`（并实现 `onAdjustment` 处理 `/wallet/adjustment`）。纯回调服务可使用 `WebhookDispatcher::fromCredentials(...)`，无需配置 `baseUrl`。
+> **严重警告**：PHP-FPM 每个 HTTP 请求结束后进程内存都会释放，**严禁在 PHP-FPM 回调入口使用 `InMemoryWallet`**（`InMemoryWallet` 仅用于 CLI 与单元测试）。生产环境请实现基于数据库唯一索引（`UNIQUE(transaction_id)`）的 `WalletHandlerInterface` 与 `WalletAdjustmentHandlerInterface`（处理 `/wallet/adjustment`）。纯回调服务可使用 `WebhookDispatcher::fromCredentials(...)`，无需配置 `baseUrl`。
 
 ```php
 <?php
 declare(strict_types=1);
-require __DIR__ . '/autoload.php';
+require __DIR__ . '/vendor/autoload.php'; // 独立克隆使用：require __DIR__ . '/autoload.php';
 
 use Bebebus\BaccaratSdk\StatusCode;
+use Bebebus\BaccaratSdk\WalletAdjustmentHandlerInterface;
 use Bebebus\BaccaratSdk\WalletHandlerInterface;
 use Bebebus\BaccaratSdk\WebhookDispatcher;
 
-final class DbWalletHandler implements WalletHandlerInterface
+final class DbWalletHandler implements WalletHandlerInterface, WalletAdjustmentHandlerInterface
 {
     public function onBalance(array $req): array { /* 查询数据库只读余额 */ return ['traceId' => $req['traceId'] ?? '', 'status' => StatusCode::SC_OK, 'data' => ['username' => $req['username'], 'currency' => $req['currency'], 'balance' => '1000.00', 'timestamp' => (int) floor(microtime(true) * 1000)]]; }
     public function onBet(array $req): array { /* 按 transactionId 幂等扣款 */ return $this->onBalance($req); }

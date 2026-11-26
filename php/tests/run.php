@@ -235,15 +235,28 @@ $customWallet = new class implements \Bebebus\BaccaratSdk\WalletHandlerInterface
 $customDisp = new WebhookDispatcher($cfg, $customWallet);
 assertEq($customDisp->handle('/wallet/balance', $apiKey, Signing::signBody($emptyObjRaw, $secret), $emptyObjRaw)['body']['data']['balance'], '42.00', 'wb:customInterface');
 
-// 7. v1.5.2 regressions: sendTimestamp X-Timestamp, non-JSON 429 -> SC_RATE_LIMITED, listAllTransactions backoff + filters, WebhookDispatcher::fromCredentials
+// 7. Regressions: sendTimestamp X-Timestamp, non-JSON/JSON missing-or-empty-status 429 & 503 (M1),
+//    listAllTransactions backoff + filters + traceId stripping (m1), WebhookDispatcher::fromCredentials,
+//    leading-'?' query route rejection (M5), WalletAdjustmentHandlerInterface (m3), UTF-8 traceId truncation (m10)
 $capturedHeaders = [];
+$capturedListTraces = [];
 $page1Attempts = 0;
-$tsTransport = static function (string $url, array $headers, string $rawBody, int $timeoutMs) use (&$capturedHeaders, &$page1Attempts): array {
+$tsTransport = static function (string $url, array $headers, string $rawBody, int $timeoutMs) use (&$capturedHeaders, &$capturedListTraces, &$page1Attempts): array {
     $capturedHeaders[] = $headers;
     $body = json_decode($rawBody, true, 512, JSON_THROW_ON_ERROR);
     if (str_ends_with($url, '/operator/v1/ping')) {
+        if (($body['traceId'] ?? '') === 'm1_json_429') {
+            return [429, json_encode(['statusCode' => 429, 'message' => 'Too Many Requests'])];
+        }
+        if (($body['traceId'] ?? '') === 'm1_empty_429') {
+            return [429, json_encode(['status' => '', 'message' => 'Empty status'])];
+        }
+        if (($body['traceId'] ?? '') === 'm1_json_503') {
+            return [503, json_encode(['error' => 'unavailable'])];
+        }
         return [429, 'Too Many Requests'];
     }
+    $capturedListTraces[] = $body['traceId'] ?? '';
     if (($body['pageNo'] ?? 1) === 1 && $page1Attempts === 0) {
         $page1Attempts++;
         return [200, json_encode(['traceId' => $body['traceId'], 'status' => 'SC_RATE_LIMITED', 'message' => 'slow down'])];
@@ -262,11 +275,53 @@ try {
 assertEq($caught429, true, 's2s:nonJson429RateLimited');
 assertEq((bool) preg_match('/^\d{13}$/', $capturedHeaders[0]['X-Timestamp'] ?? ''), true, 's2s:xTimestampHeader');
 
-$retriedAll = $tsClient->listAllTransactions(1000, 2000, 2, ['username' => 'player_9527'], 3, 0);
+foreach ([
+    ['m1_json_429', 429, StatusCode::SC_RATE_LIMITED],
+    ['m1_empty_429', 429, StatusCode::SC_RATE_LIMITED],
+    ['m1_json_503', 503, StatusCode::SC_OPERATOR_TIMEOUT],
+] as [$tid, $expHttp, $expStatus]) {
+    $ok = false;
+    try {
+        $tsClient->ping(['traceId' => $tid]);
+    } catch (BaccaratApiException $e) {
+        $ok = ($e->httpStatus === $expHttp && $e->status === $expStatus && $e->isRetryable());
+    }
+    assertEq($ok, true, 's2s:m1:' . $tid);
+}
+
+$retriedAll = $tsClient->listAllTransactions(1000, 2000, 2, ['username' => 'player_9527', 'traceId' => 'caller-fixed-trace'], 3, 0);
 assertEq(count($retriedAll), 3, 's2s:listAllRateLimitRetry');
 assertEq($page1Attempts, 1, 's2s:listAllRetryCount');
+assertEq(count($capturedListTraces), 3, 's2s:listAllTraceCount');
+assertEq(count(array_unique($capturedListTraces)), 3, 's2s:listAllUniqueTraces');
+assertEq(in_array('caller-fixed-trace', $capturedListTraces, true), false, 's2s:listAllStrippedTraceId');
 
 $credDisp = WebhookDispatcher::fromCredentials($apiKey, $secret, $customWallet);
 assertEq($credDisp->handle('/wallet/balance', $apiKey, Signing::signBody($emptyObjRaw, $secret), $emptyObjRaw)['body']['data']['balance'], '42.00', 'wb:fromCredentials');
+
+// M5: leading '?' query string must NOT bypass route matching via strtok
+$qRouteRes = $credDisp->handle('?/wallet/balance', $apiKey, Signing::signBody($emptyObjRaw, $secret), $emptyObjRaw)['body'];
+assertEq($qRouteRes['status'], StatusCode::SC_INVALID_REQUEST, 'wb:m5LeadingQuestionMark');
+assertEq(str_starts_with((string) ($qRouteRes['message'] ?? ''), 'Unknown route'), true, 'wb:m5LeadingQuestionMarkMsg');
+
+// m3: WalletAdjustmentHandlerInterface check
+assertEq($wallet instanceof \Bebebus\BaccaratSdk\WalletAdjustmentHandlerInterface, true, 'wb:m3InMemoryImplementsAdjInterface');
+$typedAdjWallet = new class implements \Bebebus\BaccaratSdk\WalletHandlerInterface, \Bebebus\BaccaratSdk\WalletAdjustmentHandlerInterface {
+    public function onBalance(array $req): array { return ['traceId' => $req['traceId'] ?? '', 'status' => 'SC_OK', 'data' => ['balance' => '1.00', 'timestamp' => 1]]; }
+    public function onBet(array $req): array { return $this->onBalance($req); }
+    public function onBetResult(array $req): array { return $this->onBalance($req); }
+    public function onRollback(array $req): array { return $this->onBalance($req); }
+    public function onAdjustment(array $req): array { return ['traceId' => $req['traceId'] ?? '', 'status' => 'SC_OK', 'data' => ['balance' => '77.00', 'timestamp' => 1]]; }
+};
+$typedAdjDisp = WebhookDispatcher::fromCredentials($apiKey, $secret, $typedAdjWallet);
+assertEq($typedAdjDisp->handle('/wallet/adjustment', $apiKey, Signing::signBody($emptyObjRaw, $secret), $emptyObjRaw)['body']['data']['balance'], '77.00', 'wb:m3TypedAdjDispatch');
+
+// m10: UTF-8 multi-byte traceId > 128 bytes/chars must not be corrupted on truncation
+$utf8Trace = str_repeat('中', 140);
+$utf8Raw = json_encode(['traceId' => $utf8Trace], JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+$utf8Res = $credDisp->handle('/wallet/unknown', $apiKey, Signing::signBody($utf8Raw, $secret), $utf8Raw)['body'];
+assertEq($utf8Res['status'], StatusCode::SC_INVALID_REQUEST, 'wb:m10Utf8TraceStatus');
+assertEq((bool) preg_match('//u', (string) $utf8Res['traceId']), true, 'wb:m10Utf8Valid');
+assertEq($utf8Res['traceId'], str_repeat('中', 128), 'wb:m10Utf8CharCount');
 
 echo "PHP SDK: ALL TESTS PASSED\n";

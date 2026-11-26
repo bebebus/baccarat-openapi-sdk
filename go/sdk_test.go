@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 type testVectorsDoc struct {
@@ -402,7 +403,8 @@ func TestS2SClientAndWebhookHTTPServer(t *testing.T) {
 		t.Fatalf("expected zero stake to fail, got %+v", r)
 	}
 
-	// v1.5.2 regressions: GET -> 405 Method Not Allowed, SendTimestamp -> X-Timestamp, non-JSON 429 -> SC_RATE_LIMITED,
+	// Regressions: GET -> 405 Method Not Allowed, SendTimestamp -> X-Timestamp, non-JSON & JSON missing-status 429/503 (M1),
+	// 3xx redirect blocked (M7), ClearCustomChips (m4), UTF-8 rune-safe traceId truncation (m10),
 	// ListAllTransactionsWithOptions rate-limit retry + filters, typed BaccaratRevealedCard & TicketAdjustmentItem,
 	// and v1.3.0+ additive webhook fields on WalletBetRequest / WalletBetResultRequest
 	getRes, err := http.Get(wbSrv.URL + "/wallet/balance")
@@ -416,15 +418,41 @@ func TestS2SClientAndWebhookHTTPServer(t *testing.T) {
 
 	var p1Count int
 	var lastTsHeader string
+	var redirectHit bool
 	rlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		lastTsHeader = r.Header.Get("X-Timestamp")
 		raw, _ := io.ReadAll(r.Body)
 		var body map[string]any
 		_ = json.Unmarshal(raw, &body)
 		switch r.URL.Path {
+		case "/leaked":
+			redirectHit = true
+			w.WriteHeader(http.StatusOK)
 		case "/operator/v1/ping":
-			w.WriteHeader(http.StatusTooManyRequests)
-			_, _ = w.Write([]byte("Too Many Requests"))
+			switch body["traceId"] {
+			case "m1_json_429":
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`{"statusCode":429,"message":"Too Many Requests"}`))
+			case "m1_json_503":
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(`{"error":"unavailable"}`))
+			case "m7_redirect":
+				w.Header().Set("Location", "/leaked")
+				w.WriteHeader(http.StatusTemporaryRedirect)
+			default:
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte("Too Many Requests"))
+			}
+		case "/operator/v1/player/limits":
+			w.Header().Set("Content-Type", "application/json")
+			_, hasChips := body["customChips"]
+			chipsLen := -1
+			if arr, ok := body["customChips"].([]any); ok {
+				chipsLen = len(arr)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"traceId": body["traceId"], "status": SC_OK, "data": map[string]any{"hasCustomChips": hasChips, "chipsLen": chipsLen}})
 		case "/operator/v1/transaction/list":
 			w.Header().Set("Content-Type", "application/json")
 			pNo := int(body["pageNo"].(float64))
@@ -472,6 +500,48 @@ func TestS2SClientAndWebhookHTTPServer(t *testing.T) {
 	}
 	if len(lastTsHeader) != 13 {
 		t.Fatalf("expected 13-digit X-Timestamp header, got %q", lastTsHeader)
+	}
+
+	// M1: JSON 429 & 503 with missing status field
+	_, _, err = tsClient.Ping(ctx, PingRequest{TraceID: "m1_json_429"})
+	var errM1429 *ApiError
+	if !errors.As(err, &errM1429) || errM1429.HTTPStatus != 429 || errM1429.Status != SC_RATE_LIMITED || !errM1429.IsRetryable() {
+		t.Fatalf("expected retryable 429 SC_RATE_LIMITED for JSON without status, got %v", err)
+	}
+	_, _, err = tsClient.Ping(ctx, PingRequest{TraceID: "m1_json_503"})
+	var errM1503 *ApiError
+	if !errors.As(err, &errM1503) || errM1503.HTTPStatus != 503 || errM1503.Status != SC_OPERATOR_TIMEOUT || !errM1503.IsRetryable() {
+		t.Fatalf("expected retryable 503 SC_OPERATOR_TIMEOUT for JSON without status, got %v", err)
+	}
+
+	// M7: 3xx redirect must NOT be followed
+	_, _, err = tsClient.Ping(ctx, PingRequest{TraceID: "m7_redirect"})
+	var errRedir *ApiError
+	if !errors.As(err, &errRedir) || errRedir.HTTPStatus != http.StatusTemporaryRedirect || redirectHit {
+		t.Fatalf("expected 307 without following redirect (redirectHit=%v), got %v", redirectHit, err)
+	}
+
+	// m4: ClearCustomChips emits explicit "customChips": [] while default omits it
+	limClear, _, err := tsClient.UpdatePlayerLimits(ctx, UpdatePlayerLimitsRequest{
+		Username: "player_9527", Currency: "USD", Action: "SET", ClearCustomChips: true,
+	})
+	if err != nil || limClear["hasCustomChips"] != true || limClear["chipsLen"] != float64(0) {
+		t.Fatalf("expected ClearCustomChips to send empty customChips array, got %+v err=%v", limClear, err)
+	}
+	limOmit, _, err := tsClient.UpdatePlayerLimits(ctx, UpdatePlayerLimitsRequest{
+		Username: "player_9527", Currency: "USD", Action: "SET",
+	})
+	if err != nil || limOmit["hasCustomChips"] != false {
+		t.Fatalf("expected omitted customChips when ClearCustomChips is false, got %+v err=%v", limOmit, err)
+	}
+
+	// m10: UTF-8 rune-safe traceId truncation
+	utf8Trace := strings.Repeat("中", 140)
+	utf8Body, _ := json.Marshal(map[string]any{"traceId": utf8Trace})
+	utf8Sig, _ := SignBody(utf8Body, secret)
+	utf8Resp := disp.HandleRaw(ctx, "/wallet/unknown", apiKey, utf8Sig, utf8Body)
+	if utf8Resp.Status != SC_INVALID_REQUEST || !utf8.ValidString(utf8Resp.TraceID) || len([]rune(utf8Resp.TraceID)) != 128 {
+		t.Fatalf("expected valid 128-rune UTF-8 traceId, got %+v", utf8Resp)
 	}
 	retried, err := tsClient.ListAllTransactionsWithOptions(ctx, ListTransactionsRequest{FromTime: 1000, ToTime: 2000, PageSize: 2, Username: "player_9527"}, 3, 0)
 	if err != nil || len(retried) != 3 || p1Count != 1 {
