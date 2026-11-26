@@ -71,12 +71,14 @@ export class Config {
   readonly environment: 'SANDBOX' | 'PRODUCTION';
   readonly baseUrl: string;
   readonly timeoutMs: number;
+  readonly sendTimestamp: boolean;
   constructor(opts: {
     apiKey: string;
     hmacSecret: string;
     environment?: 'SANDBOX' | 'PRODUCTION';
     baseUrl?: string;
     timeoutMs?: number;
+    sendTimestamp?: boolean;
   });
 }
 
@@ -161,7 +163,19 @@ export class Client {
     pageNo?: number | null;
     pageSize?: number | null;
   }): Promise<{ traceId: string; status: 'SC_OK'; data: { transactions: Array<Record<string, unknown>>; pageNo: number; pageSize: number; total: number } }>;
-  listAllTransactions(params: { fromTime: number; toTime: number; pageSize?: number; [key: string]: unknown }): Promise<Array<Record<string, unknown>>>;
+  listAllTransactions(params: {
+    fromTime: number;
+    toTime: number;
+    pageSize?: number;
+    rateLimitMaxRetries?: number;
+    rateLimitBackoffMs?: number;
+    timeType?: 'SETTLE_TIME' | 'BET_TIME' | string | null;
+    status?: number | string | null;
+    username?: string | null;
+    tableId?: string | null;
+    roundId?: string | null;
+    [key: string]: unknown;
+  }): Promise<Array<Record<string, unknown>>>;
   getTransactionDetail(params: {
     traceId?: string;
     betId: string;
@@ -209,11 +223,11 @@ export class InMemoryWallet implements WalletHandler {
 }
 
 export class WebhookDispatcher {
-  constructor(config: Config | ConstructorParameters<typeof Config>[0], walletHandler: WalletHandler);
+  constructor(config: Config | { apiKey: string; hmacSecret: string; environment?: 'SANDBOX' | 'PRODUCTION'; baseUrl?: string }, walletHandler: WalletHandler);
   handle(
     routePath: string,
-    apiKeyHeader: string | undefined,
-    signatureHeader: string | undefined,
+    apiKeyHeader: string | null | undefined,
+    signatureHeader: string | null | undefined,
     rawBody: Buffer | Uint8Array | string,
   ): Promise<{ statusCode: number; body: Record<string, unknown> }>;
 }

@@ -10,6 +10,7 @@ final class Client
 {
     public const MAX_DETAIL_WINDOW_MS = 604800000;
     public const MAX_PAGE_SIZE = 20000;
+    private const MAX_HTTP_RESPONSE_BYTES = 16777216; // 16 MiB
 
     private Config $config;
     /** @var Closure(string, array<string, string>, string, int): array{0: int, 1: string} */
@@ -33,23 +34,37 @@ final class Client
         foreach ($headers as $k => $v) {
             $headerLines[] = "{$k}: {$v}";
         }
+        $respBuf = '';
+        $overflow = false;
         curl_setopt_array($ch, [
             CURLOPT_POST => true,
             CURLOPT_POSTFIELDS => $rawBody,
             CURLOPT_HTTPHEADER => $headerLines,
-            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_RETURNTRANSFER => false,
             CURLOPT_NOSIGNAL => true,
             CURLOPT_TIMEOUT_MS => $timeoutMs,
             CURLOPT_CONNECTTIMEOUT_MS => min($timeoutMs, 5000),
+            CURLOPT_WRITEFUNCTION => static function ($curl, string $chunk) use (&$respBuf, &$overflow): int {
+                $len = strlen($chunk);
+                if (strlen($respBuf) + $len > self::MAX_HTTP_RESPONSE_BYTES) {
+                    $overflow = true;
+                    return 0;
+                }
+                $respBuf .= $chunk;
+                return $len;
+            },
         ]);
-        $resp = curl_exec($ch);
+        $ok = curl_exec($ch);
         $errNo = curl_errno($ch);
         $errMsg = curl_error($ch);
         $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        if ($resp === false || $errNo !== 0) {
+        if ($overflow) {
+            throw new BaccaratSdkException('Gateway response exceeded 16 MiB limit', StatusCode::SC_INVALID_REQUEST);
+        }
+        if ($ok === false || $errNo !== 0) {
             throw new BaccaratSdkException("cURL error ({$errNo}): {$errMsg}", StatusCode::SC_OPERATOR_TIMEOUT);
         }
-        return [$httpCode, (string) $resp];
+        return [$httpCode, $respBuf];
     }
 
     private static function uuidV4(): string
@@ -81,6 +96,9 @@ final class Client
             'X-API-Key' => $this->config->apiKey,
             'X-Signature' => $sig,
         ];
+        if ($this->config->sendTimestamp) {
+            $headers['X-Timestamp'] = (string) (int) floor(microtime(true) * 1000);
+        }
 
         [$httpStatus, $rawResp] = ($this->transport)(
             $this->config->baseUrl . $routePath,
@@ -91,9 +109,13 @@ final class Client
 
         $probeObj = json_decode($rawResp, false, 64);
         if (!($probeObj instanceof \stdClass)) {
-            $st = ($httpStatus >= 500 || $httpStatus === 408 || $httpStatus === 429)
-                ? StatusCode::SC_OPERATOR_TIMEOUT
-                : StatusCode::SC_INVALID_REQUEST;
+            if ($httpStatus === 429) {
+                $st = StatusCode::SC_RATE_LIMITED;
+            } elseif ($httpStatus >= 500 || $httpStatus === 408) {
+                $st = StatusCode::SC_OPERATOR_TIMEOUT;
+            } else {
+                $st = StatusCode::SC_INVALID_REQUEST;
+            }
             throw new BaccaratApiException($st, "Non-JSON-object HTTP {$httpStatus}", $traceId, null, $httpStatus);
         }
         /** @var array<string, mixed> $decoded */
@@ -167,21 +189,48 @@ final class Client
         return $this->postSigned('/operator/v1/transaction/list', $params);
     }
 
-    /** @return list<array<string, mixed>> */
-    public function listAllTransactions(int $fromTime, int $toTime, int $pageSize = 2000): array
-    {
+    /**
+     * @param array<string, mixed> $filters
+     * @return list<array<string, mixed>>
+     */
+    public function listAllTransactions(
+        int $fromTime,
+        int $toTime,
+        int $pageSize = 2000,
+        array $filters = [],
+        int $rateLimitMaxRetries = 3,
+        int $rateLimitBackoffMs = 1000
+    ): array {
         if ($pageSize < 1 || $pageSize > self::MAX_PAGE_SIZE) {
             throw new BaccaratSdkException('pageSize must be in 1..' . self::MAX_PAGE_SIZE, 'INVALID_ARGUMENT');
         }
+        $maxRetries = max(0, $rateLimitMaxRetries);
+        $backoffMs = max(0, $rateLimitBackoffMs);
         $all = [];
         $pageNo = 1;
         while (true) {
-            $res = $this->listTransactions([
-                'fromTime' => $fromTime,
-                'toTime' => $toTime,
-                'pageNo' => $pageNo,
-                'pageSize' => $pageSize,
-            ]);
+            $attempt = 0;
+            while (true) {
+                try {
+                    $res = $this->listTransactions(array_merge($filters, [
+                        'fromTime' => $fromTime,
+                        'toTime' => $toTime,
+                        'pageNo' => $pageNo,
+                        'pageSize' => $pageSize,
+                    ]));
+                    break;
+                } catch (BaccaratApiException $e) {
+                    if ($e->status === StatusCode::SC_RATE_LIMITED && $attempt < $maxRetries) {
+                        $attempt++;
+                        $waitMs = $backoffMs * $attempt;
+                        if ($waitMs > 0) {
+                            usleep($waitMs * 1000);
+                        }
+                        continue;
+                    }
+                    throw $e;
+                }
+            }
             $data = is_array($res['data'] ?? null) ? $res['data'] : [];
             $batch = is_array($data['transactions'] ?? null) ? $data['transactions'] : [];
             foreach ($batch as $row) {

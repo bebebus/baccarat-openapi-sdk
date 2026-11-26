@@ -1,6 +1,6 @@
 > 中文 | [English](./SIGNING.en.md)
 
-# 原始字节 HMAC-SHA256 签名与幂等冲突指纹规范（v1.5.1）
+# 原始字节 HMAC-SHA256 签名与幂等冲突指纹规范（v1.5.2）
 
 本文件是 `bebebus/baccarat-openapi-sdk` 七套语言 SDK（Node.js、Python、PHP、Go、Java、C++、Rust）共享的密码学与幂等核验唯一事实源，100% 对齐在线契约 `https://openapi.lt.cniia.cloud/openapi.yaml`。
 
@@ -11,6 +11,7 @@
 - `Content-Type: application/json`
 - `X-API-Key: ak_<32位小写hex>`（共 35 字符，上限 128 字符，首尾自动 trim）
 - `X-Signature: <64位十六进制>`
+- `X-Timestamp`（入站 S2S 可选防重放）：10 位 Unix 秒或 13 位 Unix 毫秒时间戳（`±300s` 时间窗；7 套 SDK 均可通过配置项 `sendTimestamp` / `send_timestamp` / `SendTimestamp` 按需自动附加，`X-Signature` 仍仅对原始请求体字节计算）
 
 ## 2. 签名计算铁律（最常见踩坑点）
 
@@ -49,12 +50,12 @@ canonical = "v1|" + endpoint + "|" + UTF8ByteLen(f1) + ":" + f1 + "|" + UTF8Byte
 fingerprint = lowercase_hex( SHA256( UTF8(canonical) ) )
 ```
 
-| 回调端点 | `endpoint` 标识 | 参与指纹的固定业务字段（严格按序） | 显式排除的可变字段 |
+| 回调端点 | `endpoint` 标识 | 参与指纹的固定业务字段（严格按序） | 显式排除的可变及附加上下文字段 |
 | --- | --- | --- | --- |
-| `POST /wallet/bet` | `wallet/bet` | `transactionId, username, betId, externalTransactionId, roundId, currency, gameCode, amount` | `traceId, timestamp` |
-| `POST /wallet/bet_result` | `wallet/bet_result` | `transactionId, username, betId, externalTransactionId, roundId, currency, gameCode, betAmount, winAmount, effectiveTurnover, winLoss, jackpotAmount, resultType, String(isFreespin), String(isEndRound), String(betTime)` | `traceId, settledTime` |
-| `POST /wallet/rollback` | `wallet/rollback` | `transactionId, username, betId, externalTransactionId, roundId, currency, gameCode, amount` | `traceId, timestamp` |
-| `POST /wallet/adjustment` | `wallet/adjustment` | `transactionId, username, betId, externalTransactionId, roundId, currency, gameCode, direction, amount, reasonCode` | `traceId, timestamp, memo, referenceNo` |
+| `POST /wallet/bet` | `wallet/bet` | `transactionId, username, betId, externalTransactionId, roundId, currency, gameCode, amount` | `traceId, timestamp, token, tableId, shoeId, roundNo, betSide` |
+| `POST /wallet/bet_result` | `wallet/bet_result` | `transactionId, username, betId, externalTransactionId, roundId, currency, gameCode, betAmount, winAmount, effectiveTurnover, winLoss, jackpotAmount, resultType, String(isFreespin), String(isEndRound), String(betTime)` | `traceId, settledTime, token, tableId, betSide, roundOutcome` |
+| `POST /wallet/rollback` | `wallet/rollback` | `transactionId, username, betId, externalTransactionId, roundId, currency, gameCode, amount` | `traceId, timestamp, token` |
+| `POST /wallet/adjustment` | `wallet/adjustment` | `transactionId, username, betId, externalTransactionId, roundId, currency, gameCode, direction, amount, reasonCode` | `traceId, timestamp, token, memo, referenceNo` |
 
 判定规则：
 - `transactionId` 未见过 → 执行扣款/派彩/回滚并持久化 `(transactionId, fingerprint)`；

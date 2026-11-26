@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.1).
+//! Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.2).
 
 pub mod crypto;
 mod curl_ffi;
@@ -309,6 +309,18 @@ pub trait HttpTransport: Send + Sync {
         raw_body: &[u8],
         timeout_ms: u64,
     ) -> Result<(u16, Vec<u8>), SdkError>;
+
+    fn post_json_with_timestamp(
+        &self,
+        url: &str,
+        api_key: &str,
+        signature: &str,
+        _timestamp: Option<&str>,
+        raw_body: &[u8],
+        timeout_ms: u64,
+    ) -> Result<(u16, Vec<u8>), SdkError> {
+        self.post_json(url, api_key, signature, raw_body, timeout_ms)
+    }
 }
 
 pub struct LibCurlTransport;
@@ -322,7 +334,21 @@ impl HttpTransport for LibCurlTransport {
         raw_body: &[u8],
         timeout_ms: u64,
     ) -> Result<(u16, Vec<u8>), SdkError> {
-        curl_ffi::libcurl_post_json(url, api_key, signature, raw_body, timeout_ms).map_err(SdkError::Transport)
+        curl_ffi::libcurl_post_json(url, api_key, signature, None, raw_body, timeout_ms)
+            .map_err(SdkError::Transport)
+    }
+
+    fn post_json_with_timestamp(
+        &self,
+        url: &str,
+        api_key: &str,
+        signature: &str,
+        timestamp: Option<&str>,
+        raw_body: &[u8],
+        timeout_ms: u64,
+    ) -> Result<(u16, Vec<u8>), SdkError> {
+        curl_ffi::libcurl_post_json(url, api_key, signature, timestamp, raw_body, timeout_ms)
+            .map_err(SdkError::Transport)
     }
 }
 
@@ -412,6 +438,7 @@ pub struct Client {
     hmac_secret: String,
     base_url: String,
     timeout_ms: u64,
+    send_timestamp: bool,
     transport: Arc<dyn HttpTransport>,
 }
 
@@ -427,8 +454,14 @@ impl Client {
             hmac_secret: config.hmac_secret,
             base_url,
             timeout_ms: config.timeout_ms,
+            send_timestamp: false,
             transport,
         })
+    }
+
+    pub fn with_send_timestamp(mut self, enabled: bool) -> Self {
+        self.send_timestamp = enabled;
+        self
     }
 
     pub fn post_signed(&self, route_path: &str, mut payload: Json) -> Result<Json, SdkError> {
@@ -448,10 +481,24 @@ impl Client {
         let raw_bytes = raw_json.as_bytes();
         let sig = sign_body(raw_bytes, &self.hmac_secret)?;
         let url = format!("{}{}", self.base_url, route_path);
+        let ts_str = if self.send_timestamp {
+            let ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            Some(ms.to_string())
+        } else {
+            None
+        };
 
-        let (http_status, resp_bytes) =
-            self.transport
-                .post_json(&url, &self.api_key, &sig, raw_bytes, self.timeout_ms)?;
+        let (http_status, resp_bytes) = self.transport.post_json_with_timestamp(
+            &url,
+            &self.api_key,
+            &sig,
+            ts_str.as_deref(),
+            raw_bytes,
+            self.timeout_ms,
+        )?;
 
         let resp_str = String::from_utf8_lossy(&resp_bytes);
         let parsed = Json::parse(&resp_str)
@@ -459,7 +506,9 @@ impl Client {
             .filter(Json::is_object)
             .ok_or_else(|| SdkError::Api {
                 trace_id: trace_id.clone(),
-                status: if http_status >= 500 || http_status == 408 || http_status == 429 {
+                status: if http_status == 429 {
+                    status_code::SC_RATE_LIMITED.into()
+                } else if http_status >= 500 || http_status == 408 {
                     status_code::SC_OPERATOR_TIMEOUT.into()
                 } else {
                     status_code::SC_INVALID_REQUEST.into()
@@ -538,18 +587,45 @@ impl Client {
     }
 
     pub fn list_all_transactions(&self, from_time: i64, to_time: i64, page_size: i64) -> Result<Vec<Json>, SdkError> {
+        self.list_all_transactions_with_options(from_time, to_time, page_size, Json::object(), 3, 1000)
+    }
+
+    pub fn list_all_transactions_with_options(
+        &self,
+        from_time: i64,
+        to_time: i64,
+        page_size: i64,
+        filters: Json,
+        rate_limit_max_retries: usize,
+        rate_limit_backoff_ms: u64,
+    ) -> Result<Vec<Json>, SdkError> {
         if !(1..=MAX_PAGE_SIZE).contains(&page_size) {
             return Err(SdkError::Argument(format!("page_size must be in 1..={}", MAX_PAGE_SIZE)));
         }
         let mut all = Vec::new();
         let mut page_no = 1_i64;
         loop {
-            let mut p = Json::object();
+            let mut p = if filters.is_object() { filters.clone() } else { Json::object() };
             p.set("fromTime", Json::Int(from_time));
             p.set("toTime", Json::Int(to_time));
             p.set("pageNo", Json::Int(page_no));
             p.set("pageSize", Json::Int(page_size));
-            let res = self.list_transactions(p)?;
+            let mut attempt = 0usize;
+            let res = loop {
+                match self.list_transactions(p.clone()) {
+                    Ok(r) => break r,
+                    Err(SdkError::Api { ref status, .. })
+                        if status == status_code::SC_RATE_LIMITED && attempt < rate_limit_max_retries =>
+                    {
+                        attempt += 1;
+                        let wait_ms = rate_limit_backoff_ms.saturating_mul(attempt as u64);
+                        if wait_ms > 0 {
+                            std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
+            };
             let data = res.get("data");
             let batch = data.get("transactions").as_array().unwrap_or(&[]);
             all.extend_from_slice(batch);
@@ -1107,6 +1183,57 @@ fn extract_trace_hint(raw_body: &[u8]) -> String {
     }
 }
 
+fn dispatch_webhook(
+    api_key: &str,
+    hmac_secret: &str,
+    wallet: &dyn WalletHandler,
+    route_path: &str,
+    api_key_header: &str,
+    signature_header: &str,
+    raw_body: &[u8],
+) -> Json {
+    if raw_body.len() > MAX_WEBHOOK_BODY_BYTES {
+        return InMemoryWallet::err_env("", status_code::SC_INVALID_REQUEST, "Request body exceeds 1 MiB limit");
+    }
+
+    // Verify X-API-Key & X-Signature over raw bytes BEFORE JSON parsing!
+    let auth = verify_webhook_headers(api_key_header, signature_header, raw_body, api_key, hmac_secret);
+    if auth != status_code::SC_OK {
+        return InMemoryWallet::err_env(&extract_trace_hint(raw_body), auth, "Auth/signature failed");
+    }
+
+    let Some(body_obj) = std::str::from_utf8(raw_body)
+        .ok()
+        .and_then(|s| Json::parse(s).ok())
+        .filter(Json::is_object)
+    else {
+        return InMemoryWallet::err_env("", status_code::SC_INVALID_REQUEST, "Invalid JSON object");
+    };
+    let trace_id: String = body_obj
+        .get("traceId")
+        .as_str()
+        .map(str::trim)
+        .unwrap_or("")
+        .chars()
+        .take(128)
+        .collect();
+
+    let clean = route_path.split('?').next().unwrap_or("").trim_end_matches('/');
+    if clean.ends_with("/wallet/balance") {
+        wallet.on_balance(&body_obj)
+    } else if clean.ends_with("/wallet/bet") {
+        wallet.on_bet(&body_obj)
+    } else if clean.ends_with("/wallet/bet_result") {
+        wallet.on_bet_result(&body_obj)
+    } else if clean.ends_with("/wallet/rollback") {
+        wallet.on_rollback(&body_obj)
+    } else if clean.ends_with("/wallet/adjustment") {
+        wallet.on_adjustment(&body_obj)
+    } else {
+        InMemoryWallet::err_env(&trace_id, status_code::SC_INVALID_REQUEST, "Unknown route")
+    }
+}
+
 pub struct WebhookDispatcher<'a> {
     api_key: String,
     hmac_secret: String,
@@ -1123,56 +1250,70 @@ impl<'a> WebhookDispatcher<'a> {
     }
 
     pub fn try_new(config: &Config, wallet: &'a dyn WalletHandler) -> Result<Self, SdkError> {
-        if config.api_key.trim().is_empty() {
+        Self::from_credentials(&config.api_key, &config.hmac_secret, wallet)
+    }
+
+    pub fn from_credentials(api_key: &str, hmac_secret: &str, wallet: &'a dyn WalletHandler) -> Result<Self, SdkError> {
+        let key = api_key.trim();
+        if key.is_empty() {
             return Err(SdkError::Config("api_key is required".into()));
         }
-        if config.hmac_secret.is_empty() {
+        if hmac_secret.is_empty() {
             return Err(SdkError::Config("hmac_secret is required".into()));
         }
-        Ok(Self::new(config, wallet))
+        Ok(Self {
+            api_key: key.to_string(),
+            hmac_secret: hmac_secret.to_string(),
+            wallet,
+        })
     }
 
     pub fn handle(&self, route_path: &str, api_key_header: &str, signature_header: &str, raw_body: &[u8]) -> Json {
-        if raw_body.len() > MAX_WEBHOOK_BODY_BYTES {
-            return InMemoryWallet::err_env("", status_code::SC_INVALID_REQUEST, "Request body exceeds 1 MiB limit");
-        }
+        dispatch_webhook(
+            &self.api_key,
+            &self.hmac_secret,
+            self.wallet,
+            route_path,
+            api_key_header,
+            signature_header,
+            raw_body,
+        )
+    }
+}
 
-        // Verify X-API-Key & X-Signature over raw bytes BEFORE JSON parsing!
-        let auth = verify_webhook_headers(api_key_header, signature_header, raw_body, &self.api_key, &self.hmac_secret);
-        if auth != status_code::SC_OK {
-            return InMemoryWallet::err_env(&extract_trace_hint(raw_body), auth, "Auth/signature failed");
-        }
+/// `'static + Send + Sync` webhook dispatcher holding an `Arc<dyn WalletHandler>` for async frameworks like Axum / Actix.
+pub struct SharedWebhookDispatcher {
+    api_key: String,
+    hmac_secret: String,
+    wallet: Arc<dyn WalletHandler>,
+}
 
-        let Some(body_obj) = std::str::from_utf8(raw_body)
-            .ok()
-            .and_then(|s| Json::parse(s).ok())
-            .filter(Json::is_object)
-        else {
-            return InMemoryWallet::err_env("", status_code::SC_INVALID_REQUEST, "Invalid JSON object");
-        };
-        let trace_id: String = body_obj
-            .get("traceId")
-            .as_str()
-            .map(str::trim)
-            .unwrap_or("")
-            .chars()
-            .take(128)
-            .collect();
-
-        let clean = route_path.split('?').next().unwrap_or("").trim_end_matches('/');
-        if clean.ends_with("/wallet/balance") {
-            self.wallet.on_balance(&body_obj)
-        } else if clean.ends_with("/wallet/bet") {
-            self.wallet.on_bet(&body_obj)
-        } else if clean.ends_with("/wallet/bet_result") {
-            self.wallet.on_bet_result(&body_obj)
-        } else if clean.ends_with("/wallet/rollback") {
-            self.wallet.on_rollback(&body_obj)
-        } else if clean.ends_with("/wallet/adjustment") {
-            self.wallet.on_adjustment(&body_obj)
-        } else {
-            InMemoryWallet::err_env(&trace_id, status_code::SC_INVALID_REQUEST, "Unknown route")
+impl SharedWebhookDispatcher {
+    pub fn try_new(api_key: &str, hmac_secret: &str, wallet: Arc<dyn WalletHandler>) -> Result<Self, SdkError> {
+        let key = api_key.trim();
+        if key.is_empty() {
+            return Err(SdkError::Config("api_key is required".into()));
         }
+        if hmac_secret.is_empty() {
+            return Err(SdkError::Config("hmac_secret is required".into()));
+        }
+        Ok(Self {
+            api_key: key.to_string(),
+            hmac_secret: hmac_secret.to_string(),
+            wallet,
+        })
+    }
+
+    pub fn handle(&self, route_path: &str, api_key_header: &str, signature_header: &str, raw_body: &[u8]) -> Json {
+        dispatch_webhook(
+            &self.api_key,
+            &self.hmac_secret,
+            self.wallet.as_ref(),
+            route_path,
+            api_key_header,
+            signature_header,
+            raw_body,
+        )
     }
 }
 
@@ -1604,5 +1745,111 @@ mod tests {
         );
         assert!(Json::parse("{\"bad\":\"\\uD83D\\u0041\"}").is_err());
         assert_eq!(Json::parse("{\"ok\":\"\\uD83C\\uDFB2\"}").unwrap().get("ok").as_str(), Some("🎲"));
+    }
+
+    #[test]
+    fn v152_timestamp_ratelimit_and_static_dispatcher() {
+        struct MockTransport {
+            last_ts: Mutex<Option<String>>,
+            p1_calls: AtomicU64,
+        }
+        impl HttpTransport for MockTransport {
+            fn post_json(
+                &self,
+                _url: &str,
+                _api_key: &str,
+                _signature: &str,
+                _raw_body: &[u8],
+                _timeout_ms: u64,
+            ) -> Result<(u16, Vec<u8>), SdkError> {
+                Ok((500, b"unused".to_vec()))
+            }
+
+            fn post_json_with_timestamp(
+                &self,
+                url: &str,
+                _api_key: &str,
+                _signature: &str,
+                timestamp: Option<&str>,
+                raw_body: &[u8],
+                _timeout_ms: u64,
+            ) -> Result<(u16, Vec<u8>), SdkError> {
+                *self.last_ts.lock().unwrap() = timestamp.map(String::from);
+                if url.ends_with("/operator/v1/ping") {
+                    return Ok((429, b"Too Many Requests".to_vec()));
+                }
+                let body = Json::parse(&String::from_utf8_lossy(raw_body)).unwrap();
+                let pno = body.get("pageNo").as_i64().unwrap_or(1);
+                let mut resp = Json::object();
+                resp.set("traceId", body.get("traceId").clone());
+                if pno == 1 && self.p1_calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                    resp.set("status", Json::Str(status_code::SC_RATE_LIMITED.into()));
+                    resp.set("message", Json::Str("slow down".into()));
+                } else {
+                    resp.set("status", Json::Str(status_code::SC_OK.into()));
+                    let mut r1 = Json::object();
+                    r1.set("betId", Json::Str("b1".into()));
+                    let mut r2 = Json::object();
+                    r2.set("betId", Json::Str("b2".into()));
+                    let mut r3 = Json::object();
+                    r3.set("betId", Json::Str("b3".into()));
+                    let mut data = Json::object();
+                    data.set("transactions", Json::Arr(if pno == 1 { vec![r1, r2] } else { vec![r3] }));
+                    data.set("pageNo", Json::Int(pno));
+                    data.set("pageSize", Json::Int(2));
+                    data.set("total", Json::Int(3));
+                    resp.set("data", data);
+                }
+                Ok((200, resp.dump().into_bytes()))
+            }
+        }
+
+        let api_key = "ak_0123456789abcdef0123456789abcdef";
+        let secret = "dGVzdF9zZWNyZXRfNDBfY2hhcnNfYmFzZTY0dXJsX2s";
+        let transport = Arc::new(MockTransport {
+            last_ts: Mutex::new(None),
+            p1_calls: AtomicU64::new(0),
+        });
+        let client = Client::with_transport(
+            Config {
+                api_key: api_key.into(),
+                hmac_secret: secret.into(),
+                environment: Environment::Sandbox,
+                base_url: None,
+                timeout_ms: 5000,
+            },
+            transport.clone(),
+        )
+        .unwrap()
+        .with_send_timestamp(true);
+
+        let err = client.ping(Json::object()).unwrap_err();
+        assert!(matches!(err, SdkError::Api { http_status: 429, ref status, .. } if status == status_code::SC_RATE_LIMITED));
+        assert!(err.is_retryable());
+        let ts_val = transport.last_ts.lock().unwrap().clone().unwrap();
+        assert!(ts_val.len() >= 13 && ts_val.bytes().all(|b| b.is_ascii_digit()));
+
+        let mut filters = Json::object();
+        filters.set("username", Json::Str("player_9527".into()));
+        let rows = client
+            .list_all_transactions_with_options(1000, 2000, 2, filters, 3, 0)
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(transport.p1_calls.load(Ordering::Relaxed), 2);
+
+        // Verify SharedWebhookDispatcher is 'static + Send + Sync without base_url
+        fn assert_static_send_sync<T: 'static + Send + Sync>(_: &T) {}
+        let wallet = Arc::new(InMemoryWallet::new());
+        wallet.add_account("player_9527", "USD", "500.00", 2, &[]).unwrap();
+        let shared = Arc::new(SharedWebhookDispatcher::try_new(api_key, secret, wallet).unwrap());
+        assert_static_send_sync(&shared);
+        let raw = r#"{"traceId":"t_s","username":"player_9527","currency":"USD","token":"b2bt_0000"}"#;
+        let out = shared.handle(
+            "/wallet/balance",
+            api_key,
+            &sign_body(raw.as_bytes(), secret).unwrap(),
+            raw.as_bytes(),
+        );
+        assert_eq!(out.get("data").get("balance").as_str(), Some("500.00"));
     }
 }

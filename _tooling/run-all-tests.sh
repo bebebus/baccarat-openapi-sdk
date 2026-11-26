@@ -32,7 +32,7 @@ ctest --test-dir cpp/build --output-on-failure
 rm -rf cpp/build
 
 echo "==> [7/8] Rust SDK (RUSTFLAGS='-D warnings' cargo test)"
-(cd rust && RUSTFLAGS="-D warnings" cargo test && rm -rf target Cargo.lock)
+(cd rust && RUSTFLAGS="-D warnings" cargo test && rm -rf target)
 
 echo "==> [8/8] Security & Isolation Hygiene Check"
 if grep -rnE '(/internal/|OPENAPI_SECRET_ENC_KEY|B2B_CREDENTIAL_ENC_KEY)' README* SIGNING* INTERFACES* test-vectors.json nodejs python php go java cpp rust; then

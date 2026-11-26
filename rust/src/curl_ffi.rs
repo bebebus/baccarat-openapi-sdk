@@ -83,6 +83,7 @@ pub fn libcurl_post_json(
     url: &str,
     api_key: &str,
     signature: &str,
+    timestamp: Option<&str>,
     raw_body: &[u8],
     timeout_ms: u64,
 ) -> Result<(u16, Vec<u8>), String> {
@@ -95,6 +96,10 @@ pub fn libcurl_post_json(
     let h_acc = CString::new("Accept: application/json").unwrap();
     let h_key = CString::new(format!("X-API-Key: {}", api_key)).map_err(|_| "NUL in API key".to_string())?;
     let h_sig = CString::new(format!("X-Signature: {}", signature)).map_err(|_| "NUL in signature".to_string())?;
+    let h_ts = match timestamp {
+        Some(ts) => Some(CString::new(format!("X-Timestamp: {}", ts)).map_err(|_| "NUL in timestamp".to_string())?),
+        None => None,
+    };
 
     let clamped_timeout = timeout_ms.min(i32::MAX as u64) as c_long;
     let clamped_connect = timeout_ms.min(5000) as c_long;
@@ -114,6 +119,9 @@ pub fn libcurl_post_json(
         guard.headers = curl_slist_append(guard.headers, h_acc.as_ptr());
         guard.headers = curl_slist_append(guard.headers, h_key.as_ptr());
         guard.headers = curl_slist_append(guard.headers, h_sig.as_ptr());
+        if let Some(ref ts_hdr) = h_ts {
+            guard.headers = curl_slist_append(guard.headers, ts_hdr.as_ptr());
+        }
 
         curl_easy_setopt(guard.handle, CURLOPT_URL, c_url.as_ptr());
         curl_easy_setopt(guard.handle, CURLOPT_POST, 1 as c_long);

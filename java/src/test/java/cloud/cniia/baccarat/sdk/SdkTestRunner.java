@@ -308,6 +308,66 @@ public final class SdkTestRunner {
         try { JsonCodec.parseObject("{\"bad\":\"\\uD800\"}"); } catch (IllegalArgumentException e) { loneSurrThrew = true; }
         check(loneSurrThrew, "json:loneSurrogate");
 
+        // 4. v1.5.2 regressions: JsonCodec array serialization, WebhookDispatcher(apiKey, secret, wallet),
+        //    sendTimestamp X-Timestamp, non-JSON 429 -> SC_RATE_LIMITED, listAllTransactions rate-limit retry + filters
+        checkEq(JsonCodec.stringify(new String[]{"50.00", "100.00"}), "[\"50.00\",\"100.00\"]", "json:stringArray");
+        checkEq(JsonCodec.stringify(new int[]{1, 2, 3}), "[1,2,3]", "json:intArray");
+
+        BaccaratSdk.WebhookDispatcher credDisp = new BaccaratSdk.WebhookDispatcher(apiKey, secret, wallet);
+        byte[] credRaw = JsonCodec.stringify(Map.of("traceId", "t_cred", "username", "player_9527", "currency", "USD", "token", tok)).getBytes(StandardCharsets.UTF_8);
+        checkEq(credDisp.handle("/wallet/balance", apiKey, BaccaratSdk.signBody(credRaw, secret), credRaw).get("status"), "SC_OK", "wb:credCtor");
+
+        java.util.concurrent.atomic.AtomicInteger p1Count = new java.util.concurrent.atomic.AtomicInteger(0);
+        java.util.concurrent.atomic.AtomicReference<String> lastTs = new java.util.concurrent.atomic.AtomicReference<>("");
+        HttpServer rlSrv = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        rlSrv.createContext("/operator/v1/", ex -> {
+            lastTs.set(ex.getRequestHeaders().getFirst("X-Timestamp"));
+            byte[] reqBytes = ex.getRequestBody().readAllBytes();
+            Map<String, Object> body = JsonCodec.parseObject(new String(reqBytes, StandardCharsets.UTF_8));
+            String path = ex.getRequestURI().getPath();
+            if ("/operator/v1/ping".equals(path)) {
+                byte[] out = "Too Many Requests".getBytes(StandardCharsets.UTF_8);
+                ex.sendResponseHeaders(429, out.length);
+                ex.getResponseBody().write(out);
+                ex.close();
+                return;
+            }
+            int pNo = ((Number) body.get("pageNo")).intValue();
+            Map<String, Object> resp = new LinkedHashMap<>();
+            resp.put("traceId", body.get("traceId"));
+            if (pNo == 1 && p1Count.getAndIncrement() == 0) {
+                resp.put("status", "SC_RATE_LIMITED");
+                resp.put("message", "slow down");
+            } else {
+                resp.put("status", "SC_OK");
+                List<Map<String, Object>> rows = pNo == 1 ? List.of(Map.of("betId", "b1"), Map.of("betId", "b2")) : List.of(Map.of("betId", "b3"));
+                resp.put("data", Map.of("transactions", rows, "pageNo", pNo, "pageSize", 2, "total", 3));
+            }
+            byte[] out = JsonCodec.stringify(resp).getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().set("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, out.length);
+            ex.getResponseBody().write(out);
+            ex.close();
+        });
+        rlSrv.start();
+        try {
+            BaccaratSdk.Config tsCfg = new BaccaratSdk.Config(apiKey, secret, BaccaratSdk.Environment.PRODUCTION, "http://127.0.0.1:" + rlSrv.getAddress().getPort(), 5000, true);
+            BaccaratSdk.Client tsClient = new BaccaratSdk.Client(tsCfg);
+            boolean caught429 = false;
+            try {
+                tsClient.ping(Map.of());
+            } catch (BaccaratSdk.ApiException ex) {
+                caught429 = ex.httpStatus == 429 && "SC_RATE_LIMITED".equals(ex.status) && ex.isRetryable();
+            }
+            check(caught429, "s2s:nonJson429");
+            check(lastTs.get() != null && lastTs.get().matches("^\\d{13}$"), "s2s:xTimestamp");
+            List<Map<String, Object>> retried = tsClient.listAllTransactions(1000L, 2000L, 2, Map.of("username", "player_9527"), 3, 0L);
+            checkEq(retried.size(), 3, "s2s:listAllRateLimitRetry");
+            checkEq(p1Count.get(), 2, "s2s:p1Attempts");
+        } finally {
+            rlSrv.stop(0);
+        }
+
         System.out.println("JAVA 17 SDK: ALL TESTS PASSED");
     }
 }

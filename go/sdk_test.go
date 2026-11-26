@@ -401,4 +401,92 @@ func TestS2SClientAndWebhookHTTPServer(t *testing.T) {
 	if r := postWb("/wallet/bet", zeroBet); r.Status != SC_INVALID_REQUEST {
 		t.Fatalf("expected zero stake to fail, got %+v", r)
 	}
+
+	// v1.5.2 regressions: GET -> 405 Method Not Allowed, SendTimestamp -> X-Timestamp, non-JSON 429 -> SC_RATE_LIMITED,
+	// ListAllTransactionsWithOptions rate-limit retry + filters, typed BaccaratRevealedCard & TicketAdjustmentItem,
+	// and v1.3.0+ additive webhook fields on WalletBetRequest / WalletBetResultRequest
+	getRes, err := http.Get(wbSrv.URL + "/wallet/balance")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = getRes.Body.Close()
+	if getRes.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 for GET webhook, got %d", getRes.StatusCode)
+	}
+
+	var p1Count int
+	var lastTsHeader string
+	rlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lastTsHeader = r.Header.Get("X-Timestamp")
+		raw, _ := io.ReadAll(r.Body)
+		var body map[string]any
+		_ = json.Unmarshal(raw, &body)
+		switch r.URL.Path {
+		case "/operator/v1/ping":
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte("Too Many Requests"))
+		case "/operator/v1/transaction/list":
+			w.Header().Set("Content-Type", "application/json")
+			pNo := int(body["pageNo"].(float64))
+			if pNo == 1 && p1Count == 0 {
+				p1Count++
+				_ = json.NewEncoder(w).Encode(map[string]any{"traceId": body["traceId"], "status": SC_RATE_LIMITED, "message": "slow down"})
+				return
+			}
+			rows := []map[string]any{{"betId": "b1"}, {"betId": "b2"}}
+			if pNo > 1 {
+				rows = []map[string]any{{"betId": "b3"}}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"traceId": body["traceId"], "status": SC_OK, "data": map[string]any{"transactions": rows, "pageNo": pNo, "pageSize": 2, "total": 3}})
+		case "/operator/v1/transaction/detail":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"traceId": body["traceId"],
+				"status":  SC_OK,
+				"data": map[string]any{
+					"betId": "b1",
+					"adjustments": []map[string]any{
+						{"transactionId": "adj_1", "direction": "CREDIT", "amount": "20.00", "reasonCode": nil, "referenceNo": "RA-1", "completedAt": 1763612300000},
+					},
+					"roundResult": map[string]any{
+						"outcome":      "PLAYER",
+						"playerPoints": 8,
+						"bankerPoints": 5,
+						"playerCards":  []map[string]any{{"suit": 1, "rank": 3, "label": "♠3"}, {"suit": 2, "rank": 5, "label": "♥5"}},
+						"bankerCards":  []map[string]any{{"suit": 3, "rank": 13, "label": "♦K"}, {"suit": 4, "rank": 5, "label": "♣5"}},
+					},
+				},
+			})
+		}
+	}))
+	defer rlSrv.Close()
+
+	tsClient, err := NewClient(Config{APIKey: apiKey, HMACSecret: secret, BaseURL: rlSrv.URL, SendTimestamp: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = tsClient.Ping(ctx, PingRequest{})
+	var err429 *ApiError
+	if !errors.As(err, &err429) || err429.HTTPStatus != 429 || err429.Status != SC_RATE_LIMITED || !err429.IsRetryable() {
+		t.Fatalf("expected retryable 429 SC_RATE_LIMITED, got %v", err)
+	}
+	if len(lastTsHeader) != 13 {
+		t.Fatalf("expected 13-digit X-Timestamp header, got %q", lastTsHeader)
+	}
+	retried, err := tsClient.ListAllTransactionsWithOptions(ctx, ListTransactionsRequest{FromTime: 1000, ToTime: 2000, PageSize: 2, Username: "player_9527"}, 3, 0)
+	if err != nil || len(retried) != 3 || p1Count != 1 {
+		t.Fatalf("expected 3 retried rows after 1 rate limit, got len=%d p1Count=%d err=%v", len(retried), p1Count, err)
+	}
+	typedDet, _, err := tsClient.GetTransactionDetail(ctx, TransactionDetailRequest{BetID: "b1"})
+	if err != nil || typedDet.RoundResult == nil || len(typedDet.RoundResult.PlayerCards) != 2 || typedDet.RoundResult.PlayerCards[0].Suit != 1 || len(typedDet.Adjustments) != 1 || typedDet.Adjustments[0].ReasonCode != nil {
+		t.Fatalf("typed card/adjustment deserialization failed: %+v err=%v", typedDet, err)
+	}
+	var betCtx WalletBetRequest
+	if err := json.Unmarshal([]byte(`{"transactionId":"bet_1","tableId":"T-A2","shoeId":"shoe_1","roundNo":18,"betSide":"PLAYER"}`), &betCtx); err != nil || betCtx.TableID != "T-A2" || betCtx.RoundNo == nil || *betCtx.RoundNo != 18 || betCtx.BetSide == nil || *betCtx.BetSide != "PLAYER" {
+		t.Fatalf("WalletBetRequest v1.3.0+ context fields failed: %+v err=%v", betCtx, err)
+	}
+	var stlCtx WalletBetResultRequest
+	if err := json.Unmarshal([]byte(`{"transactionId":"stl_1","tableId":"T-A2","betSide":"PLAYER","roundOutcome":"PLAYER"}`), &stlCtx); err != nil || stlCtx.TableID != "T-A2" || stlCtx.RoundOutcome == nil || *stlCtx.RoundOutcome != "PLAYER" {
+		t.Fatalf("WalletBetResultRequest v1.3.0+ context fields failed: %+v err=%v", stlCtx, err)
+	}
 }

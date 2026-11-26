@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.1)."""
+"""Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.2)."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -293,6 +294,7 @@ class Config:
     environment: str = Environment.PRODUCTION
     base_url: Optional[str] = None
     timeout_ms: int = 8000
+    send_timestamp: bool = False
     resolved_base_url: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -364,6 +366,8 @@ class Client:
             "X-API-Key": self.config.api_key,
             "X-Signature": sig,
         }
+        if self.config.send_timestamp:
+            headers["X-Timestamp"] = str(int(time.time() * 1000))
         http_status, resp_text = self._transport(
             f"{self.config.resolved_base_url}{route_path}",
             headers,
@@ -373,11 +377,12 @@ class Client:
         try:
             parsed = json.loads(resp_text)
         except Exception as exc:
-            status = (
-                StatusCode.SC_OPERATOR_TIMEOUT
-                if http_status >= 500 or http_status in (408, 429)
-                else StatusCode.SC_INVALID_REQUEST
-            )
+            if http_status == 429:
+                status = StatusCode.SC_RATE_LIMITED
+            elif http_status >= 500 or http_status == 408:
+                status = StatusCode.SC_OPERATOR_TIMEOUT
+            else:
+                status = StatusCode.SC_INVALID_REQUEST
             raise BaccaratApiError(status=status, message=f"Non-JSON HTTP {http_status}", trace_id=trace_id, http_status=http_status) from exc
 
         if not isinstance(parsed, dict):
@@ -562,13 +567,50 @@ class Client:
             payload["traceId"] = trace_id
         return self._post_signed("/operator/v1/transaction/list", payload)
 
-    def list_all_transactions(self, *, from_time: int, to_time: int, page_size: int = 2000) -> List[Dict[str, Any]]:
+    def list_all_transactions(
+        self,
+        *,
+        from_time: int,
+        to_time: int,
+        page_size: int = 2000,
+        time_type: Optional[str] = None,
+        status: Optional[Union[int, str]] = None,
+        username: Optional[str] = None,
+        table_id: Optional[str] = None,
+        round_id: Optional[str] = None,
+        rate_limit_max_retries: int = 3,
+        rate_limit_backoff_sec: float = 1.0,
+    ) -> List[Dict[str, Any]]:
         if isinstance(page_size, bool) or not isinstance(page_size, int) or not (1 <= page_size <= MAX_PAGE_SIZE):
             raise BaccaratSdkError(f"page_size must be in 1..{MAX_PAGE_SIZE}", "INVALID_ARGUMENT")
+        max_retries = rate_limit_max_retries if isinstance(rate_limit_max_retries, int) and rate_limit_max_retries >= 0 else 3
+        backoff = rate_limit_backoff_sec if rate_limit_backoff_sec >= 0 else 1.0
         rows: List[Dict[str, Any]] = []
         page_no = 1
         while True:
-            res = self.list_transactions(from_time=from_time, to_time=to_time, page_no=page_no, page_size=page_size)
+            attempt = 0
+            while True:
+                try:
+                    res = self.list_transactions(
+                        from_time=from_time,
+                        to_time=to_time,
+                        time_type=time_type,
+                        status=status,
+                        username=username,
+                        table_id=table_id,
+                        round_id=round_id,
+                        page_no=page_no,
+                        page_size=page_size,
+                    )
+                    break
+                except BaccaratApiError as exc:
+                    if exc.status == StatusCode.SC_RATE_LIMITED and attempt < max_retries:
+                        attempt += 1
+                        wait_s = backoff * attempt
+                        if wait_s > 0:
+                            time.sleep(wait_s)
+                        continue
+                    raise
             data = res.get("data") or {}
             batch = data.get("transactions") or []
             rows.extend(batch)
@@ -689,6 +731,7 @@ class WalletHandler(Protocol):
     def on_bet(self, req: Dict[str, Any]) -> Dict[str, Any]: ...
     def on_bet_result(self, req: Dict[str, Any]) -> Dict[str, Any]: ...
     def on_rollback(self, req: Dict[str, Any]) -> Dict[str, Any]: ...
+    def on_adjustment(self, req: Dict[str, Any]) -> Dict[str, Any]: ...
 
 
 def _non_empty_str(val: Any) -> Optional[str]:
@@ -700,6 +743,7 @@ def _non_empty_str(val: Any) -> Optional[str]:
 
 class InMemoryWallet:
     def __init__(self, initial_accounts: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
+        self._lock = threading.Lock()
         self.accounts: Dict[str, Dict[str, Any]] = {}
         self.transactions: Dict[str, Dict[str, Any]] = {}
         self.deducted_bets: Dict[str, Dict[str, Any]] = {}
@@ -714,8 +758,9 @@ class InMemoryWallet:
             }
 
     def set_disabled(self, username: str, disabled: bool) -> None:
-        if username in self.accounts:
-            self.accounts[username]["disabled"] = disabled
+        with self._lock:
+            if username in self.accounts:
+                self.accounts[username]["disabled"] = disabled
 
     def _ok(self, trace_id: str, username: str, acct: Dict[str, Any]) -> Dict[str, Any]:
         return {
@@ -738,6 +783,10 @@ class InMemoryWallet:
         return acct, None
 
     def on_balance(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        with self._lock:
+            return self._on_balance_unlocked(req)
+
+    def _on_balance_unlocked(self, req: Dict[str, Any]) -> Dict[str, Any]:
         trace_id = req.get("traceId") if isinstance(req.get("traceId"), str) else ""
         username = _non_empty_str(req.get("username"))
         currency = _non_empty_str(req.get("currency"))
@@ -753,6 +802,10 @@ class InMemoryWallet:
         return self._ok(trace_id, username, acct)
 
     def on_bet(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        with self._lock:
+            return self._on_bet_unlocked(req)
+
+    def _on_bet_unlocked(self, req: Dict[str, Any]) -> Dict[str, Any]:
         trace_id = req.get("traceId") if isinstance(req.get("traceId"), str) else ""
         tx_id = _non_empty_str(req.get("transactionId"))
         bet_id = _non_empty_str(req.get("betId"))
@@ -792,6 +845,10 @@ class InMemoryWallet:
         return self._ok(trace_id, username, acct)
 
     def on_bet_result(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        with self._lock:
+            return self._on_bet_result_unlocked(req)
+
+    def _on_bet_result_unlocked(self, req: Dict[str, Any]) -> Dict[str, Any]:
         trace_id = req.get("traceId") if isinstance(req.get("traceId"), str) else ""
         tx_id = _non_empty_str(req.get("transactionId"))
         bet_id = _non_empty_str(req.get("betId"))
@@ -824,6 +881,10 @@ class InMemoryWallet:
         return self._ok(trace_id, username, acct)
 
     def on_rollback(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        with self._lock:
+            return self._on_rollback_unlocked(req)
+
+    def _on_rollback_unlocked(self, req: Dict[str, Any]) -> Dict[str, Any]:
         trace_id = req.get("traceId") if isinstance(req.get("traceId"), str) else ""
         tx_id = _non_empty_str(req.get("transactionId"))
         bet_id = _non_empty_str(req.get("betId"))
@@ -859,6 +920,10 @@ class InMemoryWallet:
         return self._ok(trace_id, username, acct)
 
     def on_adjustment(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        with self._lock:
+            return self._on_adjustment_unlocked(req)
+
+    def _on_adjustment_unlocked(self, req: Dict[str, Any]) -> Dict[str, Any]:
         trace_id = req.get("traceId") if isinstance(req.get("traceId"), str) else ""
         tx_id = _non_empty_str(req.get("transactionId"))
         bet_id = _non_empty_str(req.get("betId"))
@@ -902,11 +967,21 @@ def _extract_trace_hint(raw_bytes: bytes) -> str:
 
 
 class WebhookDispatcher:
-    def __init__(self, config: Config, wallet: WalletHandler) -> None:
+    def __init__(self, config: Optional[Config], wallet: WalletHandler, *, api_key: Optional[str] = None, hmac_secret: Optional[str] = None) -> None:
         if wallet is None:
             raise BaccaratSdkError("wallet handler is required", "INVALID_CONFIG")
+        resolved_key = (config.api_key if config is not None else (api_key or "")).strip()
+        resolved_secret = config.hmac_secret if config is not None else (hmac_secret or "")
+        if not resolved_key or not resolved_secret:
+            raise BaccaratSdkError("api_key and hmac_secret are required", "INVALID_CONFIG")
         self.config = config
+        self.api_key = resolved_key
+        self.hmac_secret = resolved_secret
         self.wallet = wallet
+
+    @classmethod
+    def from_credentials(cls, api_key: str, hmac_secret: str, wallet: WalletHandler) -> "WebhookDispatcher":
+        return cls(None, wallet, api_key=api_key, hmac_secret=hmac_secret)
 
     def handle(
         self,
@@ -924,8 +999,8 @@ class WebhookDispatcher:
             api_key_header,
             signature_header,
             raw_bytes,
-            self.config.api_key,
-            self.config.hmac_secret,
+            self.api_key,
+            self.hmac_secret,
         )
         if auth_status != StatusCode.SC_OK:
             return 200, {

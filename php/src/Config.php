@@ -15,13 +15,15 @@ final class Config
     public readonly string $environment;
     public readonly string $baseUrl;
     public readonly int $timeoutMs;
+    public readonly bool $sendTimestamp;
 
     public function __construct(
         string $apiKey,
         string $hmacSecret,
         string $environment = self::ENV_PRODUCTION,
         ?string $baseUrl = null,
-        int $timeoutMs = 8000
+        int $timeoutMs = 8000,
+        bool $sendTimestamp = false
     ) {
         $trimmedKey = trim($apiKey);
         if ($trimmedKey === '') {
@@ -52,5 +54,6 @@ final class Config
         $this->environment = $environment;
         $this->baseUrl = rtrim($resolved, '/');
         $this->timeoutMs = $timeoutMs;
+        $this->sendTimestamp = $sendTimestamp;
     }
 }

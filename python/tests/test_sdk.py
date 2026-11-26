@@ -261,6 +261,49 @@ class TestBaccaratPythonSdk(unittest.TestCase):
         with self.assertRaises(BaccaratSdkError):
             Config(api_key=api_key, hmac_secret=secret, environment=Environment.SANDBOX, timeout_ms=True)  # type: ignore[arg-type]
 
+        # 5. v1.5.2 regressions: send_timestamp, non-JSON 429 -> SC_RATE_LIMITED, list_all_transactions retry + filters,
+        #    WebhookDispatcher.from_credentials (no base_url needed in PRODUCTION)
+        captured_headers: list[dict[str, str]] = []
+        p1_calls = {"n": 0}
+
+        def mock_transport(url: str, headers: dict[str, str], raw_body: bytes, _timeout: int) -> tuple[int, str]:
+            captured_headers.append(headers)
+            body = json.loads(raw_body.decode("utf-8"))
+            if url.endswith("/operator/v1/ping"):
+                return 429, "Too Many Requests"
+            if body.get("pageNo") == 1 and p1_calls["n"] == 0:
+                p1_calls["n"] += 1
+                return 200, json.dumps({"traceId": body["traceId"], "status": "SC_RATE_LIMITED", "message": "slow down"})
+            rows = [{"betId": "b1"}, {"betId": "b2"}] if body.get("pageNo") == 1 else [{"betId": "b3"}]
+            return 200, json.dumps({"traceId": body["traceId"], "status": "SC_OK", "data": {"transactions": rows, "pageNo": body["pageNo"], "pageSize": 2, "total": 3}})
+
+        ts_client = Client(
+            Config(api_key=api_key, hmac_secret=secret, environment=Environment.SANDBOX, send_timestamp=True),
+            transport=mock_transport,
+        )
+        with self.assertRaises(BaccaratApiError) as ctx_429:
+            ts_client.ping()
+        self.assertEqual(ctx_429.exception.http_status, 429)
+        self.assertEqual(ctx_429.exception.status, StatusCode.SC_RATE_LIMITED)
+        self.assertTrue(ctx_429.exception.is_retryable())
+        self.assertRegex(captured_headers[0]["X-Timestamp"], r"^\d{13}$")
+
+        retried = ts_client.list_all_transactions(
+            from_time=1000,
+            to_time=2000,
+            page_size=2,
+            username="player_9527",
+            rate_limit_backoff_sec=0.0,
+        )
+        self.assertEqual(len(retried), 3)
+        self.assertEqual(p1_calls["n"], 1)
+
+        cred_disp = WebhookDispatcher.from_credentials(api_key, secret, wallet)
+        bal_raw = json.dumps({"traceId": "t_cred", "username": "player_9527", "currency": "USD", "token": tok})
+        st_c, b_c = cred_disp.handle("/wallet/balance", api_key, sign_body(bal_raw, secret), bal_raw)
+        self.assertEqual(st_c, 200)
+        self.assertEqual(b_c["status"], StatusCode.SC_OK)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -433,7 +433,8 @@ Client::Client(const Config& cfg)
     : api_key_(trim(cfg.api_key)),
       hmac_secret_(cfg.hmac_secret),
       base_url_(cfg.resolved_base_url()),
-      timeout_ms_(cfg.timeout_ms) {
+      timeout_ms_(cfg.timeout_ms),
+      send_timestamp_(cfg.send_timestamp) {
     ensure_curl_global_init();
 }
 
@@ -454,10 +455,18 @@ Json Client::post_signed(const std::string& route_path, Json payload) const {
 
     std::string hdr_key = "X-API-Key: " + api_key_;
     std::string hdr_sig = "X-Signature: " + sig;
+    std::string hdr_ts;
     guard.headers = curl_slist_append(guard.headers, "Content-Type: application/json");
     guard.headers = curl_slist_append(guard.headers, "Accept: application/json");
     guard.headers = curl_slist_append(guard.headers, hdr_key.c_str());
     guard.headers = curl_slist_append(guard.headers, hdr_sig.c_str());
+    if (send_timestamp_) {
+        auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count();
+        hdr_ts = "X-Timestamp: " + std::to_string(now_ms);
+        guard.headers = curl_slist_append(guard.headers, hdr_ts.c_str());
+    }
 
     std::string resp_body;
     curl_easy_setopt(guard.curl, CURLOPT_URL, url.c_str());
@@ -483,9 +492,14 @@ Json Client::post_signed(const std::string& route_path, Json payload) const {
     try {
         parsed = Json::parse(resp_body);
     } catch (...) {
-        std::string st = (http_code >= 500 || http_code == 408 || http_code == 429)
-            ? StatusCode::SC_OPERATOR_TIMEOUT
-            : StatusCode::SC_INVALID_REQUEST;
+        std::string st;
+        if (http_code == 429) {
+            st = StatusCode::SC_RATE_LIMITED;
+        } else if (http_code >= 500 || http_code == 408) {
+            st = StatusCode::SC_OPERATOR_TIMEOUT;
+        } else {
+            st = StatusCode::SC_INVALID_REQUEST;
+        }
         throw ApiError(st, "Non-JSON response", trace_id, static_cast<int>(http_code));
     }
     if (!parsed.is_object()) {
@@ -533,19 +547,45 @@ Json Client::list_transactions(Json params) const {
     return post_signed("/operator/v1/transaction/list", std::move(params));
 }
 
-std::vector<Json> Client::list_all_transactions(int64_t from_time, int64_t to_time, int page_size) const {
+std::vector<Json> Client::list_all_transactions(
+    int64_t from_time,
+    int64_t to_time,
+    int page_size,
+    Json filters,
+    int rate_limit_max_retries,
+    int rate_limit_backoff_ms
+) const {
     if (page_size < 1 || page_size > MAX_PAGE_SIZE) {
         throw SdkError("INVALID_ARGUMENT", "page_size out of range 1..20000");
     }
+    int max_retries = std::max(0, rate_limit_max_retries);
+    int backoff_ms = std::max(0, rate_limit_backoff_ms);
     std::vector<Json> all;
     int page_no = 1;
     while (true) {
-        Json p = Json::object();
+        Json p = filters.is_object() ? filters : Json::object();
         p.set("fromTime", Json(from_time));
         p.set("toTime", Json(to_time));
         p.set("pageNo", Json(page_no));
         p.set("pageSize", Json(page_size));
-        Json res = list_transactions(std::move(p));
+        Json res;
+        int attempt = 0;
+        while (true) {
+            try {
+                res = list_transactions(p);
+                break;
+            } catch (const ApiError& e) {
+                if (e.status == StatusCode::SC_RATE_LIMITED && attempt < max_retries) {
+                    ++attempt;
+                    int wait_ms = backoff_ms * attempt;
+                    if (wait_ms > 0) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(wait_ms));
+                    }
+                    continue;
+                }
+                throw;
+            }
+        }
         const Json& data = res.at("data");
         const auto& batch = data.at("transactions").as_array();
         for (const auto& row : batch) all.push_back(row);
@@ -857,7 +897,10 @@ Json InMemoryWallet::on_adjustment(const Json& req) {
 }
 
 WebhookDispatcher::WebhookDispatcher(const Config& cfg, WalletHandler& wallet)
-    : api_key_(trim(cfg.api_key)), hmac_secret_(cfg.hmac_secret), wallet_(wallet) {
+    : WebhookDispatcher(cfg.api_key, cfg.hmac_secret, wallet) {}
+
+WebhookDispatcher::WebhookDispatcher(std::string api_key, std::string hmac_secret, WalletHandler& wallet)
+    : api_key_(trim(api_key)), hmac_secret_(std::move(hmac_secret)), wallet_(wallet) {
     if (api_key_.empty()) throw SdkError("INVALID_CONFIG", "api_key is required");
     if (hmac_secret_.empty()) throw SdkError("INVALID_CONFIG", "hmac_secret is required");
 }

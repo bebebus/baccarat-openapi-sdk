@@ -235,4 +235,38 @@ $customWallet = new class implements \Bebebus\BaccaratSdk\WalletHandlerInterface
 $customDisp = new WebhookDispatcher($cfg, $customWallet);
 assertEq($customDisp->handle('/wallet/balance', $apiKey, Signing::signBody($emptyObjRaw, $secret), $emptyObjRaw)['body']['data']['balance'], '42.00', 'wb:customInterface');
 
+// 7. v1.5.2 regressions: sendTimestamp X-Timestamp, non-JSON 429 -> SC_RATE_LIMITED, listAllTransactions backoff + filters, WebhookDispatcher::fromCredentials
+$capturedHeaders = [];
+$page1Attempts = 0;
+$tsTransport = static function (string $url, array $headers, string $rawBody, int $timeoutMs) use (&$capturedHeaders, &$page1Attempts): array {
+    $capturedHeaders[] = $headers;
+    $body = json_decode($rawBody, true, 512, JSON_THROW_ON_ERROR);
+    if (str_ends_with($url, '/operator/v1/ping')) {
+        return [429, 'Too Many Requests'];
+    }
+    if (($body['pageNo'] ?? 1) === 1 && $page1Attempts === 0) {
+        $page1Attempts++;
+        return [200, json_encode(['traceId' => $body['traceId'], 'status' => 'SC_RATE_LIMITED', 'message' => 'slow down'])];
+    }
+    $rows = ($body['pageNo'] ?? 1) === 1 ? [['betId' => 'b1'], ['betId' => 'b2']] : [['betId' => 'b3']];
+    return [200, json_encode(['traceId' => $body['traceId'], 'status' => 'SC_OK', 'data' => ['transactions' => $rows, 'pageNo' => $body['pageNo'], 'pageSize' => 2, 'total' => 3]])];
+};
+$tsCfg = new Config($apiKey, $secret, Config::ENV_SANDBOX, null, 8000, true);
+$tsClient = new Client($tsCfg, $tsTransport);
+$caught429 = false;
+try {
+    $tsClient->ping();
+} catch (BaccaratApiException $e) {
+    $caught429 = ($e->httpStatus === 429 && $e->status === StatusCode::SC_RATE_LIMITED && $e->isRetryable());
+}
+assertEq($caught429, true, 's2s:nonJson429RateLimited');
+assertEq((bool) preg_match('/^\d{13}$/', $capturedHeaders[0]['X-Timestamp'] ?? ''), true, 's2s:xTimestampHeader');
+
+$retriedAll = $tsClient->listAllTransactions(1000, 2000, 2, ['username' => 'player_9527'], 3, 0);
+assertEq(count($retriedAll), 3, 's2s:listAllRateLimitRetry');
+assertEq($page1Attempts, 1, 's2s:listAllRetryCount');
+
+$credDisp = WebhookDispatcher::fromCredentials($apiKey, $secret, $customWallet);
+assertEq($credDisp->handle('/wallet/balance', $apiKey, Signing::signBody($emptyObjRaw, $secret), $emptyObjRaw)['body']['data']['balance'], '42.00', 'wb:fromCredentials');
+
 echo "PHP SDK: ALL TESTS PASSED\n";

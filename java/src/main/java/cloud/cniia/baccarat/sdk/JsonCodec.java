@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 package cloud.cniia.baccarat.sdk;
 
+import java.lang.reflect.Array;
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -79,6 +80,14 @@ public final class JsonCodec {
                 if (!first) sb.append(',');
                 first = false;
                 writeJson(sb, item);
+            }
+            sb.append(']');
+        } else if (val.getClass().isArray()) {
+            sb.append('[');
+            int len = Array.getLength(val);
+            for (int i = 0; i < len; i++) {
+                if (i > 0) sb.append(',');
+                writeJson(sb, Array.get(val, i));
             }
             sb.append(']');
         } else {

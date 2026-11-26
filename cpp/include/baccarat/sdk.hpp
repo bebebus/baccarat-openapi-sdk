@@ -100,6 +100,7 @@ struct Config {
     Environment environment = Environment::Production;
     std::string base_url;
     long timeout_ms = 8000;
+    bool send_timestamp = false;
 
     std::string resolved_base_url() const;
 };
@@ -116,7 +117,14 @@ public:
     Json update_player_status(Json params) const;
     Json update_player_limits(Json params) const;
     Json list_transactions(Json params) const;
-    std::vector<Json> list_all_transactions(int64_t from_time, int64_t to_time, int page_size = 2000) const;
+    std::vector<Json> list_all_transactions(
+        int64_t from_time,
+        int64_t to_time,
+        int page_size = 2000,
+        Json filters = Json::object(),
+        int rate_limit_max_retries = 3,
+        int rate_limit_backoff_ms = 1000
+    ) const;
     Json get_transaction_detail(Json params) const;
     Json list_unsettled_transactions(Json params = Json::object()) const;
     Json get_wallet_transaction_status(Json params) const;
@@ -126,6 +134,7 @@ private:
     std::string hmac_secret_;
     std::string base_url_;
     long timeout_ms_;
+    bool send_timestamp_;
 };
 
 // 5. Seamless Wallet Pluggable WalletHandler, WebhookDispatcher & InMemoryWallet
@@ -189,6 +198,7 @@ private:
 class WebhookDispatcher {
 public:
     WebhookDispatcher(const Config& cfg, WalletHandler& wallet);
+    WebhookDispatcher(std::string api_key, std::string hmac_secret, WalletHandler& wallet);
     Json handle(
         const std::string& route_path,
         const std::string& api_key_header,

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Package baccarat provides a zero-dependency Go SDK for the Baccarat Live Platform
-// B2B Operator Seamless Wallet API (v1.5.1).
+// B2B Operator Seamless Wallet API (v1.5.2).
 package baccarat
 
 import (
@@ -236,39 +236,46 @@ type WalletBalanceRequest struct {
 }
 
 type WalletBetRequest struct {
-	TraceID               string `json:"traceId"`
-	Username              string `json:"username"`
-	TransactionID         string `json:"transactionId"`
-	BetID                 string `json:"betId"`
-	ExternalTransactionID string `json:"externalTransactionId"`
-	Amount                string `json:"amount"`
-	Currency              string `json:"currency"`
-	Token                 string `json:"token"`
-	GameCode              string `json:"gameCode"`
-	RoundID               string `json:"roundId"`
-	Timestamp             int64  `json:"timestamp"`
+	TraceID               string  `json:"traceId"`
+	Username              string  `json:"username"`
+	TransactionID         string  `json:"transactionId"`
+	BetID                 string  `json:"betId"`
+	ExternalTransactionID string  `json:"externalTransactionId"`
+	Amount                string  `json:"amount"`
+	Currency              string  `json:"currency"`
+	Token                 string  `json:"token"`
+	GameCode              string  `json:"gameCode"`
+	TableID               string  `json:"tableId,omitempty"`
+	RoundID               string  `json:"roundId"`
+	ShoeID                *string `json:"shoeId,omitempty"`
+	RoundNo               *int    `json:"roundNo,omitempty"`
+	BetSide               *string `json:"betSide,omitempty"`
+	Timestamp             int64   `json:"timestamp"`
 }
 
 type WalletBetResultRequest struct {
-	TraceID               string `json:"traceId"`
-	Username              string `json:"username"`
-	TransactionID         string `json:"transactionId"`
-	BetID                 string `json:"betId"`
-	ExternalTransactionID string `json:"externalTransactionId"`
-	RoundID               string `json:"roundId"`
-	BetAmount             string `json:"betAmount"`
-	WinAmount             string `json:"winAmount"`
-	EffectiveTurnover     string `json:"effectiveTurnover"`
-	WinLoss               string `json:"winLoss"`
-	JackpotAmount         string `json:"jackpotAmount"`
-	ResultType            string `json:"resultType"`
-	IsFreespin            int    `json:"isFreespin"`
-	IsEndRound            int    `json:"isEndRound"`
-	Currency              string `json:"currency"`
-	Token                 string `json:"token"`
-	GameCode              string `json:"gameCode"`
-	BetTime               int64  `json:"betTime"`
-	SettledTime           int64  `json:"settledTime"`
+	TraceID               string  `json:"traceId"`
+	Username              string  `json:"username"`
+	TransactionID         string  `json:"transactionId"`
+	BetID                 string  `json:"betId"`
+	ExternalTransactionID string  `json:"externalTransactionId"`
+	RoundID               string  `json:"roundId"`
+	BetAmount             string  `json:"betAmount"`
+	WinAmount             string  `json:"winAmount"`
+	EffectiveTurnover     string  `json:"effectiveTurnover"`
+	WinLoss               string  `json:"winLoss"`
+	JackpotAmount         string  `json:"jackpotAmount"`
+	ResultType            string  `json:"resultType"`
+	IsFreespin            int     `json:"isFreespin"`
+	IsEndRound            int     `json:"isEndRound"`
+	Currency              string  `json:"currency"`
+	Token                 string  `json:"token"`
+	GameCode              string  `json:"gameCode"`
+	TableID               string  `json:"tableId,omitempty"`
+	BetSide               *string `json:"betSide,omitempty"`
+	RoundOutcome          *string `json:"roundOutcome,omitempty"`
+	BetTime               int64   `json:"betTime"`
+	SettledTime           int64   `json:"settledTime"`
 }
 
 type WalletRollbackRequest struct {
@@ -336,19 +343,21 @@ func AdjustmentFingerprint(p WalletAdjustmentRequest) string {
 // ── 4. Config & S2S Client (/operator/v1/*) ─────────────────────────────────
 
 type Config struct {
-	APIKey      string
-	HMACSecret  string
-	Environment string
-	BaseURL     string
-	Timeout     time.Duration
-	HTTPClient  *http.Client
+	APIKey        string
+	HMACSecret    string
+	Environment   string
+	BaseURL       string
+	Timeout       time.Duration
+	HTTPClient    *http.Client
+	SendTimestamp bool
 }
 
 type Client struct {
-	apiKey     string
-	hmacSecret string
-	baseURL    string
-	httpClient *http.Client
+	apiKey        string
+	hmacSecret    string
+	baseURL       string
+	httpClient    *http.Client
+	sendTimestamp bool
 }
 
 func NewClient(cfg Config) (*Client, error) {
@@ -384,10 +393,11 @@ func NewClient(cfg Config) (*Client, error) {
 		hc = &http.Client{Timeout: timeout}
 	}
 	return &Client{
-		apiKey:     key,
-		hmacSecret: cfg.HMACSecret,
-		baseURL:    strings.TrimRight(base, "/"),
-		httpClient: hc,
+		apiKey:        key,
+		hmacSecret:    cfg.HMACSecret,
+		baseURL:       strings.TrimRight(base, "/"),
+		httpClient:    hc,
+		sendTimestamp: cfg.SendTimestamp,
 	}, nil
 }
 
@@ -443,6 +453,9 @@ func (c *Client) postSigned(ctx context.Context, route string, reqBody any, trac
 	httpReq.Header.Set("Accept", "application/json")
 	httpReq.Header.Set("X-API-Key", c.apiKey)
 	httpReq.Header.Set("X-Signature", sig)
+	if c.sendTimestamp {
+		httpReq.Header.Set("X-Timestamp", strconv.FormatInt(time.Now().UnixMilli(), 10))
+	}
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -459,7 +472,9 @@ func (c *Client) postSigned(ctx context.Context, route string, reqBody any, trac
 	var env rawEnvelope
 	if !isJSONObjectBytes(respBytes) || json.Unmarshal(respBytes, &env) != nil {
 		st := SC_INVALID_REQUEST
-		if resp.StatusCode >= 500 || resp.StatusCode == 408 || resp.StatusCode == 429 {
+		if resp.StatusCode == http.StatusTooManyRequests {
+			st = SC_RATE_LIMITED
+		} else if resp.StatusCode >= 500 || resp.StatusCode == 408 {
 			st = SC_OPERATOR_TIMEOUT
 		}
 		return "", &ApiError{TraceID: traceID, Status: st, Message: fmt.Sprintf("non-JSON HTTP %d", resp.StatusCode), HTTPStatus: resp.StatusCode}
@@ -714,22 +729,57 @@ func (c *Client) ListTransactions(ctx context.Context, req ListTransactionsReque
 }
 
 func (c *Client) ListAllTransactions(ctx context.Context, fromTime, toTime int64, pageSize int) ([]ReconcileTransactionRow, error) {
+	return c.ListAllTransactionsWithOptions(ctx, ListTransactionsRequest{
+		FromTime: fromTime,
+		ToTime:   toTime,
+		PageSize: pageSize,
+	}, 3, time.Second)
+}
+
+func (c *Client) ListAllTransactionsWithOptions(
+	ctx context.Context,
+	baseReq ListTransactionsRequest,
+	rateLimitMaxRetries int,
+	rateLimitBackoff time.Duration,
+) ([]ReconcileTransactionRow, error) {
+	pageSize := baseReq.PageSize
 	if pageSize == 0 {
 		pageSize = 2000
 	}
 	if pageSize < 1 || pageSize > MaxPageSize {
 		return nil, &SdkError{Code: "INVALID_ARGUMENT", Message: fmt.Sprintf("pageSize must be in 1..%d", MaxPageSize)}
 	}
+	if rateLimitMaxRetries < 0 {
+		rateLimitMaxRetries = 0
+	}
 	var all []ReconcileTransactionRow
 	pageNo := 1
 	for {
-		data, _, err := c.ListTransactions(ctx, ListTransactionsRequest{
-			FromTime: fromTime,
-			ToTime:   toTime,
-			PageNo:   pageNo,
-			PageSize: pageSize,
-		})
-		if err != nil {
+		req := baseReq
+		req.TraceID = ""
+		req.PageNo = pageNo
+		req.PageSize = pageSize
+		var data *ListTransactionsData
+		var err error
+		for attempt := 0; ; attempt++ {
+			data, _, err = c.ListTransactions(ctx, req)
+			if err == nil {
+				break
+			}
+			var apiErr *ApiError
+			if errors.As(err, &apiErr) && apiErr.Status == SC_RATE_LIMITED && attempt < rateLimitMaxRetries {
+				wait := rateLimitBackoff * time.Duration(attempt+1)
+				if wait > 0 {
+					timer := time.NewTimer(wait)
+					select {
+					case <-ctx.Done():
+						timer.Stop()
+						return nil, ctx.Err()
+					case <-timer.C:
+					}
+				}
+				continue
+			}
 			return nil, err
 		}
 		all = append(all, data.Transactions...)
@@ -750,22 +800,37 @@ type TransactionDetailRequest struct {
 	DetailURLTTLSec int    `json:"detailUrlTtlSec,omitempty"`
 }
 
+type BaccaratRevealedCard struct {
+	Suit  int    `json:"suit"`
+	Rank  int    `json:"rank"`
+	Label string `json:"label"`
+}
+
+type TicketAdjustmentItem struct {
+	TransactionID string  `json:"transactionId"`
+	Direction     string  `json:"direction"`
+	Amount        string  `json:"amount"`
+	ReasonCode    *string `json:"reasonCode"`
+	ReferenceNo   *string `json:"referenceNo"`
+	CompletedAt   *int64  `json:"completedAt"`
+}
+
 type VerifiedRoundResult struct {
-	Outcome      string           `json:"outcome"`
-	PlayerPoints int              `json:"playerPoints"`
-	BankerPoints int              `json:"bankerPoints"`
-	PlayerPair   bool             `json:"playerPair"`
-	BankerPair   bool             `json:"bankerPair"`
-	Natural      bool             `json:"natural"`
-	PlayerCards  []map[string]any `json:"playerCards,omitempty"`
-	BankerCards  []map[string]any `json:"bankerCards,omitempty"`
+	Outcome      string                 `json:"outcome"`
+	PlayerPoints int                    `json:"playerPoints"`
+	BankerPoints int                    `json:"bankerPoints"`
+	PlayerPair   bool                   `json:"playerPair"`
+	BankerPair   bool                   `json:"bankerPair"`
+	Natural      bool                   `json:"natural"`
+	PlayerCards  []BaccaratRevealedCard `json:"playerCards,omitempty"`
+	BankerCards  []BaccaratRevealedCard `json:"bankerCards,omitempty"`
 }
 
 type TransactionDetailData struct {
 	ReconcileTransactionRow
-	DetailURL   string               `json:"detailUrl,omitempty"`
-	RoundResult *VerifiedRoundResult `json:"roundResult"`
-	Adjustments []map[string]any     `json:"adjustments,omitempty"`
+	DetailURL   string                 `json:"detailUrl,omitempty"`
+	RoundResult *VerifiedRoundResult   `json:"roundResult"`
+	Adjustments []TicketAdjustmentItem `json:"adjustments,omitempty"`
 }
 
 func (c *Client) GetTransactionDetail(ctx context.Context, req TransactionDetailRequest) (*TransactionDetailData, string, error) {
@@ -1287,6 +1352,12 @@ func (d *WebhookDispatcher) HandleRaw(ctx context.Context, routePath, apiKeyHead
 
 func (d *WebhookDispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = w.Write([]byte(`{"status":"SC_INVALID_REQUEST","message":"method not allowed"}`))
+		return
+	}
 	raw, err := io.ReadAll(io.LimitReader(r.Body, MaxWebhookBodyBytes+1))
 	if err != nil {
 		w.WriteHeader(http.StatusOK)

@@ -342,4 +342,47 @@ test('WebhookDispatcher & InMemoryWallet full seamless wallet lifecycle', async 
   for (const tid of capturedTraces) {
     assert.match(tid, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   }
+
+  // 8. v1.5.2 regressions: sendTimestamp X-Timestamp, non-JSON 429 -> SC_RATE_LIMITED, listAllTransactions backoff,
+  //    webhook-only PRODUCTION without baseUrl, and plain-object rawBody rejection
+  const capturedHeaders = [];
+  let page1Calls = 0;
+  const tsClient = new Client(
+    { apiKey, hmacSecret: secret, environment: Environment.SANDBOX, sendTimestamp: true },
+    {
+      transport: async (url, headers, rawBuf) => {
+        capturedHeaders.push(headers);
+        const p = JSON.parse(rawBuf.toString('utf8'));
+        if (url.endsWith('/operator/v1/ping')) {
+          return { httpStatus: 429, rawBody: 'Too Many Requests' };
+        }
+        if (p.pageNo === 1 && page1Calls === 0) {
+          page1Calls += 1;
+          return { httpStatus: 200, rawBody: JSON.stringify({ traceId: p.traceId, status: 'SC_RATE_LIMITED', message: 'slow down' }) };
+        }
+        const rows = p.pageNo === 1 ? [{ betId: 'b1' }, { betId: 'b2' }] : [{ betId: 'b3' }];
+        return { httpStatus: 200, rawBody: JSON.stringify({ traceId: p.traceId, status: 'SC_OK', data: { transactions: rows, pageNo: p.pageNo, pageSize: 2, total: 3 } }) };
+      },
+    },
+  );
+  await assert.rejects(
+    () => tsClient.ping(),
+    (err) => err instanceof BaccaratApiError && err.httpStatus === 429 && err.status === StatusCode.SC_RATE_LIMITED && err.isRetryable(),
+  );
+  assert.match(capturedHeaders[0]['X-Timestamp'], /^\d{13}$/);
+
+  const retriedRows = await tsClient.listAllTransactions({
+    fromTime: 1000,
+    toTime: 2000,
+    pageSize: 2,
+    username: 'player_9527',
+    rateLimitBackoffMs: 0,
+  });
+  assert.equal(retriedRows.length, 3);
+  assert.equal(page1Calls, 1);
+
+  const prodWebhookOnly = new WebhookDispatcher({ apiKey, hmacSecret: secret }, wallet);
+  const parsedObjRes = await prodWebhookOnly.handle('/wallet/bet', apiKey, '0'.repeat(64), { traceId: 't_obj', amount: '10.00' });
+  assert.equal(parsedObjRes.body.status, StatusCode.SC_INVALID_REQUEST);
+  assert.equal(parsedObjRes.body.traceId, 't_obj');
 });

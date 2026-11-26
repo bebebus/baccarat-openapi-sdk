@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Zero-dependency Node.js SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.1).
+// Zero-dependency Node.js SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.2).
 
 import crypto from 'node:crypto';
 import http from 'node:http';
@@ -267,7 +267,14 @@ export function adjustmentFingerprint(payload) {
 // ── 4. Client Configuration & S2S Client (/operator/v1/*) ───────────────────
 
 export class Config {
-  constructor({ apiKey, hmacSecret, environment = Environment.PRODUCTION, baseUrl = undefined, timeoutMs = 8000 } = {}) {
+  constructor({
+    apiKey,
+    hmacSecret,
+    environment = Environment.PRODUCTION,
+    baseUrl = undefined,
+    timeoutMs = 8000,
+    sendTimestamp = false,
+  } = {}) {
     const trimmedKey = String(apiKey ?? '').trim();
     const secretStr = typeof hmacSecret === 'string' ? hmacSecret : '';
     if (!trimmedKey) {
@@ -298,6 +305,7 @@ export class Config {
     this.environment = environment;
     this.baseUrl = resolvedUrl.replace(/\/+$/, '');
     this.timeoutMs = timeoutMs;
+    this.sendTimestamp = Boolean(sendTimestamp);
     Object.freeze(this);
   }
 }
@@ -383,6 +391,7 @@ export class Client {
       Accept: 'application/json',
       'X-API-Key': this.config.apiKey,
       'X-Signature': signature,
+      ...(this.config.sendTimestamp ? { 'X-Timestamp': String(Date.now()) } : {}),
     };
 
     const { httpStatus, rawBody } = await this.transport(
@@ -398,9 +407,11 @@ export class Client {
     } catch {
       throw new BaccaratApiError({
         traceId: payload.traceId,
-        status: httpStatus >= 500 || httpStatus === 408 || httpStatus === 429
-          ? StatusCode.SC_OPERATOR_TIMEOUT
-          : StatusCode.SC_INVALID_REQUEST,
+        status: httpStatus === 429
+          ? StatusCode.SC_RATE_LIMITED
+          : httpStatus >= 500 || httpStatus === 408
+            ? StatusCode.SC_OPERATOR_TIMEOUT
+            : StatusCode.SC_INVALID_REQUEST,
         message: `Non-JSON HTTP ${httpStatus} response from gateway`,
         httpStatus,
       });
@@ -463,14 +474,40 @@ export class Client {
     return this.postSigned('/operator/v1/transaction/list', params);
   }
 
-  async listAllTransactions({ fromTime, toTime, pageSize = 2000, ...rest }) {
+  async listAllTransactions({
+    fromTime,
+    toTime,
+    pageSize = 2000,
+    rateLimitMaxRetries = 3,
+    rateLimitBackoffMs = 1000,
+    ...rest
+  }) {
     if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > MAX_PAGE_SIZE) {
       throw new BaccaratSdkError(`pageSize must be an integer in 1..${MAX_PAGE_SIZE}`, 'INVALID_ARGUMENT');
     }
+    const maxRetries = Number.isInteger(rateLimitMaxRetries) && rateLimitMaxRetries >= 0 ? rateLimitMaxRetries : 3;
+    const baseBackoff = Number.isFinite(rateLimitBackoffMs) && rateLimitBackoffMs >= 0 ? rateLimitBackoffMs : 1000;
     const all = [];
     let pageNo = 1;
     while (true) {
-      const res = await this.listTransactions({ ...rest, fromTime, toTime, pageNo, pageSize });
+      let res;
+      let attempt = 0;
+      while (true) {
+        try {
+          res = await this.listTransactions({ ...rest, fromTime, toTime, pageNo, pageSize });
+          break;
+        } catch (err) {
+          if (err instanceof BaccaratApiError && err.status === StatusCode.SC_RATE_LIMITED && attempt < maxRetries) {
+            attempt += 1;
+            const waitMs = baseBackoff * attempt;
+            if (waitMs > 0) {
+              await new Promise((resolve) => setTimeout(resolve, waitMs));
+            }
+            continue;
+          }
+          throw err;
+        }
+      }
       const rows = Array.isArray(res.data?.transactions) ? res.data.transactions : [];
       all.push(...rows);
       const total = Number(res.data?.total ?? all.length);
@@ -799,7 +836,22 @@ function extractSafeTraceHint(rawBuf) {
 
 export class WebhookDispatcher {
   constructor(config, walletHandler) {
-    this.config = config instanceof Config ? config : new Config({ ...config, environment: Environment.SANDBOX });
+    if (config instanceof Config) {
+      this.apiKey = config.apiKey;
+      this.hmacSecret = config.hmacSecret;
+      this.config = config;
+    } else if (config && typeof config === 'object') {
+      const apiKey = String(config.apiKey ?? '').trim();
+      const hmacSecret = typeof config.hmacSecret === 'string' ? config.hmacSecret : '';
+      if (!apiKey || !hmacSecret) {
+        throw new BaccaratSdkError('apiKey and hmacSecret are required', 'INVALID_CONFIG');
+      }
+      this.apiKey = apiKey;
+      this.hmacSecret = hmacSecret;
+      this.config = { apiKey, hmacSecret };
+    } else {
+      throw new BaccaratSdkError('config with apiKey and hmacSecret is required', 'INVALID_CONFIG');
+    }
     if (!walletHandler || typeof walletHandler !== 'object') {
       throw new BaccaratSdkError('walletHandler is required', 'INVALID_CONFIG');
     }
@@ -807,6 +859,16 @@ export class WebhookDispatcher {
   }
 
   async handle(routePath, apiKeyHeader, signatureHeader, rawBody) {
+    if (rawBody !== null && typeof rawBody === 'object' && !Buffer.isBuffer(rawBody) && !(rawBody instanceof Uint8Array)) {
+      return {
+        statusCode: 200,
+        body: {
+          traceId: typeof rawBody.traceId === 'string' ? rawBody.traceId.trim().slice(0, 128) : '',
+          status: StatusCode.SC_INVALID_REQUEST,
+          message: 'rawBody must be a Buffer, Uint8Array, or raw UTF-8 string (do not pass parsed JSON from express.json())',
+        },
+      };
+    }
     const rawBuf = Buffer.isBuffer(rawBody)
       ? rawBody
       : rawBody instanceof Uint8Array
@@ -825,8 +887,8 @@ export class WebhookDispatcher {
       apiKeyHeader,
       signatureHeader,
       rawBuf,
-      this.config.apiKey,
-      this.config.hmacSecret,
+      this.apiKey,
+      this.hmacSecret,
     );
     if (authStatus !== StatusCode.SC_OK) {
       return {

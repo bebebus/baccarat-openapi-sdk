@@ -8,13 +8,21 @@ final class WebhookDispatcher
 {
     public const MAX_WEBHOOK_BODY_BYTES = 1048576;
 
-    private Config $config;
+    private string $apiKey;
+    private string $hmacSecret;
     private WalletHandlerInterface $wallet;
 
     public function __construct(Config $config, WalletHandlerInterface $wallet)
     {
-        $this->config = $config;
+        $this->apiKey = $config->apiKey;
+        $this->hmacSecret = $config->hmacSecret;
         $this->wallet = $wallet;
+    }
+
+    public static function fromCredentials(string $apiKey, string $hmacSecret, WalletHandlerInterface $wallet): self
+    {
+        $cfg = new Config($apiKey, $hmacSecret, Config::ENV_SANDBOX);
+        return new self($cfg, $wallet);
     }
 
     private static function extractTraceHint(string $rawBody): string
@@ -45,8 +53,8 @@ final class WebhookDispatcher
             $apiKeyHeader,
             $signatureHeader,
             $rawBody,
-            $this->config->apiKey,
-            $this->config->hmacSecret
+            $this->apiKey,
+            $this->hmacSecret
         );
         if ($auth !== StatusCode::SC_OK) {
             return [

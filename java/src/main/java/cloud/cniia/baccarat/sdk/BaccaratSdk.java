@@ -286,8 +286,13 @@ public final class BaccaratSdk {
         public final Environment environment;
         public final String baseUrl;
         public final int timeoutMs;
+        public final boolean sendTimestamp;
 
         public Config(String apiKey, String hmacSecret, Environment environment, String baseUrl, int timeoutMs) {
+            this(apiKey, hmacSecret, environment, baseUrl, timeoutMs, false);
+        }
+
+        public Config(String apiKey, String hmacSecret, Environment environment, String baseUrl, int timeoutMs, boolean sendTimestamp) {
             String k = apiKey == null ? "" : apiKey.trim();
             if (k.isEmpty()) throw new SdkException("INVALID_CONFIG", "apiKey is required");
             if (hmacSecret == null || hmacSecret.isEmpty()) throw new SdkException("INVALID_CONFIG", "hmacSecret is required");
@@ -307,6 +312,7 @@ public final class BaccaratSdk {
             this.environment = env;
             this.baseUrl = resolved.replaceAll("/+$", "");
             this.timeoutMs = timeoutMs;
+            this.sendTimestamp = sendTimestamp;
         }
     }
 
@@ -334,19 +340,26 @@ public final class BaccaratSdk {
             byte[] rawBytes = JsonCodec.stringify(payload).getBytes(StandardCharsets.UTF_8);
             String sig = signBody(rawBytes, config.hmacSecret);
 
-            HttpRequest req = HttpRequest.newBuilder()
+            HttpRequest.Builder reqBuilder = HttpRequest.newBuilder()
                     .uri(URI.create(config.baseUrl + routePath))
                     .timeout(Duration.ofMillis(config.timeoutMs))
                     .header("Content-Type", "application/json")
                     .header("Accept", "application/json")
                     .header("X-API-Key", config.apiKey)
-                    .header("X-Signature", sig)
+                    .header("X-Signature", sig);
+            if (config.sendTimestamp) {
+                reqBuilder.header("X-Timestamp", String.valueOf(System.currentTimeMillis()));
+            }
+            HttpRequest req = reqBuilder
                     .POST(HttpRequest.BodyPublishers.ofByteArray(rawBytes))
                     .build();
 
             HttpResponse<String> resp;
             try {
                 resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new SdkException(StatusCode.SC_OPERATOR_TIMEOUT, "Request interrupted: " + e.getMessage());
             } catch (Exception e) {
                 throw new SdkException(StatusCode.SC_OPERATOR_TIMEOUT, "Network error: " + e.getMessage());
             }
@@ -355,8 +368,14 @@ public final class BaccaratSdk {
             try {
                 parsed = JsonCodec.parseObject(resp.body());
             } catch (Exception e) {
-                String st = (resp.statusCode() >= 500 || resp.statusCode() == 408 || resp.statusCode() == 429)
-                        ? StatusCode.SC_OPERATOR_TIMEOUT : StatusCode.SC_INVALID_REQUEST;
+                String st;
+                if (resp.statusCode() == 429) {
+                    st = StatusCode.SC_RATE_LIMITED;
+                } else if (resp.statusCode() >= 500 || resp.statusCode() == 408) {
+                    st = StatusCode.SC_OPERATOR_TIMEOUT;
+                } else {
+                    st = StatusCode.SC_INVALID_REQUEST;
+                }
                 throw new ApiException(st, "Non-JSON HTTP " + resp.statusCode(), traceId, null, resp.statusCode());
             }
 
@@ -416,24 +435,62 @@ public final class BaccaratSdk {
             return postSigned("/operator/v1/transaction/list", params);
         }
 
-        @SuppressWarnings("unchecked")
         public List<Map<String, Object>> listAllTransactions(long fromTime, long toTime, int pageSize) {
+            return listAllTransactions(fromTime, toTime, pageSize, Map.of(), 3, 1000L);
+        }
+
+        @SuppressWarnings("unchecked")
+        public List<Map<String, Object>> listAllTransactions(
+                long fromTime,
+                long toTime,
+                int pageSize,
+                Map<String, Object> filters,
+                int rateLimitMaxRetries,
+                long rateLimitBackoffMs
+        ) {
             if (pageSize < 1 || pageSize > MAX_PAGE_SIZE) {
                 throw new SdkException("INVALID_ARGUMENT", "pageSize must be in 1.." + MAX_PAGE_SIZE);
             }
+            int maxRetries = Math.max(0, rateLimitMaxRetries);
+            long backoffMs = Math.max(0L, rateLimitBackoffMs);
             List<Map<String, Object>> all = new ArrayList<>();
             int pageNo = 1;
             while (true) {
                 Map<String, Object> p = new LinkedHashMap<>();
+                if (filters != null) p.putAll(filters);
                 p.put("fromTime", fromTime);
                 p.put("toTime", toTime);
                 p.put("pageNo", pageNo);
                 p.put("pageSize", pageSize);
-                Map<String, Object> res = listTransactions(p);
-                Map<String, Object> data = (Map<String, Object>) res.get("data");
-                List<Map<String, Object>> rows = (List<Map<String, Object>>) data.get("transactions");
+                Map<String, Object> res;
+                int attempt = 0;
+                while (true) {
+                    try {
+                        res = listTransactions(p);
+                        break;
+                    } catch (ApiException e) {
+                        if (StatusCode.SC_RATE_LIMITED.equals(e.status) && attempt < maxRetries) {
+                            attempt++;
+                            long waitMs = backoffMs * attempt;
+                            if (waitMs > 0L) {
+                                try {
+                                    Thread.sleep(waitMs);
+                                } catch (InterruptedException ie) {
+                                    Thread.currentThread().interrupt();
+                                    throw new SdkException(StatusCode.SC_OPERATOR_TIMEOUT, "Interrupted during rate-limit backoff");
+                                }
+                            }
+                            continue;
+                        }
+                        throw e;
+                    }
+                }
+                Map<String, Object> data = res.get("data") instanceof Map<?, ?> m ? (Map<String, Object>) m : Map.of();
+                List<Map<String, Object>> rows = data.get("transactions") instanceof List<?> l
+                        ? (List<Map<String, Object>>) l
+                        : List.of();
                 all.addAll(rows);
-                int total = ((Number) data.get("total")).intValue();
+                int total = data.get("total") instanceof Number n ? n.intValue() : all.size();
                 if (all.size() >= total || rows.isEmpty()) break;
                 pageNo++;
             }
@@ -775,14 +832,26 @@ public final class BaccaratSdk {
     }
 
     public static final class WebhookDispatcher {
-        private final Config config;
+        private final String apiKey;
+        private final String hmacSecret;
         private final WalletHandler wallet;
 
         public WebhookDispatcher(Config config, WalletHandler wallet) {
             if (config == null || wallet == null) {
                 throw new SdkException("INVALID_CONFIG", "config and wallet handler are required");
             }
-            this.config = config;
+            this.apiKey = config.apiKey;
+            this.hmacSecret = config.hmacSecret;
+            this.wallet = wallet;
+        }
+
+        public WebhookDispatcher(String apiKey, String hmacSecret, WalletHandler wallet) {
+            String k = apiKey == null ? "" : apiKey.trim();
+            if (k.isEmpty() || hmacSecret == null || hmacSecret.isEmpty() || wallet == null) {
+                throw new SdkException("INVALID_CONFIG", "apiKey, hmacSecret, and wallet handler are required");
+            }
+            this.apiKey = k;
+            this.hmacSecret = hmacSecret;
             this.wallet = wallet;
         }
 
@@ -793,7 +862,7 @@ public final class BaccaratSdk {
             }
 
             // Verify X-API-Key & X-Signature over raw bytes BEFORE JSON parsing!
-            String auth = verifyWebhookHeaders(apiKeyHeader, signatureHeader, safeBody, config.apiKey, config.hmacSecret);
+            String auth = verifyWebhookHeaders(apiKeyHeader, signatureHeader, safeBody, apiKey, hmacSecret);
             if (!StatusCode.SC_OK.equals(auth)) {
                 return makeErrEnvelope(extractTraceHint(safeBody), auth, "Auth/signature failed");
             }

@@ -1,11 +1,11 @@
 > 中文 | [English](./README.en.md)
 
-# 真人视讯百家乐 · B2B 商户对接多语言 SDK（v1.5.1）
+# 真人视讯百家乐 · B2B 商户对接多语言 SDK（v1.5.2）
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
-[![OpenAPI 3.1](https://img.shields.io/badge/OpenAPI_3.1-v1.5.1-e3b15a)](https://openapi.lt.cniia.cloud)
+[![OpenAPI 3.1](https://img.shields.io/badge/OpenAPI_3.1-v1.5.2-635bff)](https://openapi.lt.cniia.cloud)
 
-为接入真人视讯百家乐平台（B2B 单一无缝钱包模式，OpenAPI `v1.5.1`）的商户研发团队提供 **Node.js、Python、PHP、Go、Java、C++、Rust** 七套生产级双向对接 SDK。
+为接入真人视讯百家乐平台（B2B 单一无缝钱包模式，OpenAPI `v1.5.2`）的商户研发团队提供 **Node.js、Python、PHP、Go、Java、C++、Rust** 七套生产级双向对接 SDK。
 
 - 在线契约门户与验签台：`https://openapi.lt.cniia.cloud`
 - OpenAPI 3.1 规范下载：`https://openapi.lt.cniia.cloud/openapi.yaml` | `https://openapi.lt.cniia.cloud/openapi.json`
@@ -37,7 +37,7 @@ baccarat-openapi-sdk/
 ├── python/                        # Python >= 3.9 (stdlib, 零依赖, unittest)
 ├── php/                           # PHP >= 8.1 (ext-curl/ext-json, 零依赖 autoload + PSR-4)
 ├── go/                            # Go >= 1.21 (stdlib, 零依赖, go test)
-├── java/                          # Java >= 17 (java.net.http + BigDecimal, 零依赖 javac/mvn)
+├── java/                          # Java >= 17 (java.net.http + BigInteger, 零依赖 javac/mvn)
 ├── cpp/                           # C++17 (CMake + OpenSSL + libcurl, 零第三方库, CTest)
 └── rust/                          # Rust 2021 (零第三方 crate, cargo test)
 ```
@@ -46,13 +46,13 @@ baccarat-openapi-sdk/
 
 | 语言 | 目录 | 引入 / 构建方式 | 运行时外部包依赖 | 本机单测命令 |
 | --- | --- | --- | --- | --- |
-| **Node.js** | [`nodejs/`](./nodejs/) | `import { Client, WebhookDispatcher } from '@bebebus/baccarat-openapi-sdk'` | **0**（`node:https`, `node:crypto`） | `cd nodejs && node --test` |
-| **Python** | [`python/`](./python/) | `from baccarat_sdk import Client, WebhookDispatcher` | **0**（`urllib.request`, `hmac`） | `cd python && python3 -m unittest discover -s tests -v` |
-| **PHP** | [`php/`](./php/) | `require 'php/autoload.php'` 或 Composer `Bebebus\BaccaratSdk\` | **0**（`ext-curl`, `ext-json`） | `cd php && php tests/run.php` |
-| **Go** | [`go/`](./go/) | `go get github.com/bebebus/baccarat-openapi-sdk/go` | **0**（`net/http`, `crypto/hmac`） | `cd go && go test -v -count=1 ./...` |
-| **Java** | [`java/`](./java/) | 源码引入 `cloud.cniia.baccarat.sdk.*` 或 `mvn package` | **0**（`java.net.http`, `javax.crypto`） | `cd java && bash run-tests.sh` |
+| **Node.js** | [`nodejs/`](./nodejs/) | 克隆仓库后直接引入 `./nodejs/src/index.js` 或本地路径 `npm install ./baccarat-openapi-sdk/nodejs` | **0**（`node:https`, `node:crypto`） | `cd nodejs && node --test` |
+| **Python** | [`python/`](./python/) | `pip install "git+https://github.com/bebebus/baccarat-openapi-sdk.git@v1.5.2#subdirectory=python"` | **0**（`urllib.request`, `hmac`） | `cd python && python3 -m unittest discover -s tests -v` |
+| **PHP** | [`php/`](./php/) | `require 'php/autoload.php'` 或克隆后配置 Composer `path` / PSR-4 `Bebebus\BaccaratSdk\` | **0**（`ext-curl`, `ext-json`） | `cd php && php tests/run.php` |
+| **Go** | [`go/`](./go/) | `go get github.com/bebebus/baccarat-openapi-sdk/go@v1.5.2` | **0**（`net/http`, `crypto/hmac`） | `cd go && go test -v -count=1 ./...` |
+| **Java** | [`java/`](./java/) | `cd java && mvn install` 或源码引入 `cloud.cniia.baccarat.sdk.*` | **0**（`java.net.http`, `javax.crypto`） | `cd java && bash run-tests.sh` |
 | **C++** | [`cpp/`](./cpp/) | CMake `add_subdirectory(cpp)` 链接 `baccarat_sdk` | 系统 `OpenSSL` + `libcurl` | `cmake -S cpp -B cpp/build && cmake --build cpp/build && ctest --test-dir cpp/build --output-on-failure` |
-| **Rust** | [`rust/`](./rust/) | `baccarat-openapi-sdk = { git = "https://github.com/bebebus/baccarat-openapi-sdk" }` | **0 Crates**（`std` + 系统 `libcurl`） | `cd rust && cargo test` |
+| **Rust** | [`rust/`](./rust/) | `baccarat-openapi-sdk = { git = "https://github.com/bebebus/baccarat-openapi-sdk", tag = "v1.5.2" }` | **0 Crates**（`std` + 系统 `libcurl`） | `cd rust && cargo test` |
 
 一键执行全仓 7 语言回归测试：
 
@@ -80,6 +80,9 @@ const client = new Client(config);
 
 // 2. 查询授权牌桌并签发玩家进桌 URL
 const { data: { tables } } = await client.listTables({ currency: 'USD' });
+if (!tables.length) {
+  throw new Error('No permitted USD tables available for this operator');
+}
 const launch = await client.createGameUrl({
   username: 'player_9527',
   tableId: tables[0].tableId,             // 如常驻真视觉演播桌 "T-A2"

@@ -1,6 +1,6 @@
 > [中文](./SIGNING.md) | English
 
-# Raw-Byte HMAC-SHA256 Signing & Idempotency Fingerprint Specification (v1.5.1)
+# Raw-Byte HMAC-SHA256 Signing & Idempotency Fingerprint Specification (v1.5.2)
 
 This document is the authoritative cryptographic and idempotency specification shared across all 7 SDKs in `bebebus/baccarat-openapi-sdk` (Node.js, Python, PHP, Go, Java, C++, and Rust), aligned 100% with `https://openapi.lt.cniia.cloud/openapi.yaml`.
 
@@ -11,6 +11,7 @@ Both inbound S2S calls (Merchant -> Platform `/operator/v1/*`) and outbound seam
 - `Content-Type: application/json`
 - `X-API-Key: ak_<32-lowercase-hex>` (35 chars, max 128 chars, trimmed)
 - `X-Signature: <64-hex-chars>`
+- `X-Timestamp` (optional inbound S2S anti-replay): 10-digit Unix seconds or 13-digit Unix ms (`±300s` skew window; enabled via `sendTimestamp` / `send_timestamp` / `SendTimestamp` config flag across all 7 SDKs; `X-Signature` is still computed strictly over raw body bytes)
 
 ## 2. Signing Invariants
 
@@ -34,9 +35,9 @@ canonical = "v1|" + endpoint + "|" + UTF8ByteLen(f1) + ":" + f1 + "|" + UTF8Byte
 fingerprint = lowercase_hex( SHA256( UTF8(canonical) ) )
 ```
 
-- **`wallet/bet`**: `transactionId, username, betId, externalTransactionId, roundId, currency, gameCode, amount` *(excludes `traceId, timestamp`)*
-- **`wallet/bet_result`**: `transactionId, username, betId, externalTransactionId, roundId, currency, gameCode, betAmount, winAmount, effectiveTurnover, winLoss, jackpotAmount, resultType, String(isFreespin), String(isEndRound), String(betTime)` *(excludes `traceId, settledTime`)*
-- **`wallet/rollback`**: `transactionId, username, betId, externalTransactionId, roundId, currency, gameCode, amount` *(excludes `traceId, timestamp`)*
-- **`wallet/adjustment`**: `transactionId, username, betId, externalTransactionId, roundId, currency, gameCode, direction, amount, reasonCode` *(excludes `traceId, timestamp, memo, referenceNo`)*
+- **`wallet/bet`**: `transactionId, username, betId, externalTransactionId, roundId, currency, gameCode, amount` *(excludes `traceId, timestamp, token, tableId, shoeId, roundNo, betSide`)*
+- **`wallet/bet_result`**: `transactionId, username, betId, externalTransactionId, roundId, currency, gameCode, betAmount, winAmount, effectiveTurnover, winLoss, jackpotAmount, resultType, String(isFreespin), String(isEndRound), String(betTime)` *(excludes `traceId, settledTime, token, tableId, betSide, roundOutcome`)*
+- **`wallet/rollback`**: `transactionId, username, betId, externalTransactionId, roundId, currency, gameCode, amount` *(excludes `traceId, timestamp, token`)*
+- **`wallet/adjustment`**: `transactionId, username, betId, externalTransactionId, roundId, currency, gameCode, direction, amount, reasonCode` *(excludes `traceId, timestamp, token, memo, referenceNo`)*
 
 Same `transactionId` + matching `fingerprint` -> return `HTTP 200` + `SC_OK` + current `data.balance` without mutating funds twice. Same `transactionId` + different `fingerprint` -> return `SC_TRANSACTION_DUPLICATED`.

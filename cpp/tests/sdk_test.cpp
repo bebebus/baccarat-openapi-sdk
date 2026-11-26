@@ -134,6 +134,9 @@ int main() {
     require_true(::listen(srv_fd, 16) == 0, "listen");
 
     std::atomic<bool> stop_srv{false};
+    std::atomic<int> rl_p1_calls{0};
+    std::string last_ts_hdr;
+    std::mutex hdr_mu;
     std::thread server_thread([&]() {
         while (!stop_srv.load()) {
             int cfd = ::accept(srv_fd, nullptr, nullptr);
@@ -184,7 +187,20 @@ int main() {
                     std::string v = line.substr(colon + 1);
                     if (k == "x-api-key") x_key = v;
                     if (k == "x-signature") x_sig = v;
+                    if (k == "x-timestamp") {
+                        std::lock_guard<std::mutex> lk(hdr_mu);
+                        last_ts_hdr = v;
+                    }
                 }
+            }
+
+            if (path == "/operator/v1/ping") {
+                std::string raw_429 = "Too Many Requests";
+                std::string http_429 = "HTTP/1.1 429 Too Many Requests\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: "
+                    + std::to_string(raw_429.size()) + "\r\n\r\n" + raw_429;
+                (void)::write(cfd, http_429.data(), http_429.size());
+                ::close(cfd);
+                continue;
             }
 
             std::string st = verify_webhook_headers(x_key, x_sig, raw_body, api_key, secret);
@@ -253,15 +269,20 @@ int main() {
                     resp.set("data", data);
                 } else if (path == "/operator/v1/transaction/list") {
                     int64_t pno = body.at("pageNo").as_int(1);
-                    Json r1 = Json::object(); r1.set("betId", Json("b2btkt1"));
-                    Json r2 = Json::object(); r2.set("betId", Json("b2btkt2"));
-                    Json r3 = Json::object(); r3.set("betId", Json("b2btkt3"));
-                    Json data = Json::object();
-                    data.set("transactions", Json(pno == 1 ? Json::Array{r1, r2} : Json::Array{r3}));
-                    data.set("pageNo", Json(pno));
-                    data.set("pageSize", Json(2));
-                    data.set("total", Json(3));
-                    resp.set("data", data);
+                    if (pno == 1 && body.at("username").as_string() == "rl_user" && rl_p1_calls.fetch_add(1) == 0) {
+                        resp.set("status", Json("SC_RATE_LIMITED"));
+                        resp.set("message", Json("slow down"));
+                    } else {
+                        Json r1 = Json::object(); r1.set("betId", Json("b2btkt1"));
+                        Json r2 = Json::object(); r2.set("betId", Json("b2btkt2"));
+                        Json r3 = Json::object(); r3.set("betId", Json("b2btkt3"));
+                        Json data = Json::object();
+                        data.set("transactions", Json(pno == 1 ? Json::Array{r1, r2} : Json::Array{r3}));
+                        data.set("pageNo", Json(pno));
+                        data.set("pageSize", Json(2));
+                        data.set("total", Json(3));
+                        resp.set("data", data);
+                    }
                 } else {
                     Json rr = Json::object();
                     rr.set("outcome", Json("BANKER"));
@@ -393,6 +414,25 @@ int main() {
         client.list_unsettled_transactions(p);
     }, "s2s:unsettledNullFrom");
 
+    // v1.5.2 regressions: send_timestamp X-Timestamp, non-JSON 429 -> SC_RATE_LIMITED, list_all_transactions backoff + filters
+    Config ts_cfg{api_key, secret, Environment::Production, "http://127.0.0.1:" + std::to_string(port), 5000, true};
+    Client ts_client(ts_cfg);
+    bool caught_429 = false;
+    try {
+        ts_client.ping();
+    } catch (const ApiError& e) {
+        caught_429 = (e.http_status == 429 && e.status == StatusCode::SC_RATE_LIMITED && e.is_retryable());
+    }
+    require_true(caught_429, "s2s:nonJson429");
+    {
+        std::lock_guard<std::mutex> lk(hdr_mu);
+        require_true(last_ts_hdr.size() >= 13, "s2s:xTimestamp");
+    }
+    Json rl_filters = Json::object();
+    rl_filters.set("username", Json("rl_user"));
+    auto retried_tx = ts_client.list_all_transactions(1000, 2000, 2, rl_filters, 3, 0);
+    require_true(retried_tx.size() == 3 && rl_p1_calls.load() == 2, "s2s:listAllRateLimitRetry");
+
     stop_srv.store(true);
     ::shutdown(srv_fd, SHUT_RDWR);
     ::close(srv_fd);
@@ -454,6 +494,10 @@ int main() {
     try { Json::parse("{\"x\":\"\\uD83D\\u0041\"}"); } catch (const std::exception&) { bad_surr = true; }
     require_true(bad_surr, "json:badSurrogatePair");
     require_eq(Json::parse("{\"x\":\"\\uD83C\\uDFB2\"}").at("x").as_string(), "\xF0\x9F\x8E\xB2", "json:goodSurrogatePair");
+
+    WebhookDispatcher cred_disp(api_key, secret, wallet);
+    std::string bal_raw = bal_req.dump();
+    require_eq(cred_disp.handle("/wallet/balance", api_key, sign_body(bal_raw, secret), bal_raw).at("status").as_string(), "SC_OK", "wb:credCtor");
 
     std::cout << "C++17 SDK: ALL TESTS PASSED\n";
     return 0;
