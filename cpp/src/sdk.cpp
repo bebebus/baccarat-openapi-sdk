@@ -220,22 +220,62 @@ std::string truncate_utf8(const std::string& s, size_t max_chars) {
     return s.substr(0, i);
 }
 
+bool is_json_ws(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+bool is_valid_error_status_code(const std::string& status) {
+    static const std::set<std::string> kValidErrorCodes = {
+        StatusCode::SC_INVALID_REQUEST,
+        StatusCode::SC_AUTHENTICATION_FAILED,
+        StatusCode::SC_INVALID_SIGNATURE,
+        StatusCode::SC_INVALID_TOKEN,
+        StatusCode::SC_INVALID_GAME,
+        StatusCode::SC_USER_NOT_EXISTS,
+        StatusCode::SC_USER_DISABLED,
+        StatusCode::SC_WRONG_CURRENCY,
+        StatusCode::SC_CURRENCY_NOT_SUPPORTED,
+        StatusCode::SC_INSUFFICIENT_FUNDS,
+        StatusCode::SC_TRANSACTION_DUPLICATED,
+        StatusCode::SC_TRANSACTION_NOT_EXISTS,
+        StatusCode::SC_TRANSACTION_STILL_PROCESSING,
+        StatusCode::SC_OPERATOR_TIMEOUT,
+        StatusCode::SC_UNDER_MAINTENANCE,
+        StatusCode::SC_GAME_DISABLED,
+        StatusCode::SC_RATE_LIMITED,
+    };
+    return kValidErrorCodes.count(status) > 0;
+}
+
 std::string extract_trace_hint(const std::string& raw_body) {
     std::string head = raw_body.substr(0, (std::min<size_t>)(raw_body.size(), 1024));
-    size_t key_pos = head.find("\"traceId\"");
-    if (key_pos == std::string::npos) return "";
-    size_t colon = head.find(':', key_pos + 9);
-    if (colon == std::string::npos) return "";
-    size_t q1 = head.find('"', colon + 1);
-    if (q1 == std::string::npos) return "";
-    size_t q2 = q1 + 1;
-    while (q2 < head.size() && head[q2] != '"' && (q2 - q1 - 1) < 128) {
-        unsigned char c = static_cast<unsigned char>(head[q2]);
-        if (!(std::isalnum(c) || c == '_' || c == '-' || c == '.' || c == ':')) return "";
-        ++q2;
+    size_t search_from = 0;
+    while (search_from < head.size()) {
+        size_t key_pos = head.find("\"traceId\"", search_from);
+        if (key_pos == std::string::npos) return "";
+        size_t pos = key_pos + 9;
+        search_from = pos;
+        while (pos < head.size() && is_json_ws(head[pos])) ++pos;
+        if (pos >= head.size() || head[pos] != ':') continue;
+        ++pos;
+        while (pos < head.size() && is_json_ws(head[pos])) ++pos;
+        if (pos >= head.size() || head[pos] != '"') continue;
+        size_t q1 = pos;
+        size_t q2 = q1 + 1;
+        bool valid = true;
+        while (q2 < head.size() && head[q2] != '"' && (q2 - q1 - 1) < 128) {
+            unsigned char c = static_cast<unsigned char>(head[q2]);
+            bool is_ascii_alnum = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+            if (!(is_ascii_alnum || c == '_' || c == '-' || c == '.' || c == ':')) {
+                valid = false;
+                break;
+            }
+            ++q2;
+        }
+        if (!valid || q2 >= head.size() || head[q2] != '"' || q2 == q1 + 1) continue;
+        return head.substr(q1 + 1, q2 - q1 - 1);
     }
-    if (q2 >= head.size() || head[q2] != '"') return "";
-    return head.substr(q1 + 1, q2 - q1 - 1);
+    return "";
 }
 
 Json make_err_json(const std::string& trace_id, const std::string& status, const std::string& msg) {
@@ -697,18 +737,6 @@ Json Client::get_wallet_transaction_status(Json params) const {
 }
 
 namespace {
-bool equals_ascii_icase(const std::string& a, const char* b) {
-    size_t i = 0;
-    for (; i < a.size() && b[i] != '\0'; ++i) {
-        unsigned char ca = static_cast<unsigned char>(a[i]);
-        unsigned char cb = static_cast<unsigned char>(b[i]);
-        if (ca >= 'a' && ca <= 'z') ca = static_cast<unsigned char>(ca - ('a' - 'A'));
-        if (cb >= 'a' && cb <= 'z') cb = static_cast<unsigned char>(cb - ('a' - 'A'));
-        if (ca != cb) return false;
-    }
-    return i == a.size() && b[i] == '\0';
-}
-
 bool is_valid_non_negative_decimal(const std::string& s) {
     if (s.empty()) return false;
     bool seen_dot = false;
@@ -763,10 +791,10 @@ Json wallet_error(
     const std::string& message
 ) {
     std::string st = trim(status);
-    if (st.empty() || equals_ascii_icase(st, StatusCode::SC_OK)) {
+    if (!is_valid_error_status_code(st)) {
         throw SdkError(
             "INVALID_ARGUMENT",
-            "wallet_error status must be a non-empty error status code (cannot be SC_OK)"
+            "wallet_error status must be a valid non-SC_OK operator error StatusCode"
         );
     }
     Json r = Json::object();
@@ -1055,13 +1083,15 @@ Json WebhookDispatcher::handle(
         if (ends_with(clean, "/wallet/adjustment")) return wallet_.on_adjustment(parsed);
         return make_err_json(trace_id, StatusCode::SC_INVALID_REQUEST, "Unknown route");
     } catch (const SdkError& e) {
-        if (e.code.rfind("SC_", 0) == 0) {
-            return make_err_json(trace_id, e.code, e.what());
-        }
-        if (e.code == "INVALID_DECIMAL_AMOUNT"
-            || e.code == "DECIMAL_PRECISION_EXCEEDED"
-            || e.code == "NEGATIVE_DECIMAL_FORBIDDEN") {
-            return make_err_json(trace_id, StatusCode::SC_INVALID_REQUEST, e.what());
+        if (dynamic_cast<const ApiError*>(&e) == nullptr) {
+            if (is_valid_error_status_code(e.code)) {
+                return make_err_json(trace_id, e.code, e.what());
+            }
+            if (e.code == "INVALID_DECIMAL_AMOUNT"
+                || e.code == "DECIMAL_PRECISION_EXCEEDED"
+                || e.code == "NEGATIVE_DECIMAL_FORBIDDEN") {
+                return make_err_json(trace_id, StatusCode::SC_INVALID_REQUEST, e.what());
+            }
         }
         return make_err_json(trace_id, StatusCode::SC_OPERATOR_TIMEOUT, "Temporary wallet handler error");
     } catch (const std::exception&) {

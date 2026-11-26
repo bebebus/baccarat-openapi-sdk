@@ -401,7 +401,11 @@ class TestBaccaratPythonSdk(unittest.TestCase):
             redir_srv.shutdown()
             redir_srv.server_close()
 
-        # 6. v1.5.7 regressions: deadlock & internal SdkError safety, HTTPError read failure, UNSET/None null clearing, wallet helpers
+        # 6. v1.5.8 regressions: deadlock, S2S ApiError & allowlist SdkError safety, ASCII decimal regex, HTTPError read failure, UNSET/None null clearing, wallet helpers
+        with self.assertRaises(BaccaratSdkError) as ctx_unicode_dec:
+            decimal_to_ledger_units("\u0661\u0660\u0660.\u0660\u0660", 2)
+        self.assertEqual(ctx_unicode_dec.exception.code, "INVALID_DECIMAL_AMOUNT")
+
         class DeadlockWallet:
             def on_balance(self, req: dict) -> dict:
                 raise BaccaratSdkError("explicit sdk err", StatusCode.SC_INSUFFICIENT_FUNDS)
@@ -411,10 +415,24 @@ class TestBaccaratPythonSdk(unittest.TestCase):
                 return wallet_ok(req.get("traceId", ""), "p1", "USD", "100.00")
 
             def on_bet_result(self, req: dict) -> dict:
-                if req.get("mode") == "bad_balance":
+                mode = req.get("mode")
+                if mode == "bad_balance":
                     return wallet_ok(req.get("traceId", ""), "p1", "USD", "-1.00")
-                if req.get("mode") == "nan_balance":
+                if mode == "nan_balance":
                     return wallet_ok(req.get("traceId", ""), "p1", "USD", "NaN")
+                if mode == "s2s_api_err":
+                    raise BaccaratApiError(
+                        StatusCode.SC_INVALID_REQUEST,
+                        "upstream S2S failure secret detail",
+                        trace_id="t_upstream_s2s",
+                        http_status=400,
+                    )
+                if mode == "sdk_sc_ok":
+                    raise BaccaratSdkError("bogus SC_OK error", StatusCode.SC_OK)
+                if mode == "sdk_sc_custom":
+                    raise BaccaratSdkError("bogus custom error", "SC_CUSTOM")
+                if mode == "sdk_sc_prefix":
+                    raise BaccaratSdkError("bogus prefix error", "SC_")
                 raise RuntimeError("ERROR: deadlock detected (40P01) on table wallets")
 
             def on_rollback(self, req: dict) -> dict:
@@ -433,7 +451,7 @@ class TestBaccaratPythonSdk(unittest.TestCase):
         self.assertNotIn("40P01", body_dl["message"])
         self.assertNotIn("deadlock", body_dl["message"])
 
-        for mode in ("bad_balance", "nan_balance"):
+        for mode in ("bad_balance", "nan_balance", "s2s_api_err", "sdk_sc_ok", "sdk_sc_custom", "sdk_sc_prefix"):
             bb_raw = json.dumps({"traceId": f"t_py_{mode}", "mode": mode}).encode("utf-8")
             st_bb, body_bb = dl_disp.handle("/wallet/bet_result", api_key, sign_body(bb_raw, secret), bb_raw)
             self.assertEqual(st_bb, 200)
@@ -442,6 +460,8 @@ class TestBaccaratPythonSdk(unittest.TestCase):
             self.assertEqual(body_bb["message"], "Temporary wallet handler error")
             self.assertNotIn("wallet_ok", body_bb["message"])
             self.assertNotIn("INVALID_ARGUMENT", body_bb["message"])
+            self.assertNotIn("upstream", body_bb["message"])
+            self.assertNotIn("bogus", body_bb["message"])
 
         for bad_amt in ("not_a_number", "1.123456", "-5.00"):
             bd_raw = json.dumps({"traceId": "t_py_bad_dec", "amount": bad_amt}).encode("utf-8")
@@ -466,7 +486,7 @@ class TestBaccaratPythonSdk(unittest.TestCase):
             with self.assertRaises(BaccaratSdkError) as ctx_bal:
                 wallet_ok("t_bad", "player_1", "USD", bad_bal)
             self.assertEqual(ctx_bal.exception.code, "INVALID_ARGUMENT")
-        for bad_st in ("", "   ", StatusCode.SC_OK, " SC_OK ", "sc_ok", "Sc_Ok", " sc_ok "):
+        for bad_st in ("", "   ", StatusCode.SC_OK, " SC_OK ", "sc_ok", "Sc_Ok", " sc_ok ", "SC_", "SC_TIMEOUT", "SC_CUSTOM", "INSUFFICIENT_FUNDS"):
             with self.assertRaises(BaccaratSdkError) as ctx_st:
                 wallet_error("t_bad", bad_st, "oops")
             self.assertEqual(ctx_st.exception.code, "INVALID_ARGUMENT")

@@ -72,6 +72,30 @@ public final class BaccaratSdk {
         public static final String SC_GAME_DISABLED = "SC_GAME_DISABLED";
         public static final String SC_RATE_LIMITED = "SC_RATE_LIMITED";
 
+        private static final Set<String> VALID_ERROR_CODES = Set.of(
+                SC_INVALID_REQUEST,
+                SC_AUTHENTICATION_FAILED,
+                SC_INVALID_SIGNATURE,
+                SC_INVALID_TOKEN,
+                SC_INVALID_GAME,
+                SC_USER_NOT_EXISTS,
+                SC_USER_DISABLED,
+                SC_WRONG_CURRENCY,
+                SC_CURRENCY_NOT_SUPPORTED,
+                SC_INSUFFICIENT_FUNDS,
+                SC_TRANSACTION_DUPLICATED,
+                SC_TRANSACTION_NOT_EXISTS,
+                SC_TRANSACTION_STILL_PROCESSING,
+                SC_OPERATOR_TIMEOUT,
+                SC_UNDER_MAINTENANCE,
+                SC_GAME_DISABLED,
+                SC_RATE_LIMITED
+        );
+
+        public static boolean isValidErrorCode(String status) {
+            return status != null && VALID_ERROR_CODES.contains(status);
+        }
+
         public static boolean isRetryable(String status) {
             if (status == null) return false;
             String s = status.trim();
@@ -729,12 +753,10 @@ public final class BaccaratSdk {
 
     public static Map<String, Object> walletError(String traceId, String status, String message) {
         String st = status == null ? "" : status.trim();
-        if (st.isEmpty() || (st.length() == StatusCode.SC_OK.length()
-                && st.chars().allMatch(c -> c < 128)
-                && StatusCode.SC_OK.equalsIgnoreCase(st))) {
+        if (!StatusCode.isValidErrorCode(st)) {
             throw new SdkException(
                     "INVALID_ARGUMENT",
-                    "walletError status must be a non-empty error status code (cannot be SC_OK)"
+                    "walletError status must be a valid non-SC_OK operator error StatusCode"
             );
         }
         Map<String, Object> r = new LinkedHashMap<>();
@@ -1069,11 +1091,13 @@ public final class BaccaratSdk {
                 if (clean.endsWith("/wallet/adjustment")) return wallet.onAdjustment(parsed);
                 return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "Unknown route");
             } catch (SdkException e) {
-                if (e.code != null && e.code.startsWith("SC_")) {
-                    return makeErrEnvelope(traceId, e.code, e.getMessage());
-                }
-                if (e.code != null && INCOMING_DECIMAL_ERROR_CODES.contains(e.code)) {
-                    return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, e.getMessage());
+                if (!(e instanceof ApiException)) {
+                    if (StatusCode.isValidErrorCode(e.code)) {
+                        return makeErrEnvelope(traceId, e.code, e.getMessage());
+                    }
+                    if (e.code != null && INCOMING_DECIMAL_ERROR_CODES.contains(e.code)) {
+                        return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, e.getMessage());
+                    }
                 }
                 return makeErrEnvelope(traceId, StatusCode.SC_OPERATOR_TIMEOUT, "Temporary wallet handler error");
             } catch (Exception e) {

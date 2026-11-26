@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Zero-dependency Node.js SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.7).
+// Zero-dependency Node.js SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.8).
 
 import crypto from 'node:crypto';
 import http from 'node:http';
@@ -41,6 +41,26 @@ export const StatusCode = Object.freeze({
 const RETRYABLE_STATUSES = new Set([
   StatusCode.SC_TRANSACTION_STILL_PROCESSING,
   StatusCode.SC_OPERATOR_TIMEOUT,
+  StatusCode.SC_RATE_LIMITED,
+]);
+
+const VALID_ERROR_STATUS_CODES = new Set([
+  StatusCode.SC_INVALID_REQUEST,
+  StatusCode.SC_AUTHENTICATION_FAILED,
+  StatusCode.SC_INVALID_SIGNATURE,
+  StatusCode.SC_INVALID_TOKEN,
+  StatusCode.SC_INVALID_GAME,
+  StatusCode.SC_USER_NOT_EXISTS,
+  StatusCode.SC_USER_DISABLED,
+  StatusCode.SC_WRONG_CURRENCY,
+  StatusCode.SC_CURRENCY_NOT_SUPPORTED,
+  StatusCode.SC_INSUFFICIENT_FUNDS,
+  StatusCode.SC_TRANSACTION_DUPLICATED,
+  StatusCode.SC_TRANSACTION_NOT_EXISTS,
+  StatusCode.SC_TRANSACTION_STILL_PROCESSING,
+  StatusCode.SC_OPERATOR_TIMEOUT,
+  StatusCode.SC_UNDER_MAINTENANCE,
+  StatusCode.SC_GAME_DISABLED,
   StatusCode.SC_RATE_LIMITED,
 ]);
 
@@ -869,9 +889,9 @@ export function walletOk(traceId, username, currency, balance, timestamp = Date.
 
 export function walletError(traceId, status, message = '') {
   const st = typeof status === 'string' ? status.trim() : '';
-  if (!st || /^SC_OK$/i.test(st)) {
+  if (!VALID_ERROR_STATUS_CODES.has(st)) {
     throw new BaccaratSdkError(
-      'walletError status must be a non-empty error status code (cannot be SC_OK)',
+      'walletError status must be a valid non-SC_OK operator error StatusCode',
       'INVALID_ARGUMENT',
     );
   }
@@ -1005,9 +1025,9 @@ export class WebhookDispatcher {
       }
       return { statusCode: 200, body: responseBody };
     } catch (err) {
-      if (err instanceof BaccaratSdkError) {
+      if (err instanceof BaccaratSdkError && !(err instanceof BaccaratApiError)) {
         const code = typeof err.code === 'string' ? err.code : '';
-        if (code.startsWith('SC_')) {
+        if (VALID_ERROR_STATUS_CODES.has(code)) {
           return {
             statusCode: 200,
             body: { traceId, status: code, message: err.message },

@@ -454,7 +454,7 @@ test('WebhookDispatcher & InMemoryWallet full seamless wallet lifecycle', async 
   }
 });
 
-test('v1.5.7 regressions: deadlock & internal SdkError safety, wallet response builders', async () => {
+test('v1.5.8 regressions: deadlock, S2S ApiError & allowlist SdkError safety, wallet response builders', async () => {
   const apiKey = 'ak_0123456789abcdef0123456789abcdef';
   const secret = 'dGVzdF9zZWNyZXRfNDBfY2hhcnNfYmFzZTY0dXJsX2s';
   const deadlockWallet = {
@@ -469,6 +469,23 @@ test('v1.5.7 regressions: deadlock & internal SdkError safety, wallet response b
       }
       if (req.mode === 'nan_balance') {
         return walletOk(String(req.traceId ?? ''), 'p1', 'USD', 'NaN');
+      }
+      if (req.mode === 's2s_api_err') {
+        throw new BaccaratApiError({
+          traceId: 't_upstream_s2s',
+          status: StatusCode.SC_INVALID_REQUEST,
+          message: 'upstream S2S failure secret detail',
+          httpStatus: 400,
+        });
+      }
+      if (req.mode === 'sdk_sc_ok') {
+        throw new BaccaratSdkError('bogus SC_OK error', StatusCode.SC_OK);
+      }
+      if (req.mode === 'sdk_sc_custom') {
+        throw new BaccaratSdkError('bogus custom error', 'SC_CUSTOM');
+      }
+      if (req.mode === 'sdk_sc_prefix') {
+        throw new BaccaratSdkError('bogus prefix error', 'SC_');
       }
       throw new Error('ERROR: deadlock detected (40P01) on table wallets');
     },
@@ -485,7 +502,7 @@ test('v1.5.7 regressions: deadlock & internal SdkError safety, wallet response b
   assert.ok(!String(settleRes.body.message).includes('40P01'));
   assert.ok(!String(settleRes.body.message).includes('deadlock'));
 
-  for (const mode of ['bad_balance', 'nan_balance']) {
+  for (const mode of ['bad_balance', 'nan_balance', 's2s_api_err', 'sdk_sc_ok', 'sdk_sc_custom', 'sdk_sc_prefix']) {
     const badBalRaw = Buffer.from(JSON.stringify({ traceId: `t_${mode}`, transactionId: 'stl_bad', mode }), 'utf8');
     const badBalRes = await disp.handle('/wallet/bet_result', apiKey, signBody(badBalRaw, secret), badBalRaw);
     assert.equal(badBalRes.statusCode, 200);
@@ -494,6 +511,8 @@ test('v1.5.7 regressions: deadlock & internal SdkError safety, wallet response b
     assert.equal(badBalRes.body.message, 'Temporary wallet handler error');
     assert.ok(!String(badBalRes.body.message).includes('walletOk'));
     assert.ok(!String(badBalRes.body.message).includes('INVALID_ARGUMENT'));
+    assert.ok(!String(badBalRes.body.message).includes('upstream'));
+    assert.ok(!String(badBalRes.body.message).includes('bogus'));
   }
 
   for (const badAmt of ['not_a_number', '1.123456', '-5.00']) {
@@ -522,7 +541,7 @@ test('v1.5.7 regressions: deadlock & internal SdkError safety, wallet response b
       (e) => e instanceof BaccaratSdkError && e.code === 'INVALID_ARGUMENT',
     );
   }
-  for (const badStatus of ['', '   ', StatusCode.SC_OK, ' SC_OK ', 'sc_ok', 'Sc_Ok', ' sc_ok ', null, undefined]) {
+  for (const badStatus of ['', '   ', StatusCode.SC_OK, ' SC_OK ', 'sc_ok', 'Sc_Ok', ' sc_ok ', 'SC_', 'SC_TIMEOUT', 'SC_CUSTOM', 'INSUFFICIENT_FUNDS', null, undefined]) {
     assert.throws(
       () => walletError('t_bad', badStatus, 'oops'),
       (e) => e instanceof BaccaratSdkError && e.code === 'INVALID_ARGUMENT',

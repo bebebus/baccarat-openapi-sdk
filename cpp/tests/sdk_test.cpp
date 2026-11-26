@@ -597,7 +597,7 @@ int main() {
     require_eq(utf8_res.at("status").as_string(), StatusCode::SC_INVALID_REQUEST, "wb:m10Utf8Status");
     require_eq(utf8_res.at("traceId").as_string(), expected_trunc, "wb:m10Utf8Truncated128Chars");
 
-    // 7. v1.5.7 regressions: deadlock & internal SdkError safety, wallet_ok/wallet_error guards, locale-independent JSON float
+    // 7. v1.5.8 regressions: deadlock, S2S ApiError & allowlist SdkError safety, wallet_ok/wallet_error guards, strict JSON ws trace hint, locale-independent JSON float
     class DeadlockWallet final : public WalletHandler {
     public:
         Json on_balance(const Json&) override { throw SdkError(StatusCode::SC_INSUFFICIENT_FUNDS, "explicit sdk err"); }
@@ -614,6 +614,18 @@ int main() {
             if (mode == "nan_balance") {
                 return wallet_ok(req.at("traceId").as_string(), "p1", "USD", "NaN");
             }
+            if (mode == "s2s_api_err") {
+                throw ApiError(StatusCode::SC_INVALID_REQUEST, "upstream S2S failure secret detail", "t_upstream_s2s", 400);
+            }
+            if (mode == "sdk_sc_ok") {
+                throw SdkError(StatusCode::SC_OK, "bogus SC_OK error");
+            }
+            if (mode == "sdk_sc_custom") {
+                throw SdkError("SC_CUSTOM", "bogus custom error");
+            }
+            if (mode == "sdk_sc_prefix") {
+                throw SdkError("SC_", "bogus prefix error");
+            }
             throw std::runtime_error("ERROR: deadlock detected (40P01) on table wallets");
         }
         Json on_rollback(const Json& req) override { return wallet_ok(req.at("traceId").as_string(), "p1", "USD", "100.00"); }
@@ -627,13 +639,15 @@ int main() {
     require_eq(dl_res.at("message").as_string(), "Temporary wallet handler error", "wb:deadlockSanitizedMsg");
     require_true(dl_res.at("message").as_string().find("40P01") == std::string::npos, "wb:deadlockNoLeak");
 
-    for (const std::string& mode : std::vector<std::string>{"bad_balance", "nan_balance"}) {
+    for (const std::string& mode : std::vector<std::string>{"bad_balance", "nan_balance", "s2s_api_err", "sdk_sc_ok", "sdk_sc_custom", "sdk_sc_prefix"}) {
         std::string bb_raw = R"({"traceId":"t_cpp_)" + mode + R"(","mode":")" + mode + R"("})";
         Json bb_res = dl_disp.handle("/wallet/bet_result", api_key, sign_body(bb_raw, secret), bb_raw);
         require_eq(bb_res.at("traceId").as_string(), "t_cpp_" + mode, "wb:internalSdkErrTrace:" + mode);
         require_eq(bb_res.at("status").as_string(), StatusCode::SC_OPERATOR_TIMEOUT, "wb:internalSdkErrStatus:" + mode);
         require_eq(bb_res.at("message").as_string(), "Temporary wallet handler error", "wb:internalSdkErrMsg:" + mode);
         require_true(bb_res.at("message").as_string().find("wallet_ok") == std::string::npos, "wb:internalSdkErrNoLeak:" + mode);
+        require_true(bb_res.at("message").as_string().find("upstream") == std::string::npos, "wb:internalSdkErrNoS2sLeak:" + mode);
+        require_true(bb_res.at("message").as_string().find("bogus") == std::string::npos, "wb:internalSdkErrNoBogusLeak:" + mode);
     }
 
     for (const std::string& bad_amt : std::vector<std::string>{"not_a_number", "1.123456", "-5.00"}) {
@@ -644,6 +658,16 @@ int main() {
 
     Json sdk_err_res = dl_disp.handle("/wallet/balance", api_key, sign_body(dl_raw, secret), dl_raw);
     require_eq(sdk_err_res.at("status").as_string(), StatusCode::SC_INSUFFICIENT_FUNDS, "wb:sdkErrPreserved");
+
+    // Strict JSON whitespace in extract_trace_hint on auth failure
+    Json bad_hint_res = dl_disp.handle("/wallet/bet", "bad_key", "bad_sig", R"({"traceId": 123, "username": "alice"})");
+    require_eq(bad_hint_res.at("status").as_string(), StatusCode::SC_AUTHENTICATION_FAILED, "wb:badHintStatus");
+    require_eq(bad_hint_res.at("traceId").as_string(), "", "wb:badHintNumericTraceIdEmpty");
+    Json fake_key_res = dl_disp.handle("/wallet/bet", "bad_key", "bad_sig", R"({"a": "traceId", "b": "evil"})");
+    require_eq(fake_key_res.at("status").as_string(), StatusCode::SC_AUTHENTICATION_FAILED, "wb:fakeKeyStatus");
+    require_eq(fake_key_res.at("traceId").as_string(), "", "wb:fakeKeyValueTraceIdEmpty");
+    Json real_after_fake = dl_disp.handle("/wallet/bet", "bad_key", "bad_sig", R"({"a": "traceId", "traceId": "t_real_1"})");
+    require_eq(real_after_fake.at("traceId").as_string(), "t_real_1", "wb:realAfterFakeTraceId");
 
     Json ok_env = wallet_ok("t_ok", "player_1", "JPY", "0");
     require_eq(ok_env.at("status").as_string(), StatusCode::SC_OK, "wallet_ok:status");
@@ -662,7 +686,7 @@ int main() {
         }
         require_true(threw, "wallet_ok:rejectBadBalance:" + bad_bal);
     }
-    for (const std::string& bad_st : std::vector<std::string>{"", "   ", StatusCode::SC_OK, " SC_OK ", "sc_ok", "Sc_Ok", " sc_ok "}) {
+    for (const std::string& bad_st : std::vector<std::string>{"", "   ", StatusCode::SC_OK, " SC_OK ", "sc_ok", "Sc_Ok", " sc_ok ", "SC_", "SC_TIMEOUT", "SC_CUSTOM", "INSUFFICIENT_FUNDS"}) {
         bool threw = false;
         try {
             (void)wallet_error("t_bad", bad_st, "oops");

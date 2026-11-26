@@ -555,7 +555,7 @@ public final class SdkTestRunner {
             rlSrv.stop(0);
         }
 
-        // 5. v1.5.7 regressions: deadlock, internal SdkException & sneaky-thrown checked exceptions -> SC_OPERATOR_TIMEOUT sanitized & walletOk/walletError guards
+        // 5. v1.5.8 regressions: deadlock, S2S ApiException, allowlist SdkException & sneaky-thrown checked exceptions -> SC_OPERATOR_TIMEOUT sanitized & walletOk/walletError guards
         BaccaratSdk.WalletHandler deadlockWallet = new BaccaratSdk.WalletHandler() {
             @Override public Map<String, Object> onBalance(Map<String, Object> req) {
                 throw new BaccaratSdk.SdkException(BaccaratSdk.StatusCode.SC_INSUFFICIENT_FUNDS, "explicit sdk err");
@@ -572,6 +572,24 @@ public final class SdkTestRunner {
                 }
                 if ("nan_balance".equals(mode)) {
                     return BaccaratSdk.walletOk(String.valueOf(req.get("traceId")), "p1", "USD", "NaN");
+                }
+                if ("s2s_api_err".equals(mode)) {
+                    throw new BaccaratSdk.ApiException(
+                            BaccaratSdk.StatusCode.SC_INVALID_REQUEST,
+                            "upstream S2S failure secret detail",
+                            "t_upstream_s2s",
+                            null,
+                            400
+                    );
+                }
+                if ("sdk_sc_ok".equals(mode)) {
+                    throw new BaccaratSdk.SdkException(BaccaratSdk.StatusCode.SC_OK, "bogus SC_OK error");
+                }
+                if ("sdk_sc_custom".equals(mode)) {
+                    throw new BaccaratSdk.SdkException("SC_CUSTOM", "bogus custom error");
+                }
+                if ("sdk_sc_prefix".equals(mode)) {
+                    throw new BaccaratSdk.SdkException("SC_", "bogus prefix error");
                 }
                 throw new RuntimeException("ERROR: deadlock detected (40P01) on table wallets");
             }
@@ -591,13 +609,15 @@ public final class SdkTestRunner {
         checkEq(dlResp.get("message"), "Temporary wallet handler error", "wb:deadlockSanitizedMsg");
         check(!String.valueOf(dlResp.get("message")).contains("40P01"), "wb:deadlockNoSqlLeak");
 
-        for (String mode : new String[]{"bad_balance", "nan_balance"}) {
+        for (String mode : new String[]{"bad_balance", "nan_balance", "s2s_api_err", "sdk_sc_ok", "sdk_sc_custom", "sdk_sc_prefix"}) {
             byte[] bbRaw = ("{\"traceId\":\"t_java_" + mode + "\",\"mode\":\"" + mode + "\"}").getBytes(StandardCharsets.UTF_8);
             Map<String, Object> bbResp = dlDisp.handle("/wallet/bet_result", apiKey, BaccaratSdk.signBody(bbRaw, secret), bbRaw);
             checkEq(bbResp.get("traceId"), "t_java_" + mode, "wb:internalSdkErrTrace:" + mode);
             checkEq(bbResp.get("status"), BaccaratSdk.StatusCode.SC_OPERATOR_TIMEOUT, "wb:internalSdkErrStatus:" + mode);
             checkEq(bbResp.get("message"), "Temporary wallet handler error", "wb:internalSdkErrMsg:" + mode);
             check(!String.valueOf(bbResp.get("message")).contains("walletOk"), "wb:internalSdkErrNoLeak:" + mode);
+            check(!String.valueOf(bbResp.get("message")).contains("upstream"), "wb:internalSdkErrNoS2sLeak:" + mode);
+            check(!String.valueOf(bbResp.get("message")).contains("bogus"), "wb:internalSdkErrNoBogusLeak:" + mode);
         }
 
         for (String badAmt : new String[]{"not_a_number", "1.123456", "-5.00"}) {
@@ -633,7 +653,7 @@ public final class SdkTestRunner {
             }
             check(threw, "walletOk:rejectBadBalance:" + badBal);
         }
-        for (String badSt : new String[]{null, "", "   ", BaccaratSdk.StatusCode.SC_OK, " SC_OK ", "sc_ok", "Sc_Ok", " sc_ok "}) {
+        for (String badSt : new String[]{null, "", "   ", BaccaratSdk.StatusCode.SC_OK, " SC_OK ", "sc_ok", "Sc_Ok", " sc_ok ", "SC_", "SC_TIMEOUT", "SC_CUSTOM", "INSUFFICIENT_FUNDS"}) {
             boolean threw = false;
             try {
                 BaccaratSdk.walletError("t_bad", badSt, "oops");

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.7)."""
+"""Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.8)."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ MAX_HTTP_RESPONSE_BYTES = 16 * 1024 * 1024  # 16 MiB
 LEDGER_SCALE = 1000
 
 _HEX64_RE = re.compile(r"^[0-9a-fA-F]{64}$")
-_DECIMAL_RE = re.compile(r"^(-?)(\d+)(?:\.(\d+))?$")
+_DECIMAL_RE = re.compile(r"^(-?)([0-9]+)(?:\.([0-9]+))?$")
 _TRACE_HINT_RE = re.compile(rb'"traceId"\s*:\s*"([A-Za-z0-9_.:-]{1,128})"')
 
 
@@ -65,6 +65,28 @@ _RETRYABLE_STATUSES = frozenset(
     {
         StatusCode.SC_TRANSACTION_STILL_PROCESSING,
         StatusCode.SC_OPERATOR_TIMEOUT,
+        StatusCode.SC_RATE_LIMITED,
+    }
+)
+
+_VALID_ERROR_STATUS_CODES = frozenset(
+    {
+        StatusCode.SC_INVALID_REQUEST,
+        StatusCode.SC_AUTHENTICATION_FAILED,
+        StatusCode.SC_INVALID_SIGNATURE,
+        StatusCode.SC_INVALID_TOKEN,
+        StatusCode.SC_INVALID_GAME,
+        StatusCode.SC_USER_NOT_EXISTS,
+        StatusCode.SC_USER_DISABLED,
+        StatusCode.SC_WRONG_CURRENCY,
+        StatusCode.SC_CURRENCY_NOT_SUPPORTED,
+        StatusCode.SC_INSUFFICIENT_FUNDS,
+        StatusCode.SC_TRANSACTION_DUPLICATED,
+        StatusCode.SC_TRANSACTION_NOT_EXISTS,
+        StatusCode.SC_TRANSACTION_STILL_PROCESSING,
+        StatusCode.SC_OPERATOR_TIMEOUT,
+        StatusCode.SC_UNDER_MAINTENANCE,
+        StatusCode.SC_GAME_DISABLED,
         StatusCode.SC_RATE_LIMITED,
     }
 )
@@ -806,9 +828,9 @@ def wallet_ok(
 
 def wallet_error(trace_id: str, status: str, message: Optional[str] = None) -> Dict[str, Any]:
     st = status.strip() if isinstance(status, str) else ""
-    if not st or (st.isascii() and st.upper() == StatusCode.SC_OK):
+    if st not in _VALID_ERROR_STATUS_CODES:
         raise BaccaratSdkError(
-            "wallet_error status must be a non-empty error status code (cannot be SC_OK)",
+            "wallet_error status must be a valid non-SC_OK operator error StatusCode",
             "INVALID_ARGUMENT",
         )
     out: Dict[str, Any] = {
@@ -1144,11 +1166,12 @@ class WebhookDispatcher:
                 return 200, adj_fn(parsed)
             return 200, {"traceId": trace_id, "status": StatusCode.SC_INVALID_REQUEST, "message": f"Unknown route {clean}"}
         except BaccaratSdkError as exc:
-            code = exc.code if isinstance(exc.code, str) else ""
-            if code.startswith("SC_"):
-                return 200, {"traceId": trace_id, "status": code, "message": str(exc)}
-            if code in _INCOMING_DECIMAL_ERROR_CODES:
-                return 200, {"traceId": trace_id, "status": StatusCode.SC_INVALID_REQUEST, "message": str(exc)}
+            if not isinstance(exc, BaccaratApiError):
+                code = exc.code if isinstance(exc.code, str) else ""
+                if code in _VALID_ERROR_STATUS_CODES:
+                    return 200, {"traceId": trace_id, "status": code, "message": str(exc)}
+                if code in _INCOMING_DECIMAL_ERROR_CODES:
+                    return 200, {"traceId": trace_id, "status": StatusCode.SC_INVALID_REQUEST, "message": str(exc)}
             return 200, {
                 "traceId": trace_id,
                 "status": StatusCode.SC_OPERATOR_TIMEOUT,

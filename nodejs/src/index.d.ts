@@ -89,6 +89,22 @@ export class Config {
   });
 }
 
+export interface TableCatalogItem {
+  tableId: string;
+  gameCode: string;
+  tableName: string;
+  gameType: string;
+  currency: string;
+  status: string;
+  minBet: string | null;
+  maxBet: string | null;
+  chipUnit: string | null;
+  languages: string[];
+  platforms: string[];
+  coverImageUrl: string | null;
+  [key: string]: unknown;
+}
+
 export class Client {
   readonly config: Config;
   constructor(config: Config | ConstructorParameters<typeof Config>[0], opts?: { transport?: Function });
@@ -124,7 +140,7 @@ export class Client {
     currency?: string | null;
     pageNo?: number | null;
     pageSize?: number | null;
-  }): Promise<{ traceId: string; status: 'SC_OK'; data: { tables: Array<Record<string, unknown>>; pageNo: number; pageSize: number; total: number } }>;
+  }): Promise<{ traceId: string; status: 'SC_OK'; data: { tables: TableCatalogItem[]; pageNo: number; pageSize: number; total: number } }>;
   terminateSessions(params?: {
     traceId?: string;
     username?: string | null;

@@ -5,7 +5,7 @@
 ## 安装、编译与单测
 
 ```bash
-git clone --branch v1.5.7 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
+git clone --branch v1.5.8 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
 cd baccarat-openapi-sdk/java
 bash run-tests.sh          # 零 Maven 依赖直接编译并运行全部单测
 # 或安装至本地 ~/.m2：mvn install
@@ -58,27 +58,28 @@ import cloud.cniia.baccarat.sdk.BaccaratSdk;
 import cloud.cniia.baccarat.sdk.BaccaratSdk.*;
 import cloud.cniia.baccarat.sdk.JsonCodec;
 import java.util.Map;
+import java.util.Objects;
 
 WalletHandler dbWallet = new WalletHandler() {
     @Override public Map<String, Object> onBalance(Map<String, Object> req) {
         // 只读余额查询
-        return BaccaratSdk.walletOk(String.valueOf(req.get("traceId")), String.valueOf(req.get("username")), String.valueOf(req.get("currency")), "1000.00");
+        return BaccaratSdk.walletOk(Objects.toString(req.get("traceId"), ""), Objects.toString(req.get("username"), ""), Objects.toString(req.get("currency"), ""), "1000.00");
     }
     @Override public Map<String, Object> onBet(Map<String, Object> req) {
         // 按 transactionId 幂等扣款
-        return BaccaratSdk.walletOk(String.valueOf(req.get("traceId")), String.valueOf(req.get("username")), String.valueOf(req.get("currency")), "900.00");
+        return BaccaratSdk.walletOk(Objects.toString(req.get("traceId"), ""), Objects.toString(req.get("username"), ""), Objects.toString(req.get("currency"), ""), "900.00");
     }
     @Override public Map<String, Object> onBetResult(Map<String, Object> req) {
         // 已扣款注单忽略会话过期放行派彩
-        return BaccaratSdk.walletOk(String.valueOf(req.get("traceId")), String.valueOf(req.get("username")), String.valueOf(req.get("currency")), "1100.00");
+        return BaccaratSdk.walletOk(Objects.toString(req.get("traceId"), ""), Objects.toString(req.get("username"), ""), Objects.toString(req.get("currency"), ""), "1100.00");
     }
     @Override public Map<String, Object> onRollback(Map<String, Object> req) {
         // 未扣成返回 BaccaratSdk.walletError(traceId, StatusCode.SC_TRANSACTION_NOT_EXISTS, "never deducted")
-        return BaccaratSdk.walletOk(String.valueOf(req.get("traceId")), String.valueOf(req.get("username")), String.valueOf(req.get("currency")), "1000.00");
+        return BaccaratSdk.walletOk(Objects.toString(req.get("traceId"), ""), Objects.toString(req.get("username"), ""), Objects.toString(req.get("currency"), ""), "1000.00");
     }
     @Override public Map<String, Object> onAdjustment(Map<String, Object> req) {
         // CREDIT / DEBIT 调账
-        return BaccaratSdk.walletOk(String.valueOf(req.get("traceId")), String.valueOf(req.get("username")), String.valueOf(req.get("currency")), "1020.00");
+        return BaccaratSdk.walletOk(Objects.toString(req.get("traceId"), ""), Objects.toString(req.get("username"), ""), Objects.toString(req.get("currency"), ""), "1020.00");
     }
 };
 

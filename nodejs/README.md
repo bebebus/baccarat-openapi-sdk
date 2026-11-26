@@ -9,7 +9,7 @@
 - 引入方式（本 SDK 通过 Git 仓库分发，未发布至 npm 公共注册表）：
 
 ```bash
-git clone --branch v1.5.7 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
+git clone --branch v1.5.8 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
 npm install ./baccarat-openapi-sdk/nodejs
 ```
 
@@ -21,8 +21,8 @@ npm install ./baccarat-openapi-sdk/nodejs
 import { Client, Config, Environment } from '@bebebus/baccarat-openapi-sdk';
 
 const config = new Config({
-  apiKey: process.env.B2B_API_KEY,
-  hmacSecret: process.env.B2B_SECRET, // 43 字符原始字符串，SDK 直接按 UTF-8 编码签名，切勿 Base64 解码
+  apiKey: process.env.B2B_API_KEY ?? '',
+  hmacSecret: process.env.B2B_SECRET ?? '', // 43 字符原始字符串，SDK 直接按 UTF-8 编码签名，切勿 Base64 解码
   environment: Environment.SANDBOX,   // 正式环境请传 Environment.PRODUCTION 并指定 baseUrl
   // sendTimestamp: true,             // 可选：附加 X-Timestamp 防重放请求头（±300s）
 });
@@ -78,7 +78,7 @@ const dbWallet = {
 };
 
 const dispatcher = new WebhookDispatcher(
-  { apiKey: process.env.B2B_API_KEY, hmacSecret: process.env.B2B_SECRET },
+  { apiKey: process.env.B2B_API_KEY ?? '', hmacSecret: process.env.B2B_SECRET ?? '' },
   dbWallet,
 );
 

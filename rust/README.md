@@ -9,7 +9,7 @@
 
 ```toml
 [dependencies]
-baccarat-openapi-sdk = { git = "https://github.com/bebebus/baccarat-openapi-sdk", tag = "v1.5.7" }
+baccarat-openapi-sdk = { git = "https://github.com/bebebus/baccarat-openapi-sdk", tag = "v1.5.8" }
 ```
 
 - 单测命令：`cd rust && cargo test`
@@ -84,5 +84,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 1. **4 路并发（不按玩家串行）**：平台按单商户最多 4 路并发推送回调，请对玩家钱包行使用 `SELECT ... FOR UPDATE` 或原子 `UPDATE ... SET balance = balance + delta` + `UNIQUE(transaction_id)`。
 2. **多注同局每张注单均带 `isEndRound: 1`**：切勿收到首张 `isEndRound: 1` 即终结局级状态，必须按 `betId` / `transactionId` 逐票入账。
-3. **终态拦截与 `~5.07h` 重试窗口**：返回 `HTTP 200` 非 JSON 或无瞬态 `SC_*` 的非 2xx JSON 会使 `/wallet/bet_result` 立即挂起 `HELD` 且 0 次重试；瞬态错误按 **1 次首次 + 12 次自动重试（约 `5.07h`）** 退避重试（`WebhookDispatcher` 已内置 `catch_unwind`，将未捕获 panic 映射为 `SC_OPERATOR_TIMEOUT`）。
+3. **终态拦截与 `~5.07h` 重试窗口**：返回 `HTTP 200` 非 JSON 或无瞬态 `SC_*` 的非 2xx JSON 会使 `/wallet/bet_result` 立即挂起 `HELD` 且 0 次重试；瞬态错误按 **1 次首次 + 12 次自动重试（约 `5.07h`）** 退避重试（`WebhookDispatcher` 已内置 `catch_unwind`，将未捕获 panic 映射为 `SC_OPERATOR_TIMEOUT`；注意 panic 隔离要求保持默认 `panic = "unwind"`，切勿在 `[profile.release]` 中配置 `panic = "abort"`）。
 4. **0 位小数币种（如 `JPY`）零值为 `"0"`**：切勿用 `== "0.00"` 判零，请使用 `decimal_to_ledger_units(...) == Ok(0)` 比较。

@@ -123,17 +123,19 @@ final class WebhookDispatcher
                 'body' => ['traceId' => $traceId, 'status' => StatusCode::SC_INVALID_REQUEST, 'message' => "Unknown route {$clean}"],
             ];
         } catch (BaccaratSdkException $e) {
-            if (str_starts_with($e->errorCode, 'SC_')) {
-                return [
-                    'statusCode' => 200,
-                    'body' => ['traceId' => $traceId, 'status' => $e->errorCode, 'message' => $e->getMessage()],
-                ];
-            }
-            if (in_array($e->errorCode, self::INCOMING_DECIMAL_ERROR_CODES, true)) {
-                return [
-                    'statusCode' => 200,
-                    'body' => ['traceId' => $traceId, 'status' => StatusCode::SC_INVALID_REQUEST, 'message' => $e->getMessage()],
-                ];
+            if (!($e instanceof BaccaratApiException)) {
+                if (StatusCode::isValidErrorCode($e->errorCode)) {
+                    return [
+                        'statusCode' => 200,
+                        'body' => ['traceId' => $traceId, 'status' => $e->errorCode, 'message' => $e->getMessage()],
+                    ];
+                }
+                if (in_array($e->errorCode, self::INCOMING_DECIMAL_ERROR_CODES, true)) {
+                    return [
+                        'statusCode' => 200,
+                        'body' => ['traceId' => $traceId, 'status' => StatusCode::SC_INVALID_REQUEST, 'message' => $e->getMessage()],
+                    ];
+                }
             }
             return [
                 'statusCode' => 200,

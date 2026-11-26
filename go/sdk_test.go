@@ -658,10 +658,14 @@ func TestV155NullClearingBuildersAndPanicSafety(t *testing.T) {
 	if errResp.Status != SC_INSUFFICIENT_FUNDS || errResp.Message != "low balance" {
 		t.Fatalf("WalletError unexpected: %+v", errResp)
 	}
-	for _, badStatus := range []string{"", "   ", SC_OK, " SC_OK ", "sc_ok", "Sc_Ok", " sc_ok "} {
+	for _, badStatus := range []string{"", "   ", SC_OK, " SC_OK ", "sc_ok", "Sc_Ok", " sc_ok ", "SC_", "SC_TIMEOUT", "SC_CUSTOM", "INSUFFICIENT_FUNDS"} {
 		coerced := WalletError("t_coerce", badStatus, "guarded")
-		if coerced.Status != SC_INVALID_REQUEST {
-			t.Fatalf("WalletError(%q) expected coerced SC_INVALID_REQUEST, got %+v", badStatus, coerced)
+		if coerced.Status != SC_OPERATOR_TIMEOUT || coerced.Message != "Temporary wallet handler error" {
+			t.Fatalf("WalletError(%q) expected coerced retryable SC_OPERATOR_TIMEOUT, got %+v", badStatus, coerced)
+		}
+		coercedEmpty := WalletError("t_coerce_empty", badStatus, "")
+		if coercedEmpty.Status != SC_OPERATOR_TIMEOUT || coercedEmpty.Message != "Temporary wallet handler error" {
+			t.Fatalf("WalletError(%q, empty) expected coerced retryable SC_OPERATOR_TIMEOUT, got %+v", badStatus, coercedEmpty)
 		}
 	}
 	for _, badBal := range []string{"", "   ", "-1.00", "abc", "10.", ".5", "10.00 "} {

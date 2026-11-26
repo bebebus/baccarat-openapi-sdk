@@ -25,6 +25,32 @@ final class StatusCode
     public const SC_GAME_DISABLED = 'SC_GAME_DISABLED';
     public const SC_RATE_LIMITED = 'SC_RATE_LIMITED';
 
+    /** @var list<string> */
+    public const VALID_ERROR_CODES = [
+        self::SC_INVALID_REQUEST,
+        self::SC_AUTHENTICATION_FAILED,
+        self::SC_INVALID_SIGNATURE,
+        self::SC_INVALID_TOKEN,
+        self::SC_INVALID_GAME,
+        self::SC_USER_NOT_EXISTS,
+        self::SC_USER_DISABLED,
+        self::SC_WRONG_CURRENCY,
+        self::SC_CURRENCY_NOT_SUPPORTED,
+        self::SC_INSUFFICIENT_FUNDS,
+        self::SC_TRANSACTION_DUPLICATED,
+        self::SC_TRANSACTION_NOT_EXISTS,
+        self::SC_TRANSACTION_STILL_PROCESSING,
+        self::SC_OPERATOR_TIMEOUT,
+        self::SC_UNDER_MAINTENANCE,
+        self::SC_GAME_DISABLED,
+        self::SC_RATE_LIMITED,
+    ];
+
+    public static function isValidErrorCode(string $status): bool
+    {
+        return in_array($status, self::VALID_ERROR_CODES, true);
+    }
+
     public static function isRetryable(string $status): bool
     {
         $trimmed = trim($status);

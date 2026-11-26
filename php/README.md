@@ -5,11 +5,11 @@
 ## 安装与单测
 
 ```bash
-git clone --branch v1.5.7 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
+git clone --branch v1.5.8 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
 cd baccarat-openapi-sdk/php && php tests/run.php
 ```
 
-在项目 `composer.json` 中使用 `path` 仓库引入（本 SDK 未发布至 Packagist；若直接拷贝/vendor `php/` 目录且不包含 `.git` 目录，请在 `php/composer.json` 中补充 `"version": "1.5.7"` 字段，以便 Composer 解析版本约束）：
+在项目 `composer.json` 中使用 `path` 仓库引入（本 SDK 未发布至 Packagist；若直接拷贝/vendor `php/` 目录且不包含 `.git` 目录，请在 `php/composer.json` 中补充 `"version": "1.5.8"` 字段，以便 Composer 解析版本约束）：
 
 ```json
 {
@@ -78,11 +78,11 @@ use Bebebus\BaccaratSdk\WebhookDispatcher;
 
 final class DbWalletHandler implements WalletHandlerInterface, WalletAdjustmentHandlerInterface
 {
-    public function onBalance(array $req): array { /* 查询数据库只读余额 */ return WalletResponse::ok((string) ($req['traceId'] ?? ''), (string) $req['username'], (string) $req['currency'], '1000.00'); }
-    public function onBet(array $req): array { /* 按 transactionId 幂等扣款 */ return WalletResponse::ok((string) ($req['traceId'] ?? ''), (string) $req['username'], (string) $req['currency'], '900.00'); }
-    public function onBetResult(array $req): array { /* 按 transactionId 幂等派彩（忽略会话过期） */ return WalletResponse::ok((string) ($req['traceId'] ?? ''), (string) $req['username'], (string) $req['currency'], '1100.00'); }
-    public function onRollback(array $req): array { /* 按 transactionId 冲正（未扣成返回 SC_TRANSACTION_NOT_EXISTS） */ return WalletResponse::ok((string) ($req['traceId'] ?? ''), (string) $req['username'], (string) $req['currency'], '1000.00'); }
-    public function onAdjustment(array $req): array { /* 按 transactionId 幂等执行 CREDIT/DEBIT 调账 */ return WalletResponse::ok((string) ($req['traceId'] ?? ''), (string) $req['username'], (string) $req['currency'], '1020.00'); }
+    public function onBalance(array $req): array { /* 查询数据库只读余额 */ return WalletResponse::ok((string) ($req['traceId'] ?? ''), (string) ($req['username'] ?? ''), (string) ($req['currency'] ?? ''), '1000.00'); }
+    public function onBet(array $req): array { /* 按 transactionId 幂等扣款 */ return WalletResponse::ok((string) ($req['traceId'] ?? ''), (string) ($req['username'] ?? ''), (string) ($req['currency'] ?? ''), '900.00'); }
+    public function onBetResult(array $req): array { /* 按 transactionId 幂等派彩（忽略会话过期） */ return WalletResponse::ok((string) ($req['traceId'] ?? ''), (string) ($req['username'] ?? ''), (string) ($req['currency'] ?? ''), '1100.00'); }
+    public function onRollback(array $req): array { /* 按 transactionId 冲正（未扣成返回 SC_TRANSACTION_NOT_EXISTS） */ return WalletResponse::ok((string) ($req['traceId'] ?? ''), (string) ($req['username'] ?? ''), (string) ($req['currency'] ?? ''), '1000.00'); }
+    public function onAdjustment(array $req): array { /* 按 transactionId 幂等执行 CREDIT/DEBIT 调账 */ return WalletResponse::ok((string) ($req['traceId'] ?? ''), (string) ($req['username'] ?? ''), (string) ($req['currency'] ?? ''), '1020.00'); }
 }
 
 $rawBody = (string) file_get_contents('php://input');

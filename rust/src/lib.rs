@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.7).
+//! Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.8).
 
 pub mod crypto;
 mod curl_ffi;
@@ -54,6 +54,29 @@ pub fn is_retryable_status(status: &str) -> bool {
         status.trim(),
         status_code::SC_TRANSACTION_STILL_PROCESSING
             | status_code::SC_OPERATOR_TIMEOUT
+            | status_code::SC_RATE_LIMITED
+    )
+}
+
+fn is_valid_error_status_code(status: &str) -> bool {
+    matches!(
+        status,
+        status_code::SC_INVALID_REQUEST
+            | status_code::SC_AUTHENTICATION_FAILED
+            | status_code::SC_INVALID_SIGNATURE
+            | status_code::SC_INVALID_TOKEN
+            | status_code::SC_INVALID_GAME
+            | status_code::SC_USER_NOT_EXISTS
+            | status_code::SC_USER_DISABLED
+            | status_code::SC_WRONG_CURRENCY
+            | status_code::SC_CURRENCY_NOT_SUPPORTED
+            | status_code::SC_INSUFFICIENT_FUNDS
+            | status_code::SC_TRANSACTION_DUPLICATED
+            | status_code::SC_TRANSACTION_NOT_EXISTS
+            | status_code::SC_TRANSACTION_STILL_PROCESSING
+            | status_code::SC_OPERATOR_TIMEOUT
+            | status_code::SC_UNDER_MAINTENANCE
+            | status_code::SC_GAME_DISABLED
             | status_code::SC_RATE_LIMITED
     )
 }
@@ -808,19 +831,20 @@ pub fn wallet_ok(
 }
 
 /// Constructs a non-`SC_OK` wallet error response envelope.
-/// Empty/whitespace `status` or `SC_OK` (ASCII case-insensitive) is safely coerced to `SC_INVALID_REQUEST`.
+/// Empty/whitespace, `SC_OK`, or unknown `status` codes are safely coerced to retryable
+/// `SC_OPERATOR_TIMEOUT` with a sanitized fallback message so invalid responses never park settlement in `HELD`.
 pub fn wallet_error(trace_id: &str, status: &str, message: &str) -> Json {
     let st = status.trim();
-    let eff_status = if st.is_empty() || st.eq_ignore_ascii_case(status_code::SC_OK) {
-        status_code::SC_INVALID_REQUEST
+    let (eff_status, eff_msg) = if is_valid_error_status_code(st) {
+        (st, message)
     } else {
-        st
+        (status_code::SC_OPERATOR_TIMEOUT, "Temporary wallet handler error")
     };
     let mut r = Json::object();
     r.set("traceId", Json::Str(trace_id.into()));
     r.set("status", Json::Str(eff_status.into()));
-    if !message.is_empty() {
-        r.set("message", Json::Str(message.into()));
+    if !eff_msg.is_empty() {
+        r.set("message", Json::Str(eff_msg.into()));
     }
     r
 }
@@ -1257,31 +1281,43 @@ impl InMemoryWallet {
 fn extract_trace_hint(raw_body: &[u8]) -> String {
     let head = &raw_body[..raw_body.len().min(1024)];
     let s = String::from_utf8_lossy(head);
-    let Some(idx) = s.find("\"traceId\"") else {
-        return String::new();
-    };
-    let rest = &s[idx + 9..];
-    let Some(colon) = rest.find(':') else {
-        return String::new();
-    };
-    let after_colon = rest[colon + 1..].trim_start();
-    if !after_colon.starts_with('"') {
-        return String::new();
+    let bytes = s.as_bytes();
+    let is_json_ws = |b: u8| matches!(b, b' ' | b'\t' | b'\n' | b'\r');
+    let mut search_from = 0usize;
+    while search_from < s.len() {
+        let Some(rel_idx) = s[search_from..].find("\"traceId\"") else {
+            return String::new();
+        };
+        let mut pos = search_from + rel_idx + 9;
+        search_from = pos;
+        while pos < bytes.len() && is_json_ws(bytes[pos]) {
+            pos += 1;
+        }
+        if pos >= bytes.len() || bytes[pos] != b':' {
+            continue;
+        }
+        pos += 1;
+        while pos < bytes.len() && is_json_ws(bytes[pos]) {
+            pos += 1;
+        }
+        if pos >= bytes.len() || bytes[pos] != b'"' {
+            continue;
+        }
+        let val_start = pos + 1;
+        let Some(rel_end_q) = s[val_start..].find('"') else {
+            continue;
+        };
+        let candidate = &s[val_start..val_start + rel_end_q];
+        if !candidate.is_empty()
+            && candidate.len() <= 128
+            && candidate
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':'))
+        {
+            return candidate.to_string();
+        }
     }
-    let val_rest = &after_colon[1..];
-    let Some(end_q) = val_rest.find('"') else {
-        return String::new();
-    };
-    let candidate = &val_rest[..end_q];
-    if candidate.len() <= 128
-        && candidate
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':'))
-    {
-        candidate.to_string()
-    } else {
-        String::new()
-    }
+    String::new()
 }
 
 fn dispatch_webhook(
@@ -2069,7 +2105,7 @@ mod tests {
         );
         assert_eq!(out.get("data").get("balance").as_str(), Some("500.00"));
 
-        // v1.5.7 regressions: panic & wallet_ok isolation -> SC_OPERATOR_TIMEOUT, SdkError PartialEq/Eq, wallet_ok/wallet_error guards, UTF-8 lossy trace hint
+        // v1.5.8 regressions: panic & wallet_ok isolation -> SC_OPERATOR_TIMEOUT, SdkError PartialEq/Eq, wallet_ok/wallet_error allowlist guards, strict JSON whitespace & UTF-8 lossy trace hint
         assert!(decimal_to_ledger_units("0", 0, false) == Ok(0));
         assert!(decimal_to_ledger_units("0.00", 2, false) == Ok(0));
         assert_eq!(SdkError::Money("x".into()), SdkError::Money("x".into()));
@@ -2132,14 +2168,39 @@ mod tests {
         assert_eq!(err_b.get("status").as_str(), Some(status_code::SC_USER_DISABLED));
         assert_eq!(err_b.get("message").as_str(), Some("disabled"));
 
-        for bad_st in ["", "   ", status_code::SC_OK, " SC_OK ", "sc_ok", "Sc_Ok", " sc_ok "] {
+        for bad_st in [
+            "",
+            "   ",
+            status_code::SC_OK,
+            " SC_OK ",
+            "sc_ok",
+            "Sc_Ok",
+            " sc_ok ",
+            "SC_",
+            "SC_TIMEOUT",
+            "SC_CUSTOM",
+            "INSUFFICIENT_FUNDS",
+        ] {
             let coerced = wallet_error("t_coerce", bad_st, "guarded");
-            assert_eq!(coerced.get("status").as_str(), Some(status_code::SC_INVALID_REQUEST));
+            assert_eq!(coerced.get("status").as_str(), Some(status_code::SC_OPERATOR_TIMEOUT));
+            assert_eq!(coerced.get("message").as_str(), Some("Temporary wallet handler error"));
+            let coerced_empty = wallet_error("t_coerce_empty", bad_st, "");
+            assert_eq!(coerced_empty.get("status").as_str(), Some(status_code::SC_OPERATOR_TIMEOUT));
+            assert_eq!(coerced_empty.get("message").as_str(), Some("Temporary wallet handler error"));
         }
         for bad_bal in ["", "   ", "-1.00", "abc", "10.", ".5", "10.00 "] {
             let res = std::panic::catch_unwind(|| wallet_ok("t_bad", "player_1", "USD", bad_bal, None));
             assert!(res.is_err(), "expected wallet_ok({:?}) to panic", bad_bal);
         }
+
+        // Strict JSON whitespace in extract_trace_hint must reject non-string values or key-like string values
+        assert_eq!(extract_trace_hint(br#"{"traceId": 123, "username": "alice"}"#), "");
+        assert_eq!(extract_trace_hint(br#"{"a": "traceId", "b": "evil"}"#), "");
+        assert_eq!(extract_trace_hint(br#"{"a": "traceId", "traceId": "t_real_1"}"#), "t_real_1");
+        let bad_hint_res = pw_disp.handle("/wallet/bet", "bad_key", "bad_sig", br#"{"traceId": 123, "username": "alice"}"#);
+        assert_eq!(bad_hint_res.get("traceId").as_str(), Some(""));
+        let fake_key_res = pw_disp.handle("/wallet/bet", "bad_key", "bad_sig", br#"{"a": "traceId", "b": "evil"}"#);
+        assert_eq!(fake_key_res.get("traceId").as_str(), Some(""));
 
         // Multi-byte UTF-8 split at byte 1024 boundary must still extract traceId hint
         let mut split_utf8 = br#"{"traceId":"t_split_1024","pad":""#.to_vec();

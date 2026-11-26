@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Package baccarat provides a zero-dependency Go SDK for the Baccarat Live Platform
-// B2B Operator Seamless Wallet API (v1.5.7).
+// B2B Operator Seamless Wallet API (v1.5.8).
 package baccarat
 
 import (
@@ -63,6 +63,31 @@ var (
 func IsRetryableStatus(status string) bool {
 	s := strings.TrimSpace(status)
 	return s == SC_TRANSACTION_STILL_PROCESSING || s == SC_OPERATOR_TIMEOUT || s == SC_RATE_LIMITED
+}
+
+var validErrorStatusCodes = map[string]struct{}{
+	SC_INVALID_REQUEST:              {},
+	SC_AUTHENTICATION_FAILED:        {},
+	SC_INVALID_SIGNATURE:            {},
+	SC_INVALID_TOKEN:                {},
+	SC_INVALID_GAME:                 {},
+	SC_USER_NOT_EXISTS:              {},
+	SC_USER_DISABLED:                {},
+	SC_WRONG_CURRENCY:               {},
+	SC_CURRENCY_NOT_SUPPORTED:       {},
+	SC_INSUFFICIENT_FUNDS:           {},
+	SC_TRANSACTION_DUPLICATED:       {},
+	SC_TRANSACTION_NOT_EXISTS:       {},
+	SC_TRANSACTION_STILL_PROCESSING: {},
+	SC_OPERATOR_TIMEOUT:             {},
+	SC_UNDER_MAINTENANCE:            {},
+	SC_GAME_DISABLED:                {},
+	SC_RATE_LIMITED:                 {},
+}
+
+func isValidErrorStatusCode(status string) bool {
+	_, ok := validErrorStatusCodes[status]
+	return ok
 }
 
 type SdkError struct {
@@ -1083,36 +1108,20 @@ func WalletOK(traceID, username, currency, balance string, timestamp int64) Wall
 	}
 }
 
-func asciiEqualFold(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := 0; i < len(a); i++ {
-		ca, cb := a[i], b[i]
-		if ca >= 'a' && ca <= 'z' {
-			ca -= 'a' - 'A'
-		}
-		if cb >= 'a' && cb <= 'z' {
-			cb -= 'a' - 'A'
-		}
-		if ca != cb {
-			return false
-		}
-	}
-	return true
-}
-
 // WalletError builds a non-SC_OK wallet error response envelope.
-// Empty/whitespace status or SC_OK (ASCII case-insensitive) is safely coerced to SC_INVALID_REQUEST.
+// Empty/whitespace, SC_OK, or unknown status codes are safely coerced to retryable
+// SC_OPERATOR_TIMEOUT with a sanitized fallback message so invalid responses never park settlement in HELD.
 func WalletError(traceID, status, message string) WalletResponse {
 	st := strings.TrimSpace(status)
-	if st == "" || asciiEqualFold(st, SC_OK) {
-		st = SC_INVALID_REQUEST
+	msg := message
+	if !isValidErrorStatusCode(st) {
+		st = SC_OPERATOR_TIMEOUT
+		msg = "Temporary wallet handler error"
 	}
 	return WalletResponse{
 		TraceID: traceID,
 		Status:  st,
-		Message: message,
+		Message: msg,
 	}
 }
 

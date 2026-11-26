@@ -1,9 +1,9 @@
 [package]
 name = "baccarat-openapi-sdk"
-version = "1.5.7"
+version = "1.5.8"
 edition = "2021"
 license = "MIT"
-description = "Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.7)"
+description = "Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.8)"
 repository = "https://github.com/bebebus/baccarat-openapi-sdk"
 
 [lib]

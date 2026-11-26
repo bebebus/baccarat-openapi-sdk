@@ -11,7 +11,7 @@
 在仓库根目录执行编译与单测：
 
 ```bash
-git clone --branch v1.5.7 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
+git clone --branch v1.5.8 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
 cd baccarat-openapi-sdk
 cmake -S cpp -B cpp/build
 cmake --build cpp/build
