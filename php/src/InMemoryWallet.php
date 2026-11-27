@@ -62,13 +62,38 @@ final class InMemoryWallet implements WalletHandlerInterface, WalletAdjustmentHa
         return null;
     }
 
+    /** @param array<string, mixed> $req */
+    private static function reqStr(array $req, string $key): ?string
+    {
+        return is_string($req[$key] ?? null) ? trim($req[$key]) : null;
+    }
+
+    /** @param array<string, mixed> $req */
+    private static function optStr(array $req, string $key): string
+    {
+        return is_string($req[$key] ?? null) ? trim($req[$key]) : '';
+    }
+
+    /** @param array<string, mixed> $req */
+    private static function reqAmount(array $req, string $key): ?string
+    {
+        $v = $req[$key] ?? null;
+        if (is_string($v)) {
+            return $v;
+        }
+        if (is_int($v)) {
+            return (string) $v;
+        }
+        return null;
+    }
+
     /** @param array<string, mixed> $req @return array<string, mixed> */
     public function onBalance(array $req): array
     {
-        $traceId = is_string($req['traceId'] ?? null) ? $req['traceId'] : '';
-        $username = trim((string) ($req['username'] ?? ''));
-        $currency = trim((string) ($req['currency'] ?? ''));
-        if ($username === '' || $currency === '') {
+        $traceId = self::optStr($req, 'traceId');
+        $username = self::reqStr($req, 'username');
+        $currency = self::reqStr($req, 'currency');
+        if ($username === null || $username === '' || $currency === null || $currency === '') {
             return ['traceId' => $traceId, 'status' => StatusCode::SC_INVALID_REQUEST, 'message' => 'username and currency are required'];
         }
         $err = $this->checkAccount($username, $currency);
@@ -79,8 +104,8 @@ final class InMemoryWallet implements WalletHandlerInterface, WalletAdjustmentHa
         if ($acct['disabled']) {
             return ['traceId' => $traceId, 'status' => StatusCode::SC_USER_DISABLED, 'message' => 'User disabled'];
         }
-        $tok = (string) ($req['token'] ?? '');
-        if ($acct['tokens'] !== [] && !isset($acct['tokens'][$tok])) {
+        $tok = $req['token'] ?? null;
+        if ($acct['tokens'] !== [] && (!is_string($tok) || !isset($acct['tokens'][$tok]))) {
             return ['traceId' => $traceId, 'status' => StatusCode::SC_INVALID_TOKEN, 'message' => 'Invalid token'];
         }
         return $this->okEnvelope($traceId, $username);
@@ -89,12 +114,13 @@ final class InMemoryWallet implements WalletHandlerInterface, WalletAdjustmentHa
     /** @param array<string, mixed> $req @return array<string, mixed> */
     public function onBet(array $req): array
     {
-        $traceId = is_string($req['traceId'] ?? null) ? $req['traceId'] : '';
-        $txId = trim((string) ($req['transactionId'] ?? ''));
-        $betId = trim((string) ($req['betId'] ?? ''));
-        $username = trim((string) ($req['username'] ?? ''));
-        $currency = trim((string) ($req['currency'] ?? ''));
-        if ($txId === '' || $betId === '' || $username === '' || $currency === '' || !isset($req['amount'])) {
+        $traceId = self::optStr($req, 'traceId');
+        $txId = self::reqStr($req, 'transactionId');
+        $betId = self::reqStr($req, 'betId');
+        $username = self::reqStr($req, 'username');
+        $currency = self::reqStr($req, 'currency');
+        $amount = self::reqAmount($req, 'amount');
+        if ($txId === null || $txId === '' || $betId === null || $betId === '' || $username === null || $username === '' || $currency === null || $currency === '' || $amount === null || trim($amount) === '') {
             return ['traceId' => $traceId, 'status' => StatusCode::SC_INVALID_REQUEST, 'message' => 'Missing required bet fields'];
         }
         $err = $this->checkAccount($username, $currency);
@@ -115,11 +141,11 @@ final class InMemoryWallet implements WalletHandlerInterface, WalletAdjustmentHa
         if ($acct['disabled']) {
             return ['traceId' => $traceId, 'status' => StatusCode::SC_USER_DISABLED, 'message' => 'User disabled'];
         }
-        $tok = (string) ($req['token'] ?? '');
-        if ($acct['tokens'] !== [] && !isset($acct['tokens'][$tok])) {
+        $tok = $req['token'] ?? null;
+        if ($acct['tokens'] !== [] && (!is_string($tok) || !isset($acct['tokens'][$tok]))) {
             return ['traceId' => $traceId, 'status' => StatusCode::SC_INVALID_TOKEN, 'message' => 'Invalid token'];
         }
-        $stake = Money::decimalToLedgerUnits((string) $req['amount'], $acct['exponent']);
+        $stake = Money::decimalToLedgerUnits($amount, $acct['exponent']);
         if (Money::compareUnsignedUnits($stake, '0') <= 0) {
             return ['traceId' => $traceId, 'status' => StatusCode::SC_INVALID_REQUEST, 'message' => 'Bet amount must be positive'];
         }
@@ -141,12 +167,14 @@ final class InMemoryWallet implements WalletHandlerInterface, WalletAdjustmentHa
     /** @param array<string, mixed> $req @return array<string, mixed> */
     public function onBetResult(array $req): array
     {
-        $traceId = is_string($req['traceId'] ?? null) ? $req['traceId'] : '';
-        $txId = trim((string) ($req['transactionId'] ?? ''));
-        $betId = trim((string) ($req['betId'] ?? ''));
-        $username = trim((string) ($req['username'] ?? ''));
-        $currency = trim((string) ($req['currency'] ?? ''));
-        if ($txId === '' || $betId === '' || $username === '' || $currency === '' || !isset($req['winAmount'], $req['betAmount'])) {
+        $traceId = self::optStr($req, 'traceId');
+        $txId = self::reqStr($req, 'transactionId');
+        $betId = self::reqStr($req, 'betId');
+        $username = self::reqStr($req, 'username');
+        $currency = self::reqStr($req, 'currency');
+        $betAmount = self::reqAmount($req, 'betAmount');
+        $winAmount = self::reqAmount($req, 'winAmount');
+        if ($txId === null || $txId === '' || $betId === null || $betId === '' || $username === null || $username === '' || $currency === null || $currency === '' || $betAmount === null || trim($betAmount) === '' || $winAmount === null || trim($winAmount) === '') {
             return ['traceId' => $traceId, 'status' => StatusCode::SC_INVALID_REQUEST, 'message' => 'Missing required bet_result fields'];
         }
         $err = $this->checkAccount($username, $currency);
@@ -165,8 +193,8 @@ final class InMemoryWallet implements WalletHandlerInterface, WalletAdjustmentHa
         }
         $acct = $this->accounts[$username];
         $orig = $this->deductedBets[$betId];
-        $betUnits = Money::decimalToLedgerUnits((string) $req['betAmount'], $acct['exponent']);
-        $winUnits = Money::decimalToLedgerUnits((string) $req['winAmount'], $acct['exponent']);
+        $betUnits = Money::decimalToLedgerUnits($betAmount, $acct['exponent']);
+        $winUnits = Money::decimalToLedgerUnits($winAmount, $acct['exponent']);
         if ($orig['username'] !== $username || $orig['currency'] !== $acct['currency'] || $orig['stake'] !== $betUnits) {
             return ['traceId' => $traceId, 'status' => StatusCode::SC_INVALID_REQUEST, 'message' => 'bet_result mismatch'];
         }
@@ -182,12 +210,13 @@ final class InMemoryWallet implements WalletHandlerInterface, WalletAdjustmentHa
     /** @param array<string, mixed> $req @return array<string, mixed> */
     public function onRollback(array $req): array
     {
-        $traceId = is_string($req['traceId'] ?? null) ? $req['traceId'] : '';
-        $txId = trim((string) ($req['transactionId'] ?? ''));
-        $betId = trim((string) ($req['betId'] ?? ''));
-        $username = trim((string) ($req['username'] ?? ''));
-        $currency = trim((string) ($req['currency'] ?? ''));
-        if ($txId === '' || $betId === '' || $username === '' || $currency === '' || !isset($req['amount'])) {
+        $traceId = self::optStr($req, 'traceId');
+        $txId = self::reqStr($req, 'transactionId');
+        $betId = self::reqStr($req, 'betId');
+        $username = self::reqStr($req, 'username');
+        $currency = self::reqStr($req, 'currency');
+        $amount = self::reqAmount($req, 'amount');
+        if ($txId === null || $txId === '' || $betId === null || $betId === '' || $username === null || $username === '' || $currency === null || $currency === '' || $amount === null || trim($amount) === '') {
             return ['traceId' => $traceId, 'status' => StatusCode::SC_INVALID_REQUEST, 'message' => 'Missing required rollback fields'];
         }
         $err = $this->checkAccount($username, $currency);
@@ -205,7 +234,7 @@ final class InMemoryWallet implements WalletHandlerInterface, WalletAdjustmentHa
             return $this->okEnvelope($traceId, $username);
         }
         $acct = $this->accounts[$username];
-        $refund = Money::decimalToLedgerUnits((string) $req['amount'], $acct['exponent']);
+        $refund = Money::decimalToLedgerUnits($amount, $acct['exponent']);
         if (Money::compareUnsignedUnits($refund, '0') <= 0) {
             return ['traceId' => $traceId, 'status' => StatusCode::SC_INVALID_REQUEST, 'message' => 'Rollback amount must be positive'];
         }
@@ -229,14 +258,16 @@ final class InMemoryWallet implements WalletHandlerInterface, WalletAdjustmentHa
     /** @param array<string, mixed> $req @return array<string, mixed> */
     public function onAdjustment(array $req): array
     {
-        $traceId = is_string($req['traceId'] ?? null) ? $req['traceId'] : '';
-        $txId = trim((string) ($req['transactionId'] ?? ''));
-        $betId = trim((string) ($req['betId'] ?? ''));
-        $username = trim((string) ($req['username'] ?? ''));
-        $currency = trim((string) ($req['currency'] ?? ''));
-        $direction = strtoupper(trim((string) ($req['direction'] ?? '')));
-        $reasonCode = trim((string) ($req['reasonCode'] ?? ''));
-        if ($txId === '' || $betId === '' || $username === '' || $currency === '' || $reasonCode === '' || !isset($req['amount']) || ($direction !== 'CREDIT' && $direction !== 'DEBIT')) {
+        $traceId = self::optStr($req, 'traceId');
+        $txId = self::reqStr($req, 'transactionId');
+        $betId = self::reqStr($req, 'betId');
+        $username = self::reqStr($req, 'username');
+        $currency = self::reqStr($req, 'currency');
+        $dirRaw = self::reqStr($req, 'direction');
+        $direction = $dirRaw !== null ? strtoupper($dirRaw) : '';
+        $reasonCode = self::reqStr($req, 'reasonCode');
+        $amount = self::reqAmount($req, 'amount');
+        if ($txId === null || $txId === '' || $betId === null || $betId === '' || $username === null || $username === '' || $currency === null || $currency === '' || $reasonCode === null || $reasonCode === '' || $amount === null || trim($amount) === '' || ($direction !== 'CREDIT' && $direction !== 'DEBIT')) {
             return ['traceId' => $traceId, 'status' => StatusCode::SC_INVALID_REQUEST, 'message' => 'Missing or invalid adjustment fields'];
         }
         $err = $this->checkAccount($username, $currency);
@@ -258,7 +289,7 @@ final class InMemoryWallet implements WalletHandlerInterface, WalletAdjustmentHa
         if ($orig['username'] !== $username || $orig['currency'] !== $acct['currency']) {
             return ['traceId' => $traceId, 'status' => StatusCode::SC_INVALID_REQUEST, 'message' => 'Adjustment mismatch'];
         }
-        $adjUnits = Money::decimalToLedgerUnits((string) $req['amount'], $acct['exponent']);
+        $adjUnits = Money::decimalToLedgerUnits($amount, $acct['exponent']);
         if (Money::compareUnsignedUnits($adjUnits, '0') <= 0) {
             return ['traceId' => $traceId, 'status' => StatusCode::SC_INVALID_REQUEST, 'message' => 'Adjustment amount must be positive'];
         }

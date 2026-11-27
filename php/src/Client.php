@@ -148,20 +148,22 @@ final class Client
 
         $rawStatus = is_string($decoded['status'] ?? null) ? trim($decoded['status']) : '';
         $respStatus = $rawStatus !== '' ? $rawStatus : self::fallbackStatusForHttp($httpStatus);
+        $respMessage = is_string($decoded['message'] ?? null) ? $decoded['message'] : "HTTP {$httpStatus}";
+        $respTraceId = is_string($decoded['traceId'] ?? null) ? $decoded['traceId'] : $traceId;
         if ($httpStatus !== 200 || $respStatus !== StatusCode::SC_OK) {
             /** @var array<string, string>|null $val */
             $val = isset($decoded['validation']) && is_array($decoded['validation']) ? $decoded['validation'] : null;
             throw new BaccaratApiException(
                 $respStatus,
-                (string) ($decoded['message'] ?? "HTTP {$httpStatus}"),
-                (string) ($decoded['traceId'] ?? $traceId),
+                $respMessage,
+                $respTraceId,
                 $val,
                 $httpStatus
             );
         }
 
         return [
-            'traceId' => (string) ($decoded['traceId'] ?? $traceId),
+            'traceId' => $respTraceId,
             'status' => StatusCode::SC_OK,
             'data' => $decoded['data'] ?? null,
         ];

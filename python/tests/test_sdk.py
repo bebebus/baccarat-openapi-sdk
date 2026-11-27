@@ -402,7 +402,7 @@ class TestBaccaratPythonSdk(unittest.TestCase):
             redir_srv.shutdown()
             redir_srv.server_close()
 
-        # 6. v1.5.10 regressions: deadlock, S2S ApiError/TransportError/overflow & allowlist SdkError safety, ASCII decimal regex, HTTPError read failure, UNSET/None null clearing, wallet helpers
+        # 6. v1.5.11 regressions: deadlock, S2S ApiError/TransportError/overflow & allowlist SdkError safety, ASCII decimal regex, HTTPError read failure, UNSET/None null clearing, wallet helpers, non-string token guard
         with self.assertRaises(BaccaratSdkError) as ctx_unicode_dec:
             decimal_to_ledger_units("\u0661\u0660\u0660.\u0660\u0660", 2)
         self.assertEqual(ctx_unicode_dec.exception.code, "INVALID_DECIMAL_AMOUNT")
@@ -565,6 +565,33 @@ class TestBaccaratPythonSdk(unittest.TestCase):
             self.assertEqual(ctx_read_err.exception.code, StatusCode.SC_OPERATOR_TIMEOUT)
             self.assertTrue(is_retryable_status(ctx_read_err.exception.code))
             self.assertTrue(closed_flag["closed"])
+
+        # v1.5.11 P1-2: non-string (unhashable list/dict) token in InMemoryWallet returns SC_INVALID_TOKEN cleanly
+        tok_wallet = InMemoryWallet({"alice": {"currency": "USD", "balance": "100.00", "exponent": 2, "tokens": ["tok_valid"]}})
+        tok_disp = WebhookDispatcher.from_credentials(api_key, secret, tok_wallet)
+        for bad_tok in (["a"], {"k": "v"}):
+            bal_raw = json.dumps({"traceId": "t_py_badtok_bal", "username": "alice", "currency": "USD", "token": bad_tok}).encode("utf-8")
+            st_tb, body_tb = tok_disp.handle("/wallet/balance", api_key, sign_body(bal_raw, secret), bal_raw)
+            self.assertEqual(st_tb, 200)
+            self.assertEqual(body_tb["status"], StatusCode.SC_INVALID_TOKEN)
+
+            bet_raw = json.dumps({
+                "traceId": "t_py_badtok_bet",
+                "transactionId": "tx_badtok_1",
+                "betId": "bet_badtok_1",
+                "username": "alice",
+                "currency": "USD",
+                "amount": "10.00",
+                "token": bad_tok,
+            }).encode("utf-8")
+            st_tbet, body_tbet = tok_disp.handle("/wallet/bet", api_key, sign_body(bet_raw, secret), bet_raw)
+            self.assertEqual(st_tbet, 200)
+            self.assertEqual(body_tbet["status"], StatusCode.SC_INVALID_TOKEN)
+
+        chk_raw = json.dumps({"traceId": "t_py_chk", "username": "alice", "currency": "USD", "token": "tok_valid"}).encode("utf-8")
+        _, body_chk = tok_disp.handle("/wallet/balance", api_key, sign_body(chk_raw, secret), chk_raw)
+        self.assertEqual(body_chk["status"], StatusCode.SC_OK)
+        self.assertEqual(body_chk["data"]["balance"], "100.00")
 
 
 if __name__ == "__main__":

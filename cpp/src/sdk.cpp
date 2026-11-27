@@ -84,6 +84,64 @@ bool hex_to_bytes32(const std::string& hex, unsigned char out[32]) {
     return true;
 }
 
+bool is_valid_utf8(const std::string& s) {
+    const size_t n = s.size();
+    size_t i = 0;
+    while (i < n) {
+        unsigned char b0 = static_cast<unsigned char>(s[i]);
+        if (b0 <= 0x7F) {
+            ++i;
+        } else if (b0 >= 0xC2 && b0 <= 0xDF) {
+            if (i + 1 >= n) return false;
+            unsigned char b1 = static_cast<unsigned char>(s[i + 1]);
+            if ((b1 & 0xC0) != 0x80) return false;
+            i += 2;
+        } else if (b0 == 0xE0) {
+            if (i + 2 >= n) return false;
+            unsigned char b1 = static_cast<unsigned char>(s[i + 1]);
+            unsigned char b2 = static_cast<unsigned char>(s[i + 2]);
+            if (b1 < 0xA0 || b1 > 0xBF || (b2 & 0xC0) != 0x80) return false;
+            i += 3;
+        } else if ((b0 >= 0xE1 && b0 <= 0xEC) || (b0 >= 0xEE && b0 <= 0xEF)) {
+            if (i + 2 >= n) return false;
+            unsigned char b1 = static_cast<unsigned char>(s[i + 1]);
+            unsigned char b2 = static_cast<unsigned char>(s[i + 2]);
+            if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80) return false;
+            i += 3;
+        } else if (b0 == 0xED) {
+            if (i + 2 >= n) return false;
+            unsigned char b1 = static_cast<unsigned char>(s[i + 1]);
+            unsigned char b2 = static_cast<unsigned char>(s[i + 2]);
+            if (b1 < 0x80 || b1 > 0x9F || (b2 & 0xC0) != 0x80) return false;
+            i += 3;
+        } else if (b0 == 0xF0) {
+            if (i + 3 >= n) return false;
+            unsigned char b1 = static_cast<unsigned char>(s[i + 1]);
+            unsigned char b2 = static_cast<unsigned char>(s[i + 2]);
+            unsigned char b3 = static_cast<unsigned char>(s[i + 3]);
+            if (b1 < 0x90 || b1 > 0xBF || (b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80) return false;
+            i += 4;
+        } else if (b0 >= 0xF1 && b0 <= 0xF3) {
+            if (i + 3 >= n) return false;
+            unsigned char b1 = static_cast<unsigned char>(s[i + 1]);
+            unsigned char b2 = static_cast<unsigned char>(s[i + 2]);
+            unsigned char b3 = static_cast<unsigned char>(s[i + 3]);
+            if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80) return false;
+            i += 4;
+        } else if (b0 == 0xF4) {
+            if (i + 3 >= n) return false;
+            unsigned char b1 = static_cast<unsigned char>(s[i + 1]);
+            unsigned char b2 = static_cast<unsigned char>(s[i + 2]);
+            unsigned char b3 = static_cast<unsigned char>(s[i + 3]);
+            if (b1 < 0x80 || b1 > 0x8F || (b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80) return false;
+            i += 4;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool ct_string_eq(const std::string& a, const std::string& b) {
     if (a.size() != b.size()) return false;
     return CRYPTO_memcmp(a.data(), b.data(), a.size()) == 0;
@@ -1062,6 +1120,10 @@ Json WebhookDispatcher::handle(
     std::string auth = verify_webhook_headers(api_key_header, signature_header, raw_body, api_key_, hmac_secret_);
     if (auth != StatusCode::SC_OK) {
         return make_err_json(extract_trace_hint(raw_body), auth, "Auth/signature failed");
+    }
+
+    if (!is_valid_utf8(raw_body)) {
+        return make_err_json("", StatusCode::SC_INVALID_REQUEST, "Invalid UTF-8 in request body");
     }
 
     Json parsed;

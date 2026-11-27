@@ -5,7 +5,7 @@
 ## 安装与单测
 
 ```bash
-go get github.com/bebebus/baccarat-openapi-sdk/go@v1.5.10
+go get github.com/bebebus/baccarat-openapi-sdk/go@v1.5.11
 cd go && go test -v -count=1 ./...
 ```
 

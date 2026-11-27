@@ -1,6 +1,6 @@
 > 中文 | [English](./SIGNING.en.md)
 
-# 原始字节 HMAC-SHA256 签名与幂等冲突指纹规范（v1.5.10）
+# 原始字节 HMAC-SHA256 签名与幂等冲突指纹规范（v1.5.11）
 
 本文件是 `bebebus/baccarat-openapi-sdk` 七套语言 SDK（Node.js、Python、PHP、Go、Java、C++、Rust）共享的密码学与幂等核验唯一事实源，100% 对齐在线契约 `https://openapi.lt.cniia.cloud/openapi.yaml`。
 

@@ -601,7 +601,7 @@ int main() {
     require_eq(utf8_res.at("status").as_string(), StatusCode::SC_INVALID_REQUEST, "wb:m10Utf8Status");
     require_eq(utf8_res.at("traceId").as_string(), expected_trunc, "wb:m10Utf8Truncated128Chars");
 
-    // 7. v1.5.10 regressions: deadlock, S2S ApiError/TransportError/overflow & allowlist SdkError safety, wallet_ok/wallet_error guards, strict JSON ws trace hint, locale-independent JSON float
+    // 7. v1.5.11 regressions: deadlock, S2S ApiError/TransportError/overflow & allowlist SdkError safety, wallet_ok/wallet_error guards, strict JSON ws trace hint, locale-independent JSON float, strict UTF-8
     class DeadlockWallet final : public WalletHandler {
     public:
         Json on_balance(const Json&) override { throw SdkError(StatusCode::SC_INSUFFICIENT_FUNDS, "explicit sdk err"); }
@@ -712,6 +712,12 @@ int main() {
     require_true(dbl_json.find('.') != std::string::npos && dbl_json.find(',') == std::string::npos, "json:classicLocaleDump");
     Json parsed_dbl = Json::parse(R"({"v":12.34})");
     require_true(parsed_dbl.at("v").type() == Json::Type::Double, "json:classicLocaleParse");
+
+    // v1.5.11 P3-2: strict UTF-8 validation in WebhookDispatcher
+    std::string bad_utf8 = std::string("{\"traceId\":\"t1") + "\xff" + "\",\"username\":\"alice\"}";
+    Json bad_utf8_res = dl_disp.handle("/wallet/balance", api_key, sign_body(bad_utf8, secret), bad_utf8);
+    require_eq(bad_utf8_res.at("status").as_string(), StatusCode::SC_INVALID_REQUEST, "wb:p32InvalidUtf8Status");
+    require_eq(bad_utf8_res.at("traceId").as_string(), "", "wb:p32InvalidUtf8TraceEmpty");
 
     std::cout << "C++17 SDK: ALL TESTS PASSED\n";
     return 0;

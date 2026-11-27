@@ -482,7 +482,7 @@ test('WebhookDispatcher & InMemoryWallet full seamless wallet lifecycle', async 
   }
 });
 
-test('v1.5.10 regressions: deadlock, S2S ApiError/TransportError/overflow & allowlist SdkError safety, wallet response builders', async () => {
+test('v1.5.11 regressions: deadlock, S2S ApiError/TransportError/overflow & allowlist SdkError safety, wallet response builders, toScalarString & strict UTF-8', async () => {
   const apiKey = 'ak_0123456789abcdef0123456789abcdef';
   const secret = 'dGVzdF9zZWNyZXRfNDBfY2hhcnNfYmFzZTY0dXJsX2s';
   const deadlockWallet = {
@@ -589,4 +589,70 @@ test('v1.5.10 regressions: deadlock, S2S ApiError/TransportError/overflow & allo
       (e) => e instanceof BaccaratSdkError && e.code === 'INVALID_ARGUMENT',
     );
   }
+
+  // v1.5.11 P1-3: toScalarString guards against {"toString": 1} objects in fingerprints & Client.postSigned
+  const tsWallet = new InMemoryWallet({ alice: { currency: 'USD', balance: '100.00', exponent: 2, tokens: ['tok_ok'] } });
+  const tsDisp = new WebhookDispatcher({ apiKey, hmacSecret: secret }, tsWallet);
+  const badRoundBet = Buffer.from(JSON.stringify({
+    traceId: 't_node_tostr',
+    transactionId: 'tx_tostr_1',
+    betId: 'bet_tostr_1',
+    username: 'alice',
+    currency: 'USD',
+    amount: '10.00',
+    token: 'tok_ok',
+    roundId: { toString: 1 },
+  }), 'utf8');
+  const badRoundRes = await tsDisp.handle('/wallet/bet', apiKey, signBody(badRoundBet, secret), badRoundBet);
+  assert.equal(badRoundRes.statusCode, 200);
+  assert.equal(badRoundRes.body.status, StatusCode.SC_OK);
+  assert.equal(badRoundRes.body.data.balance, '90.00');
+  const badRoundReplay = await tsDisp.handle('/wallet/bet', apiKey, signBody(badRoundBet, secret), badRoundBet);
+  assert.equal(badRoundReplay.body.status, StatusCode.SC_OK);
+  assert.equal(badRoundReplay.body.data.balance, '90.00');
+
+  assert.equal(
+    betResultFingerprint({ isFreespin: { toString: 1 }, isEndRound: { toString: 1 }, betTime: { toString: 1 } }),
+    betResultFingerprint({}),
+  );
+
+  const badMsgClient = new Client(
+    { apiKey, hmacSecret: secret, environment: Environment.SANDBOX },
+    {
+      transport: async () => ({
+        httpStatus: 400,
+        rawBody: JSON.stringify({ status: StatusCode.SC_INVALID_REQUEST, message: { toString: 1 }, traceId: { toString: 1 } }),
+      }),
+    },
+  );
+  await assert.rejects(
+    () => badMsgClient.ping({ traceId: 't_node_msg_tostr' }),
+    (e) => e instanceof BaccaratApiError
+      && e.status === StatusCode.SC_INVALID_REQUEST
+      && e.message === 'HTTP 400'
+      && e.traceId === 't_node_msg_tostr',
+  );
+
+  const badOkTraceClient = new Client(
+    { apiKey, hmacSecret: secret, environment: Environment.SANDBOX },
+    {
+      transport: async () => ({
+        httpStatus: 200,
+        rawBody: JSON.stringify({ status: StatusCode.SC_OK, traceId: { toString: 1 }, data: { ok: true } }),
+      }),
+    },
+  );
+  const okTraceRes = await badOkTraceClient.ping({ traceId: 't_node_ok_tostr' });
+  assert.equal(okTraceRes.traceId, 't_node_ok_tostr');
+
+  // v1.5.11 P3-2: strict UTF-8 validation in WebhookDispatcher
+  const badUtf8Buf = Buffer.concat([
+    Buffer.from('{"traceId":"t1', 'utf8'),
+    Buffer.from([0xff]),
+    Buffer.from('","username":"alice"}', 'utf8'),
+  ]);
+  const badUtf8Res = await tsDisp.handle('/wallet/balance', apiKey, signBody(badUtf8Buf, secret), badUtf8Buf);
+  assert.equal(badUtf8Res.statusCode, 200);
+  assert.equal(badUtf8Res.body.status, StatusCode.SC_INVALID_REQUEST);
+  assert.equal(badUtf8Res.body.traceId, '');
 });

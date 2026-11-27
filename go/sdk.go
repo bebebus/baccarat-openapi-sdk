@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Package baccarat provides a zero-dependency Go SDK for the Baccarat Live Platform
-// B2B Operator Seamless Wallet API (v1.5.10).
+// B2B Operator Seamless Wallet API (v1.5.11).
 package baccarat
 
 import (
@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -413,14 +414,25 @@ func NewClient(cfg Config) (*Client, error) {
 	if timeout <= 0 {
 		timeout = 8 * time.Second
 	}
-	hc := cfg.HTTPClient
-	if hc == nil {
+	var hc *http.Client
+	if cfg.HTTPClient == nil {
 		hc = &http.Client{
 			Timeout: timeout,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
 		}
+	} else {
+		cp := *cfg.HTTPClient
+		if cp.Timeout <= 0 {
+			cp.Timeout = timeout
+		}
+		if cp.CheckRedirect == nil {
+			cp.CheckRedirect = func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			}
+		}
+		hc = &cp
 	}
 	return &Client{
 		apiKey:        key,
@@ -1480,6 +1492,10 @@ func (d *WebhookDispatcher) HandleRaw(ctx context.Context, routePath, apiKeyHead
 		return WalletResponse{TraceID: extractTraceHint(rawBody), Status: st, Message: "auth/signature check failed"}
 	}
 
+	if !utf8.Valid(rawBody) {
+		return WalletResponse{Status: SC_INVALID_REQUEST, Message: "request body must be valid UTF-8"}
+	}
+
 	if !isJSONObjectBytes(rawBody) {
 		return WalletResponse{Status: SC_INVALID_REQUEST, Message: "request body must be a JSON object"}
 	}
@@ -1554,7 +1570,15 @@ func (d *WebhookDispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"status":"SC_INVALID_REQUEST","message":"failed to read body"}`))
 		return
 	}
-	resp := d.HandleRaw(r.Context(), r.URL.Path, r.Header.Get("X-API-Key"), r.Header.Get("X-Signature"), raw)
+	apiKeyHeader := ""
+	if vals := r.Header.Values("X-API-Key"); len(vals) == 1 {
+		apiKeyHeader = vals[0]
+	}
+	sigHeader := ""
+	if vals := r.Header.Values("X-Signature"); len(vals) == 1 {
+		sigHeader = vals[0]
+	}
+	resp := d.HandleRaw(r.Context(), r.URL.Path, apiKeyHeader, sigHeader, raw)
 	out, _ := marshalNoEscapeHTML(resp)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(out)

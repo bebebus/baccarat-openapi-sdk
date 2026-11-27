@@ -487,7 +487,7 @@ public final class SdkTestRunner {
             }
             check(caughtM4Overflow, "s2s:m4Overflow16MiB");
 
-            // v1.5.10 regression: BoundedBodySubscriber HTTP/2 synchronous-cancel race
+            // Regression: BoundedBodySubscriber HTTP/2 synchronous-cancel race
             // (Subscription.cancel() synchronously invokes onError(IOException("Stream 1 cancelled")) or throws)
             {
                 BaccaratSdk.Client.BoundedBodySubscriber raceSub =
@@ -620,7 +620,7 @@ public final class SdkTestRunner {
             rlSrv.stop(0);
         }
 
-        // 5. v1.5.10 regressions: deadlock, S2S ApiException/TransportException/overflow, allowlist SdkException & sneaky-thrown checked exceptions -> SC_OPERATOR_TIMEOUT sanitized, string-only traceId, & walletOk/walletError guards
+        // 5. v1.5.11 regressions: deadlock, S2S ApiException/TransportException/overflow, allowlist SdkException & sneaky-thrown checked exceptions -> SC_OPERATOR_TIMEOUT sanitized, string-only traceId, strict InMemoryWallet typing, strict UTF-8, & walletOk/walletError guards
         BaccaratSdk.WalletHandler deadlockWallet = new BaccaratSdk.WalletHandler() {
             @Override public Map<String, Object> onBalance(Map<String, Object> req) {
                 throw new BaccaratSdk.SdkException(BaccaratSdk.StatusCode.SC_INSUFFICIENT_FUNDS, "explicit sdk err");
@@ -752,6 +752,57 @@ public final class SdkTestRunner {
             }
             check(threw, "walletError:rejectBadStatus:" + badSt);
         }
+
+        // v1.5.11 P2-1: Java InMemoryWallet strict string/amount typing
+        BaccaratSdk.InMemoryWallet strictWallet = new BaccaratSdk.InMemoryWallet();
+        strictWallet.addAccount("alice", "USD", "100.00", 2, List.of("tok_ok"));
+        BaccaratSdk.WebhookDispatcher strictDisp = new BaccaratSdk.WebhookDispatcher(apiKey, secret, strictWallet);
+        String[] badBetPayloads = new String[]{
+                "{\"traceId\":\"t_j1\",\"transactionId\":[\"a\"],\"betId\":\"b1\",\"username\":\"alice\",\"currency\":\"USD\",\"amount\":\"10.00\",\"token\":\"tok_ok\"}",
+                "{\"traceId\":\"t_j2\",\"transactionId\":\"tx2\",\"betId\":\"b2\",\"username\":123,\"currency\":\"USD\",\"amount\":\"10.00\",\"token\":\"tok_ok\"}",
+                "{\"traceId\":\"t_j3\",\"transactionId\":\"tx3\",\"betId\":\"b3\",\"username\":\"alice\",\"currency\":\"USD\",\"amount\":true,\"token\":\"tok_ok\"}",
+                "{\"traceId\":[\"t1\"],\"transactionId\":\"tx4\",\"betId\":\"b4\",\"username\":\"alice\",\"currency\":\"USD\",\"amount\":true,\"token\":\"tok_ok\"}"
+        };
+        for (int i = 0; i < badBetPayloads.length; i++) {
+            byte[] raw = badBetPayloads[i].getBytes(StandardCharsets.UTF_8);
+            Map<String, Object> resp = strictDisp.handle("/wallet/bet", apiKey, BaccaratSdk.signBody(raw, secret), raw);
+            checkEq(resp.get("status"), BaccaratSdk.StatusCode.SC_INVALID_REQUEST, "wb:p21StrictBet:" + i);
+            if (i == 3) {
+                checkEq(resp.get("traceId"), "", "wb:p21StrictTraceArrayEmpty");
+            }
+        }
+        // Also verify direct onBet with non-string traceId echoes "" and scalarStr ignores List/Map in fingerprints
+        Map<String, Object> directArrTrace = strictWallet.onBet(Map.of(
+                "traceId", List.of("t1"),
+                "transactionId", List.of("a"),
+                "betId", "b_direct",
+                "username", "alice",
+                "currency", "USD",
+                "amount", "10.00",
+                "token", "tok_ok"
+        ));
+        checkEq(directArrTrace.get("status"), BaccaratSdk.StatusCode.SC_INVALID_REQUEST, "wb:p21DirectArrTraceStatus");
+        checkEq(directArrTrace.get("traceId"), "", "wb:p21DirectArrTraceEmpty");
+        checkEq(
+                BaccaratSdk.betFingerprint(Map.of("transactionId", "t", "roundId", List.of("a"))),
+                BaccaratSdk.betFingerprint(Map.of("transactionId", "t")),
+                "fp:p21ScalarStrIgnoresList"
+        );
+        byte[] balCheckRaw = "{\"traceId\":\"t_chk\",\"username\":\"alice\",\"currency\":\"USD\",\"token\":\"tok_ok\"}".getBytes(StandardCharsets.UTF_8);
+        Map<String, Object> balCheckResp = strictDisp.handle("/wallet/balance", apiKey, BaccaratSdk.signBody(balCheckRaw, secret), balCheckRaw);
+        checkEq(balCheckResp.get("status"), BaccaratSdk.StatusCode.SC_OK, "wb:p21BalanceUnchangedStatus");
+        checkEq(((Map<?, ?>) balCheckResp.get("data")).get("balance"), "100.00", "wb:p21BalanceUnchanged");
+
+        // v1.5.11 P3-2: strict UTF-8 validation in WebhookDispatcher
+        byte[] prefix = "{\"traceId\":\"t1".getBytes(StandardCharsets.UTF_8);
+        byte[] suffix = "\",\"username\":\"alice\"}".getBytes(StandardCharsets.UTF_8);
+        byte[] badUtf8 = new byte[prefix.length + 1 + suffix.length];
+        System.arraycopy(prefix, 0, badUtf8, 0, prefix.length);
+        badUtf8[prefix.length] = (byte) 0xff;
+        System.arraycopy(suffix, 0, badUtf8, prefix.length + 1, suffix.length);
+        Map<String, Object> badUtf8Resp = strictDisp.handle("/wallet/balance", apiKey, BaccaratSdk.signBody(badUtf8, secret), badUtf8);
+        checkEq(badUtf8Resp.get("status"), BaccaratSdk.StatusCode.SC_INVALID_REQUEST, "wb:p32InvalidUtf8Status");
+        checkEq(badUtf8Resp.get("traceId"), "", "wb:p32InvalidUtf8TraceEmpty");
 
         System.out.println("JAVA 17 SDK: ALL TESTS PASSED");
     }

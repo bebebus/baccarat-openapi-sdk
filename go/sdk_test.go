@@ -742,3 +742,100 @@ func TestV155NullClearingBuildersAndPanicSafety(t *testing.T) {
 		t.Fatalf("expected SC_INSUFFICIENT_FUNDS, got %+v", balResp)
 	}
 }
+
+func TestV1511CustomHTTPClientRedirectDuplicateHeadersAndStrictUTF8(t *testing.T) {
+	apiKey := "ak_0123456789abcdef0123456789abcdef"
+	secret := "dGVzdF9zZWNyZXRfNDBfY2hhcnNfYmFzZTY0dXJsX2s"
+
+	// P2-2: custom cfg.HTTPClient with CheckRedirect == nil refuses 302 redirects cleanly without mutating caller's struct
+	redirectFollowed := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/redirected" {
+			redirectFollowed = true
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"traceId":"t_redir","status":"SC_OK","data":{}}`))
+			return
+		}
+		http.Redirect(w, r, "/redirected", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	callerHC := &http.Client{}
+	c, err := NewClient(Config{
+		APIKey:      apiKey,
+		HMACSecret:  secret,
+		Environment: EnvProduction,
+		BaseURL:     srv.URL,
+		HTTPClient:  callerHC,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if callerHC.CheckRedirect != nil || callerHC.Timeout != 0 {
+		t.Fatalf("NewClient must not mutate caller's http.Client struct")
+	}
+	_, _, err = c.Ping(context.Background(), PingRequest{TraceID: "t_go_302"})
+	var apiErr *ApiError
+	if !errors.As(err, &apiErr) || apiErr.HTTPStatus != http.StatusFound {
+		t.Fatalf("expected ApiError with HTTP 302 on redirect, got %T %v", err, err)
+	}
+	if redirectFollowed {
+		t.Fatalf("custom HTTPClient unexpectedly followed 302 redirect")
+	}
+
+	// P3-1: WebhookDispatcher.ServeHTTP rejects duplicate X-API-Key and duplicate X-Signature headers
+	wallet, err := NewInMemoryWallet(map[string]AccountInit{
+		"alice": {Currency: "USD", Balance: "100.00", Exponent: 2},
+	})
+	if err != nil {
+		t.Fatalf("NewInMemoryWallet: %v", err)
+	}
+	disp, err := NewWebhookDispatcher(apiKey, secret, wallet)
+	if err != nil {
+		t.Fatalf("NewWebhookDispatcher: %v", err)
+	}
+	validBody := []byte(`{"traceId":"t_dup_hdr","username":"alice","currency":"USD"}`)
+	validSig, err := SignBody(validBody, secret)
+	if err != nil {
+		t.Fatalf("SignBody: %v", err)
+	}
+
+	dupKeyReq := httptest.NewRequest(http.MethodPost, "/wallet/balance", bytes.NewReader(validBody))
+	dupKeyReq.Header.Add("X-API-Key", apiKey)
+	dupKeyReq.Header.Add("X-API-Key", "ak_other")
+	dupKeyReq.Header.Set("X-Signature", validSig)
+	dupKeyRec := httptest.NewRecorder()
+	disp.ServeHTTP(dupKeyRec, dupKeyReq)
+	var dupKeyResp WalletResponse
+	if err := json.Unmarshal(dupKeyRec.Body.Bytes(), &dupKeyResp); err != nil {
+		t.Fatalf("unmarshal dupKeyResp: %v", err)
+	}
+	if dupKeyResp.Status != SC_AUTHENTICATION_FAILED {
+		t.Fatalf("expected SC_AUTHENTICATION_FAILED for duplicate X-API-Key, got %+v", dupKeyResp)
+	}
+
+	dupSigReq := httptest.NewRequest(http.MethodPost, "/wallet/balance", bytes.NewReader(validBody))
+	dupSigReq.Header.Set("X-API-Key", apiKey)
+	dupSigReq.Header.Add("X-Signature", validSig)
+	dupSigReq.Header.Add("X-Signature", validSig)
+	dupSigRec := httptest.NewRecorder()
+	disp.ServeHTTP(dupSigRec, dupSigReq)
+	var dupSigResp WalletResponse
+	if err := json.Unmarshal(dupSigRec.Body.Bytes(), &dupSigResp); err != nil {
+		t.Fatalf("unmarshal dupSigResp: %v", err)
+	}
+	if dupSigResp.Status != SC_INVALID_SIGNATURE {
+		t.Fatalf("expected SC_INVALID_SIGNATURE for duplicate X-Signature, got %+v", dupSigResp)
+	}
+
+	// P3-2: strict UTF-8 validation in WebhookDispatcher.HandleRaw
+	badUTF8 := []byte("{\"traceId\":\"t1\xff\",\"username\":\"alice\"}")
+	badUTF8Sig, err := SignBody(badUTF8, secret)
+	if err != nil {
+		t.Fatalf("SignBody badUTF8: %v", err)
+	}
+	badUTF8Resp := disp.HandleRaw(context.Background(), "/wallet/balance", apiKey, badUTF8Sig, badUTF8)
+	if badUTF8Resp.Status != SC_INVALID_REQUEST || badUTF8Resp.TraceID != "" {
+		t.Fatalf("expected SC_INVALID_REQUEST with empty traceId on invalid UTF-8, got %+v", badUTF8Resp)
+	}
+}

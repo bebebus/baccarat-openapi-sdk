@@ -1,6 +1,6 @@
 > [中文](./INTERFACES.md) | English
 
-# B2B Operator Seamless Wallet Endpoints & Status Codes (v1.5.10)
+# B2B Operator Seamless Wallet Endpoints & Status Codes (v1.5.11)
 
 Interactive Explorer & OpenAPI 3.1 Spec: `https://openapi.lt.cniia.cloud`
 

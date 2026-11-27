@@ -326,7 +326,7 @@ assertEq($utf8Res['status'], StatusCode::SC_INVALID_REQUEST, 'wb:m10Utf8TraceSta
 assertEq((bool) preg_match('//u', (string) $utf8Res['traceId']), true, 'wb:m10Utf8Valid');
 assertEq($utf8Res['traceId'], str_repeat('中', 128), 'wb:m10Utf8CharCount');
 
-// 8. v1.5.10 regressions: deadlock, S2S ApiException/TransportException/overflow & allowlist SdkException safety, WalletResponse builders
+// 8. v1.5.11 regressions: deadlock, S2S ApiException/TransportException/overflow & allowlist SdkException safety, WalletResponse builders, strict type guards
 // Verify postSigned attaches traceId on 16 MiB overflow BaccaratApiException with empty traceId
 $ovClient = new Client(
     $cfg,
@@ -446,6 +446,136 @@ foreach (['', '   ', StatusCode::SC_OK, ' SC_OK ', 'sc_ok', 'Sc_Ok', ' sc_ok ', 
         $threw = ($e->errorCode === 'INVALID_ARGUMENT');
     }
     assertEq($threw, true, "walletResp:badStatus:$badStatus");
+}
+
+// v1.5.11 P1-1: PHP InMemoryWallet, Idempotency, Client strict type guards (zero E_WARNINGs)
+set_error_handler(static function (int $severity, string $message, string $file, int $line): bool {
+    throw new \ErrorException($message, 0, $severity, $file, $line);
+});
+try {
+    $strictWallet = new InMemoryWallet(['alice' => ['currency' => 'USD', 'balance' => '1000.00', 'exponent' => 2, 'tokens' => ['tok_ok']]]);
+    $strictDisp = WebhookDispatcher::fromCredentials($apiKey, $secret, $strictWallet);
+    $sendStrict = static function (string $route, array $obj) use ($strictDisp, $apiKey, $secret): array {
+        $raw = json_encode($obj, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        return $strictDisp->handle($route, $apiKey, Signing::signBody($raw, $secret), $raw)['body'];
+    };
+
+    $rTxArr = $sendStrict('/wallet/bet', [
+        'traceId' => 't_p11_tx',
+        'transactionId' => ['a'],
+        'betId' => 'b_p11_1',
+        'username' => 'alice',
+        'currency' => 'USD',
+        'amount' => '10.00',
+        'token' => 'tok_ok',
+    ]);
+    assertEq($rTxArr['status'], StatusCode::SC_INVALID_REQUEST, 'p11:txIdArray');
+
+    $rAmtBool = $sendStrict('/wallet/bet', [
+        'traceId' => 't_p11_amt_bool',
+        'transactionId' => 'tx_p11_2',
+        'betId' => 'b_p11_2',
+        'username' => 'alice',
+        'currency' => 'USD',
+        'amount' => true,
+        'token' => 'tok_ok',
+    ]);
+    assertEq($rAmtBool['status'], StatusCode::SC_INVALID_REQUEST, 'p11:amountBool');
+
+    $rAmtFloat = $sendStrict('/wallet/bet', [
+        'traceId' => 't_p11_amt_float',
+        'transactionId' => 'tx_p11_2f',
+        'betId' => 'b_p11_2f',
+        'username' => 'alice',
+        'currency' => 'USD',
+        'amount' => 10.5,
+        'token' => 'tok_ok',
+    ]);
+    assertEq($rAmtFloat['status'], StatusCode::SC_INVALID_REQUEST, 'p11:amountFloat');
+
+    $rAmtArr = $sendStrict('/wallet/bet', [
+        'traceId' => 't_p11_amt_arr',
+        'transactionId' => 'tx_p11_2a',
+        'betId' => 'b_p11_2a',
+        'username' => 'alice',
+        'currency' => 'USD',
+        'amount' => ['10.00'],
+        'token' => 'tok_ok',
+    ]);
+    assertEq($rAmtArr['status'], StatusCode::SC_INVALID_REQUEST, 'p11:amountArray');
+
+    $rTokBal = $sendStrict('/wallet/balance', [
+        'traceId' => 't_p11_tok_bal',
+        'username' => 'alice',
+        'currency' => 'USD',
+        'token' => ['a'],
+    ]);
+    assertEq($rTokBal['status'], StatusCode::SC_INVALID_TOKEN, 'p11:tokenArrayBalance');
+
+    $rTokBet = $sendStrict('/wallet/bet', [
+        'traceId' => 't_p11_tok_bet',
+        'transactionId' => 'tx_p11_3',
+        'betId' => 'b_p11_3',
+        'username' => 'alice',
+        'currency' => 'USD',
+        'amount' => '10.00',
+        'token' => ['a'],
+    ]);
+    assertEq($rTokBet['status'], StatusCode::SC_INVALID_TOKEN, 'p11:tokenArrayBet');
+
+    $rRoundArr = $sendStrict('/wallet/bet', [
+        'traceId' => 't_p11_round',
+        'transactionId' => 'tx_p11_4',
+        'betId' => 'b_p11_4',
+        'username' => 'alice',
+        'currency' => 'USD',
+        'amount' => '0.00',
+        'roundId' => ['a'],
+        'token' => 'tok_ok',
+    ]);
+    assertEq($rRoundArr['status'], StatusCode::SC_INVALID_REQUEST, 'p11:roundIdArrayNoWarning');
+    assertEq(
+        Idempotency::betFingerprint(['transactionId' => 'tx1', 'roundId' => ['a']]),
+        Idempotency::betFingerprint(['transactionId' => 'tx1']),
+        'p11:idempotencyScalarStrArray'
+    );
+
+    $rBalAfter = $sendStrict('/wallet/balance', [
+        'traceId' => 't_p11_bal_chk',
+        'username' => 'alice',
+        'currency' => 'USD',
+        'token' => 'tok_ok',
+    ]);
+    assertEq($rBalAfter['status'], StatusCode::SC_OK, 'p11:balanceUnchangedStatus');
+    assertEq($rBalAfter['data']['balance'], '1000.00', 'p11:balanceUnchanged');
+
+    // Client::postSigned with non-string message/traceId in JSON response must not warn
+    $arrErrClient = new Client(
+        $cfg,
+        static fn(string $url, array $headers, string $rawBody, int $timeoutMs): array => [
+            400,
+            json_encode(['status' => StatusCode::SC_INVALID_REQUEST, 'message' => ['arr'], 'traceId' => ['t']], JSON_THROW_ON_ERROR),
+        ]
+    );
+    $caughtArrErr = false;
+    try {
+        $arrErrClient->ping(['traceId' => 't_php_arr_err']);
+    } catch (BaccaratApiException $e) {
+        $caughtArrErr = ($e->status === StatusCode::SC_INVALID_REQUEST && $e->getMessage() === 'HTTP 400' && $e->traceId === 't_php_arr_err');
+    }
+    assertEq($caughtArrErr, true, 'p11:clientNonStringMsgTraceErr');
+
+    $arrOkClient = new Client(
+        $cfg,
+        static fn(string $url, array $headers, string $rawBody, int $timeoutMs): array => [
+            200,
+            json_encode(['status' => StatusCode::SC_OK, 'traceId' => ['t'], 'data' => ['ok' => true]], JSON_THROW_ON_ERROR),
+        ]
+    );
+    $arrOkRes = $arrOkClient->ping(['traceId' => 't_php_arr_ok']);
+    assertEq($arrOkRes['traceId'], 't_php_arr_ok', 'p11:clientNonStringTraceOk');
+} finally {
+    restore_error_handler();
 }
 
 echo "PHP SDK: ALL TESTS PASSED\n";

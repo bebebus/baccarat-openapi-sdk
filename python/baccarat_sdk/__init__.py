@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.10)."""
+"""Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.11)."""
 
 from __future__ import annotations
 
@@ -914,7 +914,8 @@ class InMemoryWallet:
             return {"traceId": trace_id, "status": err or StatusCode.SC_USER_NOT_EXISTS, "message": "Account/currency check failed"}
         if acct["disabled"]:
             return {"traceId": trace_id, "status": StatusCode.SC_USER_DISABLED, "message": "User disabled"}
-        if acct["tokens"] and req.get("token") not in acct["tokens"]:
+        tok = req.get("token")
+        if acct["tokens"] and (not isinstance(tok, str) or tok not in acct["tokens"]):
             return {"traceId": trace_id, "status": StatusCode.SC_INVALID_TOKEN, "message": "Invalid token"}
         return self._ok(trace_id, username, acct)
 
@@ -943,7 +944,8 @@ class InMemoryWallet:
             return {"traceId": trace_id, "status": StatusCode.SC_TRANSACTION_DUPLICATED, "message": "Duplicate betId"}
         if acct["disabled"]:
             return {"traceId": trace_id, "status": StatusCode.SC_USER_DISABLED, "message": "User disabled"}
-        if acct["tokens"] and req.get("token") not in acct["tokens"]:
+        tok = req.get("token")
+        if acct["tokens"] and (not isinstance(tok, str) or tok not in acct["tokens"]):
             return {"traceId": trace_id, "status": StatusCode.SC_INVALID_TOKEN, "message": "Invalid token"}
         stake = decimal_to_ledger_units(req["amount"], acct["exponent"])
         if stake <= 0:

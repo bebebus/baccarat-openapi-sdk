@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Zero-dependency Node.js SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.10).
+// Zero-dependency Node.js SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.11).
 
 import crypto from 'node:crypto';
 import http from 'node:http';
@@ -219,10 +219,16 @@ export function ledgerUnitsToDecimal(amount, displayExponent) {
 
 // ── 3. Canonical Idempotency Fingerprints (Excludes Mutable Retry Fields) ───
 
+function toScalarString(val) {
+  if (typeof val === 'string') return val;
+  if (typeof val === 'number' || typeof val === 'bigint' || typeof val === 'boolean') return String(val);
+  return '';
+}
+
 export function encodeTupleFingerprint(domain, fields) {
   const parts = [`v1|${domain}`];
   for (const val of fields) {
-    const str = String(val ?? '');
+    const str = toScalarString(val);
     parts.push(`${Buffer.byteLength(str, 'utf8')}:${str}`);
   }
   const canonical = parts.join('|');
@@ -257,9 +263,9 @@ export function betResultFingerprint(payload) {
     payload?.winLoss ?? '',
     payload?.jackpotAmount ?? '',
     payload?.resultType ?? '',
-    String(payload?.isFreespin ?? ''),
-    String(payload?.isEndRound ?? ''),
-    String(payload?.betTime ?? ''),
+    toScalarString(payload?.isFreespin),
+    toScalarString(payload?.isEndRound),
+    toScalarString(payload?.betTime),
   ]);
 }
 
@@ -428,12 +434,8 @@ export class Client {
   async postSigned(routePath, bodyObj) {
     const rawInput = bodyObj && typeof bodyObj === 'object' && !Array.isArray(bodyObj) ? bodyObj : {};
     const rawTrace = rawInput.traceId;
-    const resolvedTraceId =
-      typeof rawTrace === 'string' && rawTrace.trim().length > 0
-        ? rawTrace.trim()
-        : rawTrace != null && typeof rawTrace !== 'string' && String(rawTrace).trim().length > 0
-          ? String(rawTrace).trim()
-          : crypto.randomUUID();
+    const rawTraceScalar = toScalarString(rawTrace).trim();
+    const resolvedTraceId = rawTraceScalar.length > 0 ? rawTraceScalar : crypto.randomUUID();
     const payload = {
       ...rawInput,
       traceId: resolvedTraceId,
@@ -488,18 +490,19 @@ export class Client {
     }
 
     const rawStatus = typeof parsed.status === 'string' ? parsed.status.trim() : '';
+    const respTraceId = toScalarString(parsed.traceId) || payload.traceId;
     if (httpStatus !== 200 || rawStatus !== StatusCode.SC_OK) {
       throw new BaccaratApiError({
-        traceId: String(parsed.traceId ?? payload.traceId),
+        traceId: respTraceId,
         status: rawStatus || fallbackStatusForHttp(httpStatus),
-        message: String(parsed.message ?? `HTTP ${httpStatus}`),
+        message: toScalarString(parsed.message) || `HTTP ${httpStatus}`,
         validation: parsed.validation,
         httpStatus,
       });
     }
 
     return {
-      traceId: String(parsed.traceId ?? payload.traceId),
+      traceId: respTraceId,
       status: StatusCode.SC_OK,
       data: parsed.data,
     };
@@ -1009,7 +1012,8 @@ export class WebhookDispatcher {
     let traceId = '';
     let parsed = null;
     try {
-      const candidate = JSON.parse(rawBuf.toString('utf8'));
+      const rawText = new TextDecoder('utf-8', { fatal: true }).decode(rawBuf);
+      const candidate = JSON.parse(rawText);
       if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
         parsed = candidate;
         if (typeof candidate.traceId === 'string') traceId = candidate.traceId.trim().slice(0, 128);

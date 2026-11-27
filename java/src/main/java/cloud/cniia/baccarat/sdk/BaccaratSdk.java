@@ -10,6 +10,8 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Duration;
@@ -275,6 +277,29 @@ public final class BaccaratSdk {
         return v == null ? "" : String.valueOf(v);
     }
 
+    private static String strictStr(Map<String, Object> m, String k) {
+        return (m != null && m.get(k) instanceof String s) ? s : "";
+    }
+
+    private static String scalarStr(Object v) {
+        if (v == null || v instanceof Map<?, ?> || v instanceof List<?>) return "";
+        return String.valueOf(v);
+    }
+
+    private static String scalarField(Map<String, Object> m, String k) {
+        return m == null ? "" : scalarStr(m.get(k));
+    }
+
+    private static String strictAmount(Map<String, Object> m, String k) {
+        if (m == null) return "";
+        Object v = m.get(k);
+        if (v instanceof String s) return s;
+        if (v instanceof Byte || v instanceof Short || v instanceof Integer || v instanceof Long || v instanceof BigInteger) {
+            return v.toString();
+        }
+        return "";
+    }
+
     private static long requireLong(Map<String, Object> m, String k) {
         if (m == null) throw new SdkException("INVALID_ARGUMENT", k + " is required");
         Object v = m.get(k);
@@ -293,32 +318,32 @@ public final class BaccaratSdk {
 
     public static String betFingerprint(Map<String, Object> p) {
         return encodeTupleFingerprint("wallet/bet", List.of(
-                str(p, "transactionId"), str(p, "username"), str(p, "betId"), str(p, "externalTransactionId"),
-                str(p, "roundId"), str(p, "currency"), str(p, "gameCode"), str(p, "amount")
+                scalarField(p, "transactionId"), scalarField(p, "username"), scalarField(p, "betId"), scalarField(p, "externalTransactionId"),
+                scalarField(p, "roundId"), scalarField(p, "currency"), scalarField(p, "gameCode"), scalarField(p, "amount")
         ));
     }
 
     public static String betResultFingerprint(Map<String, Object> p) {
         return encodeTupleFingerprint("wallet/bet_result", List.of(
-                str(p, "transactionId"), str(p, "username"), str(p, "betId"), str(p, "externalTransactionId"),
-                str(p, "roundId"), str(p, "currency"), str(p, "gameCode"), str(p, "betAmount"),
-                str(p, "winAmount"), str(p, "effectiveTurnover"), str(p, "winLoss"), str(p, "jackpotAmount"),
-                str(p, "resultType"), str(p, "isFreespin"), str(p, "isEndRound"), str(p, "betTime")
+                scalarField(p, "transactionId"), scalarField(p, "username"), scalarField(p, "betId"), scalarField(p, "externalTransactionId"),
+                scalarField(p, "roundId"), scalarField(p, "currency"), scalarField(p, "gameCode"), scalarField(p, "betAmount"),
+                scalarField(p, "winAmount"), scalarField(p, "effectiveTurnover"), scalarField(p, "winLoss"), scalarField(p, "jackpotAmount"),
+                scalarField(p, "resultType"), scalarField(p, "isFreespin"), scalarField(p, "isEndRound"), scalarField(p, "betTime")
         ));
     }
 
     public static String rollbackFingerprint(Map<String, Object> p) {
         return encodeTupleFingerprint("wallet/rollback", List.of(
-                str(p, "transactionId"), str(p, "username"), str(p, "betId"), str(p, "externalTransactionId"),
-                str(p, "roundId"), str(p, "currency"), str(p, "gameCode"), str(p, "amount")
+                scalarField(p, "transactionId"), scalarField(p, "username"), scalarField(p, "betId"), scalarField(p, "externalTransactionId"),
+                scalarField(p, "roundId"), scalarField(p, "currency"), scalarField(p, "gameCode"), scalarField(p, "amount")
         ));
     }
 
     public static String adjustmentFingerprint(Map<String, Object> p) {
         return encodeTupleFingerprint("wallet/adjustment", List.of(
-                str(p, "transactionId"), str(p, "username"), str(p, "betId"), str(p, "externalTransactionId"),
-                str(p, "roundId"), str(p, "currency"), str(p, "gameCode"), str(p, "direction"),
-                str(p, "amount"), str(p, "reasonCode")
+                scalarField(p, "transactionId"), scalarField(p, "username"), scalarField(p, "betId"), scalarField(p, "externalTransactionId"),
+                scalarField(p, "roundId"), scalarField(p, "currency"), scalarField(p, "gameCode"), scalarField(p, "direction"),
+                scalarField(p, "amount"), scalarField(p, "reasonCode")
         ));
     }
 
@@ -750,7 +775,7 @@ public final class BaccaratSdk {
         Map<String, Object> onBetResult(Map<String, Object> req);
         Map<String, Object> onRollback(Map<String, Object> req);
         default Map<String, Object> onAdjustment(Map<String, Object> req) {
-            return makeErrEnvelope(str(req, "traceId"), StatusCode.SC_INVALID_REQUEST, "onAdjustment not implemented");
+            return makeErrEnvelope(strictStr(req, "traceId"), StatusCode.SC_INVALID_REQUEST, "onAdjustment not implemented");
         }
     }
 
@@ -858,9 +883,9 @@ public final class BaccaratSdk {
 
         @Override
         public synchronized Map<String, Object> onBalance(Map<String, Object> req) {
-            String traceId = str(req, "traceId");
-            String username = str(req, "username").trim();
-            String currency = str(req, "currency").trim().toUpperCase(Locale.ROOT);
+            String traceId = strictStr(req, "traceId");
+            String username = strictStr(req, "username").trim();
+            String currency = strictStr(req, "currency").trim().toUpperCase(Locale.ROOT);
             if (username.isEmpty() || currency.isEmpty()) {
                 return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "username and currency are required");
             }
@@ -868,7 +893,8 @@ public final class BaccaratSdk {
             if (a == null) return makeErrEnvelope(traceId, StatusCode.SC_USER_NOT_EXISTS, "User not exists");
             if (!a.currency.equals(currency)) return makeErrEnvelope(traceId, StatusCode.SC_WRONG_CURRENCY, "Wrong currency");
             if (a.disabled) return makeErrEnvelope(traceId, StatusCode.SC_USER_DISABLED, "User disabled");
-            if (!a.tokens.isEmpty() && !a.tokens.contains(str(req, "token"))) {
+            Object tokObj = req == null ? null : req.get("token");
+            if (!a.tokens.isEmpty() && (!(tokObj instanceof String tok) || !a.tokens.contains(tok))) {
                 return makeErrEnvelope(traceId, StatusCode.SC_INVALID_TOKEN, "Invalid token");
             }
             return okResp(traceId, username, a);
@@ -876,12 +902,13 @@ public final class BaccaratSdk {
 
         @Override
         public synchronized Map<String, Object> onBet(Map<String, Object> req) {
-            String traceId = str(req, "traceId");
-            String txId = str(req, "transactionId").trim();
-            String betId = str(req, "betId").trim();
-            String username = str(req, "username").trim();
-            String currency = str(req, "currency").trim().toUpperCase(Locale.ROOT);
-            if (txId.isEmpty() || betId.isEmpty() || username.isEmpty() || currency.isEmpty() || str(req, "amount").isEmpty()) {
+            String traceId = strictStr(req, "traceId");
+            String txId = strictStr(req, "transactionId").trim();
+            String betId = strictStr(req, "betId").trim();
+            String username = strictStr(req, "username").trim();
+            String currency = strictStr(req, "currency").trim().toUpperCase(Locale.ROOT);
+            String amount = strictAmount(req, "amount").trim();
+            if (txId.isEmpty() || betId.isEmpty() || username.isEmpty() || currency.isEmpty() || amount.isEmpty()) {
                 return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "Missing required bet fields");
             }
             Acct a = accounts.get(username);
@@ -900,10 +927,11 @@ public final class BaccaratSdk {
                 return makeErrEnvelope(traceId, StatusCode.SC_TRANSACTION_DUPLICATED, "Duplicate betId");
             }
             if (a.disabled) return makeErrEnvelope(traceId, StatusCode.SC_USER_DISABLED, "User disabled");
-            if (!a.tokens.isEmpty() && !a.tokens.contains(str(req, "token"))) {
+            Object tokObj = req == null ? null : req.get("token");
+            if (!a.tokens.isEmpty() && (!(tokObj instanceof String tok) || !a.tokens.contains(tok))) {
                 return makeErrEnvelope(traceId, StatusCode.SC_INVALID_TOKEN, "Invalid token");
             }
-            BigInteger stake = decimalToLedgerUnits(str(req, "amount"), a.exponent, false);
+            BigInteger stake = decimalToLedgerUnits(amount, a.exponent, false);
             if (stake.signum() <= 0) {
                 return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "Bet amount must be positive");
             }
@@ -918,13 +946,15 @@ public final class BaccaratSdk {
 
         @Override
         public synchronized Map<String, Object> onBetResult(Map<String, Object> req) {
-            String traceId = str(req, "traceId");
-            String txId = str(req, "transactionId").trim();
-            String betId = str(req, "betId").trim();
-            String username = str(req, "username").trim();
-            String currency = str(req, "currency").trim().toUpperCase(Locale.ROOT);
+            String traceId = strictStr(req, "traceId");
+            String txId = strictStr(req, "transactionId").trim();
+            String betId = strictStr(req, "betId").trim();
+            String username = strictStr(req, "username").trim();
+            String currency = strictStr(req, "currency").trim().toUpperCase(Locale.ROOT);
+            String betAmount = strictAmount(req, "betAmount").trim();
+            String winAmount = strictAmount(req, "winAmount").trim();
             if (txId.isEmpty() || betId.isEmpty() || username.isEmpty() || currency.isEmpty()
-                    || str(req, "winAmount").isEmpty() || str(req, "betAmount").isEmpty()) {
+                    || winAmount.isEmpty() || betAmount.isEmpty()) {
                 return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "Missing required bet_result fields");
             }
             Acct a = accounts.get(username);
@@ -943,8 +973,8 @@ public final class BaccaratSdk {
             if (orig == null) {
                 return makeErrEnvelope(traceId, StatusCode.SC_TRANSACTION_NOT_EXISTS, "Original betId missing");
             }
-            BigInteger betAmt = decimalToLedgerUnits(str(req, "betAmount"), a.exponent, false);
-            BigInteger win = decimalToLedgerUnits(str(req, "winAmount"), a.exponent, false);
+            BigInteger betAmt = decimalToLedgerUnits(betAmount, a.exponent, false);
+            BigInteger win = decimalToLedgerUnits(winAmount, a.exponent, false);
             if (!orig.username.equals(username) || !orig.currency.equals(a.currency) || !orig.stake.equals(betAmt)) {
                 return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "bet_result mismatch");
             }
@@ -959,12 +989,13 @@ public final class BaccaratSdk {
 
         @Override
         public synchronized Map<String, Object> onRollback(Map<String, Object> req) {
-            String traceId = str(req, "traceId");
-            String txId = str(req, "transactionId").trim();
-            String betId = str(req, "betId").trim();
-            String username = str(req, "username").trim();
-            String currency = str(req, "currency").trim().toUpperCase(Locale.ROOT);
-            if (txId.isEmpty() || betId.isEmpty() || username.isEmpty() || currency.isEmpty() || str(req, "amount").isEmpty()) {
+            String traceId = strictStr(req, "traceId");
+            String txId = strictStr(req, "transactionId").trim();
+            String betId = strictStr(req, "betId").trim();
+            String username = strictStr(req, "username").trim();
+            String currency = strictStr(req, "currency").trim().toUpperCase(Locale.ROOT);
+            String amount = strictAmount(req, "amount").trim();
+            if (txId.isEmpty() || betId.isEmpty() || username.isEmpty() || currency.isEmpty() || amount.isEmpty()) {
                 return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "Missing required rollback fields");
             }
             Acct a = accounts.get(username);
@@ -980,7 +1011,7 @@ public final class BaccaratSdk {
                 if (prior.empty) return makeErrEnvelope(traceId, StatusCode.SC_TRANSACTION_NOT_EXISTS, "Never deducted");
                 return okResp(traceId, username, a);
             }
-            BigInteger refund = decimalToLedgerUnits(str(req, "amount"), a.exponent, false);
+            BigInteger refund = decimalToLedgerUnits(amount, a.exponent, false);
             if (refund.signum() <= 0) {
                 return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "Rollback amount must be positive");
             }
@@ -1003,15 +1034,16 @@ public final class BaccaratSdk {
 
         @Override
         public synchronized Map<String, Object> onAdjustment(Map<String, Object> req) {
-            String traceId = str(req, "traceId");
-            String txId = str(req, "transactionId").trim();
-            String betId = str(req, "betId").trim();
-            String username = str(req, "username").trim();
-            String currency = str(req, "currency").trim().toUpperCase(Locale.ROOT);
-            String direction = str(req, "direction").trim().toUpperCase(Locale.ROOT);
-            String reasonCode = str(req, "reasonCode").trim();
+            String traceId = strictStr(req, "traceId");
+            String txId = strictStr(req, "transactionId").trim();
+            String betId = strictStr(req, "betId").trim();
+            String username = strictStr(req, "username").trim();
+            String currency = strictStr(req, "currency").trim().toUpperCase(Locale.ROOT);
+            String direction = strictStr(req, "direction").trim().toUpperCase(Locale.ROOT);
+            String reasonCode = strictStr(req, "reasonCode").trim();
+            String amount = strictAmount(req, "amount").trim();
             if (txId.isEmpty() || betId.isEmpty() || username.isEmpty() || currency.isEmpty()
-                    || reasonCode.isEmpty() || str(req, "amount").isEmpty()
+                    || reasonCode.isEmpty() || amount.isEmpty()
                     || (!"CREDIT".equals(direction) && !"DEBIT".equals(direction))) {
                 return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "Missing or invalid adjustment fields");
             }
@@ -1034,7 +1066,7 @@ public final class BaccaratSdk {
             if (!orig.username.equals(username) || !orig.currency.equals(a.currency)) {
                 return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "Adjustment mismatch");
             }
-            BigInteger adjUnits = decimalToLedgerUnits(str(req, "amount"), a.exponent, false);
+            BigInteger adjUnits = decimalToLedgerUnits(amount, a.exponent, false);
             if (adjUnits.signum() <= 0) {
                 return makeErrEnvelope(traceId, StatusCode.SC_INVALID_REQUEST, "Adjustment amount must be positive");
             }
@@ -1104,9 +1136,16 @@ public final class BaccaratSdk {
             Map<String, Object> parsed;
             String traceId = "";
             try {
-                parsed = JsonCodec.parseObject(new String(safeBody, StandardCharsets.UTF_8));
+                String bodyText = StandardCharsets.UTF_8.newDecoder()
+                        .onMalformedInput(CodingErrorAction.REPORT)
+                        .onUnmappableCharacter(CodingErrorAction.REPORT)
+                        .decode(ByteBuffer.wrap(safeBody))
+                        .toString();
+                parsed = JsonCodec.parseObject(bodyText);
                 traceId = parsed.get("traceId") instanceof String s ? s.trim() : "";
                 if (traceId.length() > 128) traceId = traceId.substring(0, 128);
+            } catch (CharacterCodingException e) {
+                return makeErrEnvelope("", StatusCode.SC_INVALID_REQUEST, "Invalid UTF-8");
             } catch (Exception e) {
                 return makeErrEnvelope("", StatusCode.SC_INVALID_REQUEST, "Invalid JSON");
             }
