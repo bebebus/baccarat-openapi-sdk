@@ -5,7 +5,7 @@
 ## 安装与单测
 
 ```bash
-go get github.com/bebebus/baccarat-openapi-sdk/go@v1.5.11
+go get github.com/bebebus/baccarat-openapi-sdk/go@v1.6.0
 cd go && go test -v -count=1 ./...
 ```
 
@@ -92,6 +92,23 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// v1.6.0 新增：主站余额变动推送（player/balance-notify）、实时在线人数查询（game/ccu）与分页钱包状态反查
+	notifyRes, _, err := client.NotifyPlayerBalance(ctx, baccarat.PlayerBalanceNotifyRequest{
+		Username: "player_9527",
+		Currency: "USD",
+		Reason:   "DEPOSIT",
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("Notified:", notifyRes.Notified, "ActiveSessions:", notifyRes.ActiveSessions)
+
+	ccu, _, err := client.GetGameCcu(ctx, baccarat.GameCcuRequest{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("Online:", ccu.OnlinePlayers, "Seated:", ccu.SeatedPlayers, "Lobby:", ccu.LobbyPlayers)
+
 	// 无缝钱包回调直接作为标准 http.Handler 挂载（纯回调服务无需 BaseURL）
 	disp, err := baccarat.NewWebhookDispatcher(apiKey, secret, &dbWallet{})
 	if err != nil {
@@ -104,9 +121,9 @@ func main() {
 
 ### 生产回调 4 项强制不变量
 
-1. **4 路并发（不按玩家串行）**：平台按单商户最多 4 路并发推送回调，请对玩家钱包行使用 `SELECT ... FOR UPDATE` 或原子 `UPDATE ... SET balance = balance + delta` + `UNIQUE(transaction_id)`。
-2. **多注同局每张注单均带 `isEndRound: 1`**：切勿收到首张 `isEndRound: 1` 即终结局级状态，必须按 `betId` / `transactionId` 逐票入账。
+1. **同玩家正常路径串行 + 跨玩家 4 路并发**：`v1.6.0` 起同一玩家单局多注的 `/wallet/bet_result` 按 `(createdAt ASC, id ASC)` 在正常路径下按 `(operatorId, userId)` 串行推送，跨玩家保持单商户最多 4 路并发；若某票触发瞬态重试，同局后续注单仍会继续推进不阻塞开奖。数据库层仍须对玩家钱包行使用 `SELECT ... FOR UPDATE` 或原子 `UPDATE ... SET balance = balance + delta` + `UNIQUE(transaction_id)`。
+2. **确定性末票 `isEndRound` 与出站 `X-Timestamp`**：`v1.6.0` 起同一玩家同局仅最后一张非 `REJECTED` 注单携带 `isEndRound: 1`，其余较早注单为 `isEndRound: 0`（首推与重试均确定性一致）；仍须按 `betId` / `transactionId` 逐票入账。平台出站 `/wallet/*` 回调默认附带 13 位毫秒 `X-Timestamp` 请求头，但**不参与 `X-Signature` 计算**（验签仍仅覆盖原始请求体字节）。
 3. **终态拦截与 `~5.07h` 重试窗口**：返回 `HTTP 200` 非 JSON 或无瞬态 `SC_*` 的非 2xx JSON 会使 `/wallet/bet_result` 立即挂起 `HELD` 且 0 次重试；瞬态错误按 **1 次首次 + 12 次自动重试（约 `5.07h`）** 退避重试（`WebhookDispatcher` 已内置 `recover()`，将未捕获 panic 映射为 `SC_OPERATOR_TIMEOUT`）。
 4. **0 位小数币种（如 `JPY`）零值为 `"0"`**：切勿用 `== "0.00"` 判零，请使用 `DecimalToLedgerUnits` 比较。
 
-> **单字段清空说明**：在 `UpdatePlayerStatusRequest` 上设置 `ClearReason: true` 或在 `UpdatePlayerLimitsRequest` 上设置 `ClearMinBet` / `ClearMaxBet` / `ClearMaxTableRound` / `ClearMaxUserDay` / `ClearMaxLossPerDay` 可显式输出 JSON `null`（`ClearCustomChips: true` 输出 `[]`）以清空单个字段。
+> **单字段清空与分页说明**：在 `UpdatePlayerStatusRequest` 上设置 `ClearReason: true` 或在 `UpdatePlayerLimitsRequest` 上设置 `ClearMinBet` / `ClearMaxBet` / `ClearMaxTableRound` / `ClearMaxUserDay` / `ClearMaxLossPerDay` 可显式输出 JSON `null`（`ClearCustomChips: true` 输出 `[]`）以清空单个字段。`GetWalletTransactionStatus` 支持可选分页参数 `PageNo` / `PageSize`（默认 `1` / `200`），响应返回 `pageNo`、`pageSize`、`total` 与 `hasMore`（也可反序列化至 `WalletTransactionStatusData`）。

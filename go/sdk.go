@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Package baccarat provides a zero-dependency Go SDK for the Baccarat Live Platform
-// B2B Operator Seamless Wallet API (v1.5.11).
+// B2B Operator Seamless Wallet API (v1.6.0).
 package baccarat
 
 import (
@@ -677,6 +677,38 @@ func (c *Client) TerminateSessions(ctx context.Context, req TerminateSessionsReq
 	return &data, traceID, nil
 }
 
+type GameCcuRequest struct {
+	TraceID string `json:"traceId"`
+	TableID string `json:"tableId,omitempty"`
+}
+
+type GameCcuTableItem struct {
+	TableID     string `json:"tableId"`
+	GameCode    string `json:"gameCode"`
+	PlayerCount int    `json:"playerCount"`
+}
+
+type GameCcuData struct {
+	OperatorID    string             `json:"operatorId"`
+	OnlinePlayers int                `json:"onlinePlayers"`
+	SeatedPlayers int                `json:"seatedPlayers"`
+	LobbyPlayers  int                `json:"lobbyPlayers"`
+	Tables        []GameCcuTableItem `json:"tables"`
+	ServerTime    int64              `json:"serverTime"`
+}
+
+func (c *Client) GetGameCcu(ctx context.Context, req GameCcuRequest) (*GameCcuData, string, error) {
+	if strings.TrimSpace(req.TraceID) == "" {
+		req.TraceID = newUUIDv4()
+	}
+	var data GameCcuData
+	traceID, err := c.postSigned(ctx, "/operator/v1/game/ccu", req, req.TraceID, &data)
+	if err != nil {
+		return nil, traceID, err
+	}
+	return &data, traceID, nil
+}
+
 type UpdatePlayerStatusRequest struct {
 	TraceID        string  `json:"traceId"`
 	Username       string  `json:"username"`
@@ -810,6 +842,36 @@ func (c *Client) UpdatePlayerLimits(ctx context.Context, req UpdatePlayerLimitsR
 		return nil, traceID, err
 	}
 	return data, traceID, nil
+}
+
+type PlayerBalanceNotifyRequest struct {
+	TraceID  string `json:"traceId"`
+	Username string `json:"username"`
+	Currency string `json:"currency,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+type PlayerBalanceNotifyData struct {
+	Username       string  `json:"username"`
+	Currency       *string `json:"currency"`
+	Notified       bool    `json:"notified"`
+	ActiveSessions int     `json:"activeSessions"`
+	ServerTime     int64   `json:"serverTime"`
+}
+
+func (c *Client) NotifyPlayerBalance(ctx context.Context, req PlayerBalanceNotifyRequest) (*PlayerBalanceNotifyData, string, error) {
+	if strings.TrimSpace(req.Username) == "" {
+		return nil, "", &SdkError{Code: "INVALID_ARGUMENT", Message: "username is required"}
+	}
+	if strings.TrimSpace(req.TraceID) == "" {
+		req.TraceID = newUUIDv4()
+	}
+	var data PlayerBalanceNotifyData
+	traceID, err := c.postSigned(ctx, "/operator/v1/player/balance-notify", req, req.TraceID, &data)
+	if err != nil {
+		return nil, traceID, err
+	}
+	return &data, traceID, nil
 }
 
 type ListTransactionsRequest struct {
@@ -1034,6 +1096,35 @@ type WalletTransactionStatusRequest struct {
 	Username      string `json:"username,omitempty"`
 	FromTime      *int64 `json:"fromTime,omitempty"`
 	ToTime        *int64 `json:"toTime,omitempty"`
+	PageNo        int    `json:"pageNo,omitempty"`
+	PageSize      int    `json:"pageSize,omitempty"`
+}
+
+type WalletTransactionStatusRow struct {
+	TransactionID  string  `json:"transactionId"`
+	BetID          string  `json:"betId"`
+	RoundID        string  `json:"roundId"`
+	Username       string  `json:"username"`
+	Family         string  `json:"family"`
+	CurrencyCode   string  `json:"currencyCode"`
+	GameCode       string  `json:"gameCode"`
+	Amount         string  `json:"amount"`
+	Status         string  `json:"status"`
+	OperatorStatus *string `json:"operatorStatus"`
+	Attempts       int     `json:"attempts"`
+	AutoRetryCount int     `json:"autoRetryCount"`
+	DeadLettered   bool    `json:"deadLettered"`
+	CreatedAt      int64   `json:"createdAt"`
+	CompletedAt    *int64  `json:"completedAt"`
+	RoundStatus    string  `json:"roundStatus"`
+}
+
+type WalletTransactionStatusData struct {
+	Transactions []WalletTransactionStatusRow `json:"transactions"`
+	PageNo       int                          `json:"pageNo"`
+	PageSize     int                          `json:"pageSize"`
+	Total        int                          `json:"total"`
+	HasMore      bool                         `json:"hasMore"`
 }
 
 func (c *Client) GetWalletTransactionStatus(ctx context.Context, req WalletTransactionStatusRequest) (map[string]any, string, error) {

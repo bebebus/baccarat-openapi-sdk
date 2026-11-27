@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.11)."""
+"""Zero-dependency Python 3 SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.6.0)."""
 
 from __future__ import annotations
 
@@ -609,6 +609,69 @@ class Client:
             payload["traceId"] = trace_id
         return self._post_signed("/operator/v1/player/limits", payload)
 
+    def notify_player_balance(
+        self,
+        params: Optional[Dict[str, Any]] = None,
+        *,
+        username: Optional[str] = None,
+        currency: Optional[str] = None,
+        reason: Optional[str] = None,
+        trace_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Notify an online player's active WebSocket sessions of a balance change.
+
+        Calls ``POST /operator/v1/player/balance-notify``. Accepts either a dict
+        ``params`` (wire keys: ``username``, optional ``currency``, ``reason``,
+        ``traceId``) or keyword arguments.
+
+        Returns envelope with ``data``:
+            ``{"username": str, "currency": Optional[str], "notified": bool,
+            "activeSessions": int, "serverTime": int}``.
+        """
+        if params is not None and not isinstance(params, dict):
+            raise BaccaratSdkError("params must be a dict", "INVALID_ARGUMENT")
+        payload: Dict[str, Any] = dict(params) if params is not None else {}
+        if username is not None:
+            payload["username"] = username
+        raw_username = payload.get("username")
+        if not isinstance(raw_username, str) or not raw_username.strip():
+            raise BaccaratSdkError("username is required", "INVALID_ARGUMENT")
+        payload["username"] = raw_username.strip()
+        if currency is not None:
+            payload["currency"] = currency
+        if reason is not None:
+            payload["reason"] = reason
+        if trace_id is not None:
+            payload["traceId"] = trace_id
+        return self._post_signed("/operator/v1/player/balance-notify", payload)
+
+    def get_game_ccu(
+        self,
+        params: Optional[Dict[str, Any]] = None,
+        *,
+        table_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Query real-time concurrent players (CCU) via ``POST /operator/v1/game/ccu``.
+
+        Accepts either an optional dict ``params`` (wire keys: optional ``tableId``,
+        ``traceId``) or keyword arguments.
+
+        Returns envelope with ``data``:
+            ``{"operatorId": str, "onlinePlayers": int, "seatedPlayers": int,
+            "lobbyPlayers": int,
+            "tables": [{"tableId": str, "gameCode": str, "playerCount": int}, ...],
+            "serverTime": int}``.
+        """
+        if params is not None and not isinstance(params, dict):
+            raise BaccaratSdkError("params must be a dict", "INVALID_ARGUMENT")
+        payload: Dict[str, Any] = dict(params) if params is not None else {}
+        if table_id is not None:
+            payload["tableId"] = table_id
+        if trace_id is not None:
+            payload["traceId"] = trace_id
+        return self._post_signed("/operator/v1/game/ccu", payload)
+
     def list_transactions(
         self,
         *,
@@ -766,8 +829,19 @@ class Client:
         username: Optional[str] = None,
         from_time: Optional[int] = None,
         to_time: Optional[int] = None,
+        page_no: Optional[int] = None,
+        page_size: Optional[int] = None,
         trace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """Query wallet callback delivery status via ``POST /operator/v1/wallet/transaction-status``.
+
+        Optional pagination parameters ``page_no`` (integer >= 1) and ``page_size``
+        (integer 1..200) default on the server to page 1, size 200 when omitted.
+
+        Returns envelope with ``data``:
+            ``{"transactions": [...], "pageNo": int, "pageSize": int,
+            "total": int, "hasMore": bool}``.
+        """
         tx_s = (transaction_id or "").strip() if isinstance(transaction_id, str) else ""
         bet_s = (bet_id or "").strip() if isinstance(bet_id, str) else ""
         user_s = (username or "").strip() if isinstance(username, str) else ""
@@ -795,6 +869,14 @@ class Client:
                 )
             payload["fromTime"] = from_time
             payload["toTime"] = to_time
+        if page_no is not None:
+            if isinstance(page_no, bool) or not isinstance(page_no, int) or page_no < 1:
+                raise BaccaratSdkError("page_no must be an integer >= 1", "INVALID_ARGUMENT")
+            payload["pageNo"] = page_no
+        if page_size is not None:
+            if isinstance(page_size, bool) or not isinstance(page_size, int) or not (1 <= page_size <= 200):
+                raise BaccaratSdkError("page_size must be an integer in 1..200", "INVALID_ARGUMENT")
+            payload["pageSize"] = page_size
         if trace_id is not None:
             payload["traceId"] = trace_id
         return self._post_signed("/operator/v1/wallet/transaction-status", payload)

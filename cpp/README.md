@@ -11,7 +11,7 @@
 在仓库根目录执行编译与单测：
 
 ```bash
-git clone --branch v1.5.11 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
+git clone --branch v1.6.0 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
 cd baccarat-openapi-sdk
 cmake -S cpp -B cpp/build
 cmake --build cpp/build
@@ -79,9 +79,10 @@ int main() {
 }
 ```
 
-### 生产回调 4 项强制不变量
+### 生产回调 5 项关键不变量（v1.6.0）
 
-1. **4 路并发（不按玩家串行）**：平台按单商户最多 4 路并发推送回调，请对玩家钱包行使用 `SELECT ... FOR UPDATE` 或原子 `UPDATE ... SET balance = balance + delta` + `UNIQUE(transaction_id)`。
-2. **多注同局每张注单均带 `isEndRound: 1`**：切勿收到首张 `isEndRound: 1` 即终结局级状态，必须按 `betId` / `transactionId` 逐票入账。
-3. **终态拦截与 `~5.07h` 重试窗口**：返回 `HTTP 200` 非 JSON 或无瞬态 `SC_*` 的非 2xx JSON 会使 `/wallet/bet_result` 立即挂起 `HELD` 且 0 次重试；瞬态错误按 **1 次首次 + 12 次自动重试（约 `5.07h`）** 退避重试（`WebhookDispatcher` 已自动将未捕获 `std::exception` / `...` 映射为 `SC_OPERATOR_TIMEOUT`）。
-4. **0 位小数币种（如 `JPY`）零值为 `"0"`**：切勿用 `== "0.00"` 判零，请使用 `baccarat::decimal_to_ledger_units(...)` 比较。
+1. **4 路并发 + 同玩家局内串行结算**：平台按单商户最多 4 路并发推送回调（不同玩家间并发）；自 `v1.6.0` 起同一玩家同局多张 `/wallet/bet_result` 按 `(createdAt ASC, id ASC)` 串行依次下发，但下注或单票重试场景下仍可能并发/乱序到达，请继续对玩家钱包行使用 `SELECT ... FOR UPDATE` 或原子 `UPDATE ... SET balance = balance + delta` + `UNIQUE(transaction_id)`。
+2. **确定性 `isEndRound`（仅末票为 `1`，其余为 `0`）**：自 `v1.6.0` 起同玩家同局多张注单仅最后一张非拒单票携带 `isEndRound: 1`，其余票携带 `isEndRound: 0`（首投与 12 次自动重试/`redrive` 保持一致）；瞬态重试时仍可能乱序，务必始终按 `betId` / `transactionId` 逐票幂等入账。
+3. **出站回调统一附带 `X-Timestamp`（不破坏 `X-Signature`）**：自 `v1.6.0` 起平台出站全部 `/wallet/*` 回调均附带 13 位毫秒 `X-Timestamp` 请求头；`X-Signature` 仍严格按原始请求体字节计算 HMAC-SHA256（不纳入 `X-Timestamp`），验签完全向后兼容，商户可在验签通过后按需叠加 `±300s` 时间窗校验。
+4. **终态拦截与 `~5.07h` 重试窗口**：返回 `HTTP 200` 非 JSON 或无瞬态 `SC_*` 的非 2xx JSON 会使 `/wallet/bet_result` 立即挂起 `HELD` 且 0 次重试；瞬态错误按 **1 次首次 + 12 次自动重试（约 `5.07h`）** 退避重试（`WebhookDispatcher` 已自动将未捕获 `std::exception` / `...` 映射为 `SC_OPERATOR_TIMEOUT`）。
+5. **0 位小数币种（如 `JPY`）零值为 `"0"`**：切勿用 `== "0.00"` 判零，请使用 `baccarat::decimal_to_ledger_units(...)` 比较。

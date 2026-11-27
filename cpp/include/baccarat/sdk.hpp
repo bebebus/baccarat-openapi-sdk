@@ -121,9 +121,11 @@ public:
     Json ping(Json params = Json::object()) const;
     Json create_game_url(Json params) const;
     Json list_tables(Json params = Json::object()) const;
+    Json get_game_ccu(Json params = Json::object()) const;
     Json terminate_sessions(Json params = Json::object()) const;
     Json update_player_status(Json params) const;
     Json update_player_limits(Json params) const;
+    Json notify_player_balance(Json params) const;
     Json list_transactions(Json params) const;
     std::vector<Json> list_all_transactions(
         int64_t from_time,

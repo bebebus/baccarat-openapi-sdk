@@ -804,6 +804,348 @@ public final class SdkTestRunner {
         checkEq(badUtf8Resp.get("status"), BaccaratSdk.StatusCode.SC_INVALID_REQUEST, "wb:p32InvalidUtf8Status");
         checkEq(badUtf8Resp.get("traceId"), "", "wb:p32InvalidUtf8TraceEmpty");
 
+        // 6. v1.6.0: notifyPlayerBalance, getGameCcu, paginated getWalletTransactionStatus,
+        //    deterministic isEndRound (0 then 1 in same round), and outbound X-Timestamp header invariance
+        HttpServer v160Srv = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        v160Srv.createContext("/operator/v1/", ex -> {
+            byte[] reqBytes = ex.getRequestBody().readAllBytes();
+            String st = BaccaratSdk.verifyWebhookHeaders(
+                    ex.getRequestHeaders().getFirst("X-API-Key"),
+                    ex.getRequestHeaders().getFirst("X-Signature"),
+                    reqBytes, apiKey, secret
+            );
+            Map<String, Object> body = JsonCodec.parseObject(new String(reqBytes, StandardCharsets.UTF_8));
+            Map<String, Object> resp = new LinkedHashMap<>();
+            resp.put("traceId", body.get("traceId"));
+            if (!BaccaratSdk.StatusCode.SC_OK.equals(st)) {
+                resp.put("status", st);
+                resp.put("message", "auth failed");
+            } else {
+                String path = ex.getRequestURI().getPath();
+                resp.put("status", "SC_OK");
+                if ("/operator/v1/player/balance-notify".equals(path)) {
+                    Object u = body.get("username");
+                    if ("player_online".equals(u)) {
+                        if (!"CNY".equals(body.get("currency")) || !"DEPOSIT".equals(body.get("reason"))) {
+                            resp.put("status", "SC_INVALID_REQUEST");
+                            resp.put("message", "unexpected notify fields");
+                        } else {
+                            Map<String, Object> data = new LinkedHashMap<>();
+                            data.put("username", "player_online");
+                            data.put("currency", "CNY");
+                            data.put("notified", true);
+                            data.put("activeSessions", 2);
+                            data.put("serverTime", 1764200000000L);
+                            resp.put("data", data);
+                        }
+                    } else if ("player_offline".equals(u)) {
+                        Map<String, Object> data = new LinkedHashMap<>();
+                        data.put("username", "player_offline");
+                        data.put("currency", null);
+                        data.put("notified", false);
+                        data.put("activeSessions", 0);
+                        data.put("serverTime", 1764200000001L);
+                        resp.put("data", data);
+                    } else {
+                        resp.put("status", "SC_USER_NOT_EXISTS");
+                        resp.put("message", "user not mapped");
+                    }
+                } else if ("/operator/v1/game/ccu".equals(path)) {
+                    Object tableId = body.get("tableId");
+                    if (tableId == null || "".equals(tableId)) {
+                        resp.put("data", Map.of(
+                                "operatorId", "OP_ALPHA",
+                                "onlinePlayers", 12,
+                                "seatedPlayers", 9,
+                                "lobbyPlayers", 3,
+                                "tables", List.of(
+                                        Map.of("tableId", "T-A1", "gameCode", "BACCARAT_T-A1", "playerCount", 2),
+                                        Map.of("tableId", "T-A2", "gameCode", "BACCARAT_T-A2", "playerCount", 7)
+                                ),
+                                "serverTime", 1764200000100L
+                        ));
+                    } else if ("T-A2".equals(tableId)) {
+                        resp.put("data", Map.of(
+                                "operatorId", "OP_ALPHA",
+                                "onlinePlayers", 7,
+                                "seatedPlayers", 7,
+                                "lobbyPlayers", 0,
+                                "tables", List.of(
+                                        Map.of("tableId", "T-A2", "gameCode", "BACCARAT_T-A2", "playerCount", 7)
+                                ),
+                                "serverTime", 1764200000200L
+                        ));
+                    } else {
+                        resp.put("status", "SC_INVALID_GAME");
+                        resp.put("message", "table not permitted");
+                    }
+                } else if ("/operator/v1/wallet/transaction-status".equals(path)) {
+                    int pageNo = body.get("pageNo") instanceof Number n ? n.intValue() : 1;
+                    int pageSize = body.get("pageSize") instanceof Number n ? n.intValue() : 200;
+                    List<Map<String, Object>> rows = pageNo == 1
+                            ? List.of(
+                                    Map.of("transactionId", "bet_j_p1_1", "betId", "b2btkt_j1", "status", "COMPLETED"),
+                                    Map.of("transactionId", "stl_j_p1_2", "betId", "b2btkt_j1", "status", "COMPLETED")
+                            )
+                            : List.of(
+                                    Map.of("transactionId", "stl_j_p2_3", "betId", "b2btkt_j2", "status", "PENDING")
+                            );
+                    boolean hasMore = (long) pageNo * pageSize < 3L;
+                    Map<String, Object> data = new LinkedHashMap<>();
+                    data.put("transactions", rows);
+                    data.put("pageNo", pageNo);
+                    data.put("pageSize", pageSize);
+                    data.put("total", 3);
+                    data.put("hasMore", hasMore);
+                    resp.put("data", data);
+                }
+            }
+            byte[] out = JsonCodec.stringify(resp).getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().set("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, out.length);
+            ex.getResponseBody().write(out);
+            ex.close();
+        });
+        v160Srv.start();
+        try {
+            BaccaratSdk.Config v160Cfg = new BaccaratSdk.Config(
+                    apiKey, secret, BaccaratSdk.Environment.PRODUCTION,
+                    "http://127.0.0.1:" + v160Srv.getAddress().getPort(), 5000
+            );
+            BaccaratSdk.Client v160Client = new BaccaratSdk.Client(v160Cfg);
+
+            // notifyPlayerBalance: online (notified=true) & offline (notified=false, currency=null)
+            Map<String, Object> onlineNotify = (Map<String, Object>) v160Client.notifyPlayerBalance(Map.of(
+                    "username", "player_online", "currency", "CNY", "reason", "DEPOSIT"
+            )).get("data");
+            checkEq(onlineNotify.get("username"), "player_online", "v160:notifyOnlineUser");
+            checkEq(onlineNotify.get("currency"), "CNY", "v160:notifyOnlineCurrency");
+            checkEq(onlineNotify.get("notified"), Boolean.TRUE, "v160:notifyOnlineFlag");
+            checkEq(((Number) onlineNotify.get("activeSessions")).intValue(), 2, "v160:notifyOnlineSessions");
+            checkEq(((Number) onlineNotify.get("serverTime")).longValue(), 1764200000000L, "v160:notifyOnlineServerTime");
+
+            Map<String, Object> offlineNotify = (Map<String, Object>) v160Client.notifyPlayerBalance(Map.of(
+                    "username", "player_offline"
+            )).get("data");
+            checkEq(offlineNotify.get("username"), "player_offline", "v160:notifyOfflineUser");
+            check(offlineNotify.containsKey("currency") && offlineNotify.get("currency") == null, "v160:notifyOfflineNullableCurrency");
+            checkEq(offlineNotify.get("notified"), Boolean.FALSE, "v160:notifyOfflineFlag");
+            checkEq(((Number) offlineNotify.get("activeSessions")).intValue(), 0, "v160:notifyOfflineSessions");
+            checkEq(((Number) offlineNotify.get("serverTime")).longValue(), 1764200000001L, "v160:notifyOfflineServerTime");
+
+            for (Map<String, Object> badNotify : List.<Map<String, Object>>of(Map.of(), Map.of("username", "   "), Map.of("username", 123))) {
+                boolean threw = false;
+                try {
+                    v160Client.notifyPlayerBalance(badNotify);
+                } catch (BaccaratSdk.SdkException ex) {
+                    threw = "INVALID_ARGUMENT".equals(ex.code);
+                }
+                check(threw, "v160:notifyInvalidUsername:" + badNotify);
+            }
+            boolean threwNullNotify = false;
+            try {
+                v160Client.notifyPlayerBalance(null);
+            } catch (BaccaratSdk.SdkException ex) {
+                threwNullNotify = "INVALID_ARGUMENT".equals(ex.code);
+            }
+            check(threwNullNotify, "v160:notifyNullParams");
+            boolean caughtNotifyNotExists = false;
+            try {
+                v160Client.notifyPlayerBalance(Map.of("username", "ghost_user"));
+            } catch (BaccaratSdk.ApiException ex) {
+                caughtNotifyNotExists = BaccaratSdk.StatusCode.SC_USER_NOT_EXISTS.equals(ex.status);
+            }
+            check(caughtNotifyNotExists, "v160:notifyUserNotExists");
+
+            // getGameCcu: aggregate (0-arg overload) & tableId filter & SC_INVALID_GAME
+            Map<String, Object> ccuAll = (Map<String, Object>) v160Client.getGameCcu().get("data");
+            checkEq(ccuAll.get("operatorId"), "OP_ALPHA", "v160:ccuAllOp");
+            checkEq(((Number) ccuAll.get("onlinePlayers")).intValue(), 12, "v160:ccuAllOnline");
+            checkEq(((Number) ccuAll.get("seatedPlayers")).intValue(), 9, "v160:ccuAllSeated");
+            checkEq(((Number) ccuAll.get("lobbyPlayers")).intValue(), 3, "v160:ccuAllLobby");
+            checkEq(((Number) ccuAll.get("serverTime")).longValue(), 1764200000100L, "v160:ccuAllServerTime");
+            List<Map<String, Object>> allTables = (List<Map<String, Object>>) ccuAll.get("tables");
+            checkEq(allTables.size(), 2, "v160:ccuAllTablesCount");
+            checkEq(allTables.get(0).get("tableId"), "T-A1", "v160:ccuAllT0Id");
+            checkEq(allTables.get(0).get("gameCode"), "BACCARAT_T-A1", "v160:ccuAllT0Code");
+            checkEq(((Number) allTables.get(0).get("playerCount")).intValue(), 2, "v160:ccuAllT0Count");
+            checkEq(allTables.get(1).get("tableId"), "T-A2", "v160:ccuAllT1Id");
+            checkEq(allTables.get(1).get("gameCode"), "BACCARAT_T-A2", "v160:ccuAllT1Code");
+            checkEq(((Number) allTables.get(1).get("playerCount")).intValue(), 7, "v160:ccuAllT1Count");
+
+            Map<String, Object> ccuTable = (Map<String, Object>) v160Client.getGameCcu(Map.of("tableId", "T-A2")).get("data");
+            checkEq(ccuTable.get("operatorId"), "OP_ALPHA", "v160:ccuTableOp");
+            checkEq(((Number) ccuTable.get("onlinePlayers")).intValue(), 7, "v160:ccuTableOnline");
+            checkEq(((Number) ccuTable.get("seatedPlayers")).intValue(), 7, "v160:ccuTableSeated");
+            checkEq(((Number) ccuTable.get("lobbyPlayers")).intValue(), 0, "v160:ccuTableLobby");
+            checkEq(((Number) ccuTable.get("serverTime")).longValue(), 1764200000200L, "v160:ccuTableServerTime");
+            List<Map<String, Object>> singleTables = (List<Map<String, Object>>) ccuTable.get("tables");
+            checkEq(singleTables.size(), 1, "v160:ccuTableCount");
+            checkEq(singleTables.get(0).get("tableId"), "T-A2", "v160:ccuTableT0Id");
+            checkEq(singleTables.get(0).get("gameCode"), "BACCARAT_T-A2", "v160:ccuTableT0Code");
+            checkEq(((Number) singleTables.get(0).get("playerCount")).intValue(), 7, "v160:ccuTableT0Count");
+
+            boolean caughtInvalidGame = false;
+            try {
+                v160Client.getGameCcu(Map.of("tableId", "T-UNKNOWN"));
+            } catch (BaccaratSdk.ApiException ex) {
+                caughtInvalidGame = BaccaratSdk.StatusCode.SC_INVALID_GAME.equals(ex.status);
+            }
+            check(caughtInvalidGame, "v160:ccuInvalidGame");
+
+            // getWalletTransactionStatus pagination: pageNo, pageSize, total, hasMore
+            Map<String, Object> wtsP1 = (Map<String, Object>) v160Client.getWalletTransactionStatus(Map.of(
+                    "username", "player_9527",
+                    "fromTime", 1764190000000L,
+                    "toTime", 1764210000000L,
+                    "pageNo", 1,
+                    "pageSize", 2
+            )).get("data");
+            checkEq(((Number) wtsP1.get("pageNo")).intValue(), 1, "v160:wtsP1PageNo");
+            checkEq(((Number) wtsP1.get("pageSize")).intValue(), 2, "v160:wtsP1PageSize");
+            checkEq(((Number) wtsP1.get("total")).intValue(), 3, "v160:wtsP1Total");
+            checkEq(wtsP1.get("hasMore"), Boolean.TRUE, "v160:wtsP1HasMore");
+            checkEq(((List<?>) wtsP1.get("transactions")).size(), 2, "v160:wtsP1Rows");
+
+            Map<String, Object> wtsP2 = (Map<String, Object>) v160Client.getWalletTransactionStatus(Map.of(
+                    "username", "player_9527",
+                    "fromTime", 1764190000000L,
+                    "toTime", 1764210000000L,
+                    "pageNo", 2,
+                    "pageSize", 2
+            )).get("data");
+            checkEq(((Number) wtsP2.get("pageNo")).intValue(), 2, "v160:wtsP2PageNo");
+            checkEq(((Number) wtsP2.get("pageSize")).intValue(), 2, "v160:wtsP2PageSize");
+            checkEq(((Number) wtsP2.get("total")).intValue(), 3, "v160:wtsP2Total");
+            checkEq(wtsP2.get("hasMore"), Boolean.FALSE, "v160:wtsP2HasMore");
+            checkEq(((List<?>) wtsP2.get("transactions")).size(), 1, "v160:wtsP2Rows");
+        } finally {
+            v160Srv.stop(0);
+        }
+
+        // Webhook: same round with isEndRound=0 (non-last) then isEndRound=1 (last), plus outbound X-Timestamp header
+        BaccaratSdk.InMemoryWallet v160Wallet = new BaccaratSdk.InMemoryWallet();
+        v160Wallet.addAccount("player_9527", "USD", "1000.00", 2, List.of(tok));
+        BaccaratSdk.WebhookDispatcher v160Disp = new BaccaratSdk.WebhookDispatcher(apiKey, secret, v160Wallet);
+        HttpServer wbSrv = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        java.util.concurrent.atomic.AtomicReference<String> seenWebhookTs = new java.util.concurrent.atomic.AtomicReference<>("");
+        wbSrv.createContext("/wallet/", ex -> {
+            seenWebhookTs.set(ex.getRequestHeaders().getFirst("X-Timestamp"));
+            byte[] raw = ex.getRequestBody().readAllBytes();
+            Map<String, Object> outMap = v160Disp.handle(
+                    ex.getRequestURI().getPath(),
+                    ex.getRequestHeaders().getFirst("X-API-Key"),
+                    ex.getRequestHeaders().getFirst("X-Signature"),
+                    raw
+            );
+            byte[] out = JsonCodec.stringify(outMap).getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().set("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, out.length);
+            ex.getResponseBody().write(out);
+            ex.close();
+        });
+        wbSrv.start();
+        try {
+            java.net.http.HttpClient http = java.net.http.HttpClient.newHttpClient();
+            int wbPort = wbSrv.getAddress().getPort();
+            java.util.function.Function<Object[], Map<String, Object>> postWbTs = argsArr -> {
+                String route = (String) argsArr[0];
+                Map<String, Object> payload = (Map<String, Object>) argsArr[1];
+                String xTs = (String) argsArr[2];
+                try {
+                    byte[] raw = JsonCodec.stringify(payload).getBytes(StandardCharsets.UTF_8);
+                    String sig = BaccaratSdk.signBody(raw, secret);
+                    check(BaccaratSdk.verifySignature(raw, sig, secret), "v160:wbVerifySig:" + route);
+                    var rbld = java.net.http.HttpRequest.newBuilder()
+                            .uri(java.net.URI.create("http://127.0.0.1:" + wbPort + route))
+                            .header("Content-Type", "application/json")
+                            .header("X-API-Key", apiKey)
+                            .header("X-Signature", sig);
+                    if (xTs != null && !xTs.isEmpty()) {
+                        rbld.header("X-Timestamp", xTs);
+                    }
+                    var httpResp = http.send(
+                            rbld.POST(java.net.http.HttpRequest.BodyPublishers.ofByteArray(raw)).build(),
+                            java.net.http.HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)
+                    );
+                    checkEq(httpResp.statusCode(), 200, "v160:wbHttp200:" + route);
+                    return JsonCodec.parseObject(httpResp.body());
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            };
+
+            String rndId = "rnd_v160_java_multi";
+            Map<String, Object> b1 = new LinkedHashMap<>();
+            b1.put("traceId", "tr_jb1"); b1.put("username", "player_9527"); b1.put("transactionId", "bet_v160_j1");
+            b1.put("betId", "b2btkt_v160_j1"); b1.put("externalTransactionId", "b2btkt_v160_j1"); b1.put("roundId", rndId);
+            b1.put("amount", "50.00"); b1.put("currency", "USD"); b1.put("token", tok);
+            b1.put("gameCode", "BACCARAT_T-A2"); b1.put("timestamp", 1764200000100L);
+
+            Map<String, Object> b2 = new LinkedHashMap<>();
+            b2.put("traceId", "tr_jb2"); b2.put("username", "player_9527"); b2.put("transactionId", "bet_v160_j2");
+            b2.put("betId", "b2btkt_v160_j2"); b2.put("externalTransactionId", "b2btkt_v160_j2"); b2.put("roundId", rndId);
+            b2.put("amount", "30.00"); b2.put("currency", "USD"); b2.put("token", tok);
+            b2.put("gameCode", "BACCARAT_T-A2"); b2.put("timestamp", 1764200000150L);
+
+            Map<String, Object> rB1 = postWbTs.apply(new Object[]{"/wallet/bet", b1, "1764200000101"});
+            checkEq(rB1.get("status"), "SC_OK", "v160:wbBet1Status");
+            checkEq(((Map<?, ?>) rB1.get("data")).get("balance"), "950.00", "v160:wbBet1Bal");
+            checkEq(seenWebhookTs.get(), "1764200000101", "v160:wbBet1TsSeen");
+
+            Map<String, Object> rB2 = postWbTs.apply(new Object[]{"/wallet/bet", b2, "1764200000151"});
+            checkEq(rB2.get("status"), "SC_OK", "v160:wbBet2Status");
+            checkEq(((Map<?, ?>) rB2.get("data")).get("balance"), "920.00", "v160:wbBet2Bal");
+
+            Map<String, Object> s1 = new LinkedHashMap<>();
+            s1.put("traceId", "tr_js1"); s1.put("username", "player_9527"); s1.put("transactionId", "stl_v160_j1");
+            s1.put("betId", "b2btkt_v160_j1"); s1.put("externalTransactionId", "b2btkt_v160_j1"); s1.put("roundId", rndId);
+            s1.put("betAmount", "50.00"); s1.put("winAmount", "100.00"); s1.put("effectiveTurnover", "50.00");
+            s1.put("winLoss", "50.00"); s1.put("jackpotAmount", "0.00"); s1.put("resultType", "WIN");
+            s1.put("isFreespin", 0); s1.put("isEndRound", 0);
+            s1.put("currency", "USD"); s1.put("token", tok); s1.put("gameCode", "BACCARAT_T-A2");
+            s1.put("betTime", 1764200000100L); s1.put("settledTime", 1764200000300L);
+
+            Map<String, Object> rS1 = postWbTs.apply(new Object[]{"/wallet/bet_result", s1, "1764200000301"});
+            checkEq(rS1.get("status"), "SC_OK", "v160:wbSettleEndRound0Status");
+            checkEq(((Map<?, ?>) rS1.get("data")).get("balance"), "1020.00", "v160:wbSettleEndRound0Bal");
+            checkEq(seenWebhookTs.get(), "1764200000301", "v160:wbSettleEndRound0TsSeen");
+
+            Map<String, Object> s1Retry = new LinkedHashMap<>(s1);
+            s1Retry.put("traceId", "tr_js1_retry");
+            s1Retry.put("settledTime", 1764200030300L);
+            Map<String, Object> rS1Retry = postWbTs.apply(new Object[]{"/wallet/bet_result", s1Retry, "1764200030301"});
+            checkEq(rS1Retry.get("status"), "SC_OK", "v160:wbSettleEndRound0RetryStatus");
+            checkEq(((Map<?, ?>) rS1Retry.get("data")).get("balance"), "1020.00", "v160:wbSettleEndRound0RetryBal");
+
+            Map<String, Object> s1Conflict = new LinkedHashMap<>(s1);
+            s1Conflict.put("traceId", "tr_js1_conflict");
+            s1Conflict.put("isEndRound", 1);
+            Map<String, Object> rS1Conflict = postWbTs.apply(new Object[]{"/wallet/bet_result", s1Conflict, "1764200040301"});
+            checkEq(rS1Conflict.get("status"), "SC_TRANSACTION_DUPLICATED", "v160:wbSettleEndRoundFlipConflict");
+
+            Map<String, Object> s2 = new LinkedHashMap<>();
+            s2.put("traceId", "tr_js2"); s2.put("username", "player_9527"); s2.put("transactionId", "stl_v160_j2");
+            s2.put("betId", "b2btkt_v160_j2"); s2.put("externalTransactionId", "b2btkt_v160_j2"); s2.put("roundId", rndId);
+            s2.put("betAmount", "30.00"); s2.put("winAmount", "0.00"); s2.put("effectiveTurnover", "30.00");
+            s2.put("winLoss", "-30.00"); s2.put("jackpotAmount", "0.00"); s2.put("resultType", "LOSE");
+            s2.put("isFreespin", 0); s2.put("isEndRound", 1);
+            s2.put("currency", "USD"); s2.put("token", tok); s2.put("gameCode", "BACCARAT_T-A2");
+            s2.put("betTime", 1764200000150L); s2.put("settledTime", 1764200000400L);
+
+            Map<String, Object> rS2 = postWbTs.apply(new Object[]{"/wallet/bet_result", s2, "1764200000401"});
+            checkEq(rS2.get("status"), "SC_OK", "v160:wbSettleEndRound1Status");
+            checkEq(((Map<?, ?>) rS2.get("data")).get("balance"), "1020.00", "v160:wbSettleEndRound1Bal");
+            checkEq(seenWebhookTs.get(), "1764200000401", "v160:wbSettleEndRound1TsSeen");
+
+            // Replay without X-Timestamp verifies identical X-Signature validation
+            Map<String, Object> rS2NoTs = postWbTs.apply(new Object[]{"/wallet/bet_result", s2, ""});
+            checkEq(rS2NoTs.get("status"), "SC_OK", "v160:wbSettleEndRound1NoTsStatus");
+            checkEq(((Map<?, ?>) rS2NoTs.get("data")).get("balance"), "1020.00", "v160:wbSettleEndRound1NoTsBal");
+        } finally {
+            wbSrv.stop(0);
+        }
+
         System.out.println("JAVA 17 SDK: ALL TESTS PASSED");
     }
 

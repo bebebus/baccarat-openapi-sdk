@@ -676,9 +676,17 @@ Json Client::post_signed(const std::string& route_path, Json payload) const {
 Json Client::ping(Json params) const { return post_signed("/operator/v1/ping", std::move(params)); }
 Json Client::create_game_url(Json params) const { return post_signed("/operator/v1/game/url", std::move(params)); }
 Json Client::list_tables(Json params) const { return post_signed("/operator/v1/game/tables", std::move(params)); }
+Json Client::get_game_ccu(Json params) const { return post_signed("/operator/v1/game/ccu", std::move(params)); }
 Json Client::terminate_sessions(Json params) const { return post_signed("/operator/v1/game/terminate", std::move(params)); }
 Json Client::update_player_status(Json params) const { return post_signed("/operator/v1/player/status", std::move(params)); }
 Json Client::update_player_limits(Json params) const { return post_signed("/operator/v1/player/limits", std::move(params)); }
+Json Client::notify_player_balance(Json params) const {
+    std::string username = trim(params.at("username").as_string());
+    if (username.empty()) {
+        throw SdkError("INVALID_ARGUMENT", "username is required");
+    }
+    return post_signed("/operator/v1/player/balance-notify", std::move(params));
+}
 
 Json Client::list_transactions(Json params) const {
     if (!params.at("fromTime").is_int() || !params.at("toTime").is_int()) {
@@ -794,6 +802,24 @@ Json Client::get_wallet_transaction_status(Json params) const {
                     ? "Username query window must satisfy 0 <= toTime - fromTime <= 86400000"
                     : "Invalid [fromTime, toTime] window"
             );
+        }
+    }
+    if (params.contains("pageNo") && !params.at("pageNo").is_null()) {
+        if (!params.at("pageNo").is_int()) {
+            throw SdkError("INVALID_ARGUMENT", "pageNo must be an integer in 1..1000000");
+        }
+        int64_t page_no = params.at("pageNo").as_int(-1);
+        if (page_no < 1 || page_no > 1000000LL) {
+            throw SdkError("INVALID_ARGUMENT", "pageNo must be in 1..1000000");
+        }
+    }
+    if (params.contains("pageSize") && !params.at("pageSize").is_null()) {
+        if (!params.at("pageSize").is_int()) {
+            throw SdkError("INVALID_ARGUMENT", "pageSize must be an integer in 1..200");
+        }
+        int64_t page_size = params.at("pageSize").as_int(-1);
+        if (page_size < 1 || page_size > 200LL) {
+            throw SdkError("INVALID_ARGUMENT", "pageSize must be in 1..200");
         }
     }
     return post_signed("/operator/v1/wallet/transaction-status", std::move(params));

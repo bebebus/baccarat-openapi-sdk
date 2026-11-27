@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.11).
+//! Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.6.0).
 
 pub mod crypto;
 mod curl_ffi;
@@ -627,6 +627,10 @@ impl Client {
         self.post_signed("/operator/v1/game/tables", params)
     }
 
+    pub fn get_game_ccu(&self, params: Json) -> Result<Json, SdkError> {
+        self.post_signed("/operator/v1/game/ccu", params)
+    }
+
     pub fn terminate_sessions(&self, params: Json) -> Result<Json, SdkError> {
         self.post_signed("/operator/v1/game/terminate", params)
     }
@@ -637,6 +641,14 @@ impl Client {
 
     pub fn update_player_limits(&self, params: Json) -> Result<Json, SdkError> {
         self.post_signed("/operator/v1/player/limits", params)
+    }
+
+    pub fn notify_player_balance(&self, params: Json) -> Result<Json, SdkError> {
+        let username = params.get("username").as_str().unwrap_or("").trim();
+        if username.is_empty() {
+            return Err(SdkError::Argument("username is required".into()));
+        }
+        self.post_signed("/operator/v1/player/balance-notify", params)
     }
 
     pub fn list_transactions(&self, params: Json) -> Result<Json, SdkError> {
@@ -768,6 +780,22 @@ impl Client {
                     }
                     .into(),
                 ));
+            }
+        }
+        if params.contains("pageNo") && !params.get("pageNo").is_null() {
+            let Some(page_no) = params.get("pageNo").as_i64() else {
+                return Err(SdkError::Argument("pageNo must be an integer in 1..=1000000".into()));
+            };
+            if !(1..=1_000_000).contains(&page_no) {
+                return Err(SdkError::Argument("pageNo must be in 1..=1000000".into()));
+            }
+        }
+        if params.contains("pageSize") && !params.get("pageSize").is_null() {
+            let Some(page_size) = params.get("pageSize").as_i64() else {
+                return Err(SdkError::Argument("pageSize must be an integer in 1..=200".into()));
+            };
+            if !(1..=200).contains(&page_size) {
+                return Err(SdkError::Argument("pageSize must be in 1..=200".into()));
             }
         }
         self.post_signed("/operator/v1/wallet/transaction-status", params)
@@ -2308,5 +2336,393 @@ mod tests {
         rb_ok.set("traceId", Json::Str("t_ov_rb_ok".into()));
         rb_ok.set("transactionId", Json::Str("tx_ov_rb_ok".into()));
         assert_eq!(ov_wallet.on_rollback(&rb_ok).get("status").as_str(), Some(status_code::SC_OK));
+    }
+
+    #[test]
+    fn v160_s2s_and_webhook_contracts() {
+        let api_key = "ak_0123456789abcdef0123456789abcdef";
+        let secret = "dGVzdF9zZWNyZXRfNDBfY2hhcnNfYmFzZTY0dXJsX2s";
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = stop.clone();
+
+        let srv_handle = thread::spawn(move || {
+            for stream in listener.incoming() {
+                if stop_clone.load(Ordering::Relaxed) {
+                    break;
+                }
+                let Ok(mut s) = stream else { break };
+                let mut req_buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                let mut header_end = None;
+                let mut content_len = 0usize;
+                loop {
+                    let n = s.read(&mut tmp).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    req_buf.extend_from_slice(&tmp[..n]);
+                    if header_end.is_none() {
+                        if let Some(idx) = req_buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            header_end = Some(idx);
+                            let head_str = String::from_utf8_lossy(&req_buf[..idx]);
+                            for line in head_str.lines() {
+                                if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                                    content_len = rest.trim().parse().unwrap_or(0);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(idx) = header_end {
+                        if req_buf.len() >= idx + 4 + content_len {
+                            break;
+                        }
+                    }
+                }
+                let Some(idx) = header_end else { continue };
+                let head_str = String::from_utf8_lossy(&req_buf[..idx]);
+                let raw_body = &req_buf[idx + 4..idx + 4 + content_len];
+                let mut lines = head_str.lines();
+                let first_line = lines.next().unwrap_or("");
+                let path = first_line.split_whitespace().nth(1).unwrap_or("");
+                let mut x_key = "";
+                let mut x_sig = "";
+                for line in lines {
+                    if let Some((k, v)) = line.split_once(':') {
+                        if k.eq_ignore_ascii_case("x-api-key") {
+                            x_key = v;
+                        } else if k.eq_ignore_ascii_case("x-signature") {
+                            x_sig = v;
+                        }
+                    }
+                }
+
+                let st = verify_webhook_headers(x_key, x_sig, raw_body, api_key, secret);
+                let body = Json::parse(&String::from_utf8_lossy(raw_body)).unwrap();
+                let mut resp = Json::object();
+                resp.set("traceId", body.get("traceId").clone());
+                if st != status_code::SC_OK {
+                    resp.set("status", Json::Str(st.into()));
+                    resp.set("message", Json::Str("bad auth".into()));
+                } else {
+                    resp.set("status", Json::Str(status_code::SC_OK.into()));
+                    match path {
+                        "/operator/v1/player/balance-notify" => {
+                            let uname = body.get("username").as_str().unwrap_or("");
+                            let mut data = Json::object();
+                            data.set("username", Json::Str(uname.into()));
+                            if uname == "player_offline" {
+                                data.set("currency", Json::Null);
+                                data.set("notified", Json::Bool(false));
+                                data.set("activeSessions", Json::Int(0));
+                                data.set("serverTime", Json::Int(1_764_200_000_001));
+                            } else {
+                                let cur = body
+                                    .get("currency")
+                                    .as_str()
+                                    .filter(|c| !c.is_empty())
+                                    .unwrap_or("USD");
+                                data.set("currency", Json::Str(cur.into()));
+                                data.set("notified", Json::Bool(true));
+                                data.set("activeSessions", Json::Int(2));
+                                data.set("serverTime", Json::Int(1_764_200_000_000));
+                            }
+                            resp.set("data", data);
+                        }
+                        "/operator/v1/game/ccu" => {
+                            let tid = body.get("tableId").as_str().unwrap_or("").trim();
+                            let mut data = Json::object();
+                            data.set("operatorId", Json::Str("OP_TEST".into()));
+                            if !tid.is_empty() {
+                                let mut t1 = Json::object();
+                                t1.set("tableId", Json::Str(tid.into()));
+                                t1.set("gameCode", Json::Str(format!("BACCARAT_{}", tid)));
+                                t1.set("playerCount", Json::Int(7));
+                                data.set("onlinePlayers", Json::Int(7));
+                                data.set("seatedPlayers", Json::Int(7));
+                                data.set("lobbyPlayers", Json::Int(0));
+                                data.set("tables", Json::Arr(vec![t1]));
+                                data.set("serverTime", Json::Int(1_764_200_000_100));
+                            } else {
+                                let mut t1 = Json::object();
+                                t1.set("tableId", Json::Str("T-A2".into()));
+                                t1.set("gameCode", Json::Str("BACCARAT_T-A2".into()));
+                                t1.set("playerCount", Json::Int(7));
+                                let mut t2 = Json::object();
+                                t2.set("tableId", Json::Str("T-A3".into()));
+                                t2.set("gameCode", Json::Str("BACCARAT_T-A3".into()));
+                                t2.set("playerCount", Json::Int(2));
+                                data.set("onlinePlayers", Json::Int(12));
+                                data.set("seatedPlayers", Json::Int(9));
+                                data.set("lobbyPlayers", Json::Int(3));
+                                data.set("tables", Json::Arr(vec![t1, t2]));
+                                data.set("serverTime", Json::Int(1_764_200_000_200));
+                            }
+                            resp.set("data", data);
+                        }
+                        "/operator/v1/wallet/transaction-status" => {
+                            let pno = body.get("pageNo").as_i64().unwrap_or(1);
+                            let psize = body.get("pageSize").as_i64().unwrap_or(200);
+                            let all_rows: Vec<Json> = (1..=3)
+                                .map(|i| {
+                                    let mut row = Json::object();
+                                    row.set("transactionId", Json::Str(format!("bet_rs_{}", i)));
+                                    row.set("username", body.get("username").clone());
+                                    row.set("status", Json::Str("COMPLETED".into()));
+                                    row
+                                })
+                                .collect();
+                            let start = ((pno - 1).max(0) * psize.max(0)) as usize;
+                            let page_rows: Vec<Json> = all_rows
+                                .into_iter()
+                                .skip(start)
+                                .take(psize.max(0) as usize)
+                                .collect();
+                            let total = 3_i64;
+                            let mut data = Json::object();
+                            data.set("transactions", Json::Arr(page_rows));
+                            data.set("pageNo", Json::Int(pno));
+                            data.set("pageSize", Json::Int(psize));
+                            data.set("total", Json::Int(total));
+                            data.set("hasMore", Json::Bool(pno * psize < total));
+                            resp.set("data", data);
+                        }
+                        _ => {
+                            resp.set("status", Json::Str(status_code::SC_INVALID_REQUEST.into()));
+                            resp.set("message", Json::Str("unexpected path".into()));
+                        }
+                    }
+                }
+                let out_str = resp.dump();
+                let http_msg = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                    out_str.len(),
+                    out_str
+                );
+                let _ = s.write_all(http_msg.as_bytes());
+            }
+        });
+
+        let cfg = Config {
+            api_key: api_key.into(),
+            hmac_secret: secret.into(),
+            environment: Environment::Production,
+            base_url: Some(format!("http://127.0.0.1:{}", port)),
+            timeout_ms: 5000,
+        };
+        let client = Client::new(cfg).unwrap();
+
+        // 1. notify_player_balance: online (notified: true) & offline (notified: false, nullable currency)
+        let mut bn_online = Json::object();
+        bn_online.set("username", Json::Str("player_online".into()));
+        bn_online.set("currency", Json::Str("CNY".into()));
+        bn_online.set("reason", Json::Str("DEPOSIT".into()));
+        let bn_online_res = client.notify_player_balance(bn_online).unwrap();
+        assert_eq!(bn_online_res.get("traceId").as_str().unwrap().len(), 36);
+        assert_eq!(bn_online_res.get("status").as_str(), Some(status_code::SC_OK));
+        let bn_on_data = bn_online_res.get("data");
+        assert_eq!(bn_on_data.get("username").as_str(), Some("player_online"));
+        assert_eq!(bn_on_data.get("currency").as_str(), Some("CNY"));
+        assert_eq!(bn_on_data.get("notified").as_bool(), Some(true));
+        assert_eq!(bn_on_data.get("activeSessions").as_i64(), Some(2));
+        assert_eq!(bn_on_data.get("serverTime").as_i64(), Some(1_764_200_000_000));
+
+        let mut bn_offline = Json::object();
+        bn_offline.set("username", Json::Str("player_offline".into()));
+        let bn_offline_res = client.notify_player_balance(bn_offline).unwrap();
+        let bn_off_data = bn_offline_res.get("data");
+        assert_eq!(bn_off_data.get("username").as_str(), Some("player_offline"));
+        assert!(bn_off_data.get("currency").is_null());
+        assert_eq!(bn_off_data.get("notified").as_bool(), Some(false));
+        assert_eq!(bn_off_data.get("activeSessions").as_i64(), Some(0));
+        assert_eq!(bn_off_data.get("serverTime").as_i64(), Some(1_764_200_000_001));
+
+        assert!(matches!(client.notify_player_balance(Json::object()), Err(SdkError::Argument(_))));
+        let mut bn_blank = Json::object();
+        bn_blank.set("username", Json::Str("   ".into()));
+        assert!(matches!(client.notify_player_balance(bn_blank), Err(SdkError::Argument(_))));
+        let mut bn_int_user = Json::object();
+        bn_int_user.set("username", Json::Int(42));
+        assert!(matches!(client.notify_player_balance(bn_int_user), Err(SdkError::Argument(_))));
+
+        // 2. get_game_ccu: aggregate & tableId filter
+        let ccu_all_res = client.get_game_ccu(Json::object()).unwrap();
+        assert_eq!(ccu_all_res.get("traceId").as_str().unwrap().len(), 36);
+        let ccu_all = ccu_all_res.get("data");
+        assert_eq!(ccu_all.get("operatorId").as_str(), Some("OP_TEST"));
+        assert_eq!(ccu_all.get("onlinePlayers").as_i64(), Some(12));
+        assert_eq!(ccu_all.get("seatedPlayers").as_i64(), Some(9));
+        assert_eq!(ccu_all.get("lobbyPlayers").as_i64(), Some(3));
+        assert_eq!(ccu_all.get("serverTime").as_i64(), Some(1_764_200_000_200));
+        let all_tables = ccu_all.get("tables").as_array().unwrap();
+        assert_eq!(all_tables.len(), 2);
+        assert_eq!(all_tables[0].get("tableId").as_str(), Some("T-A2"));
+        assert_eq!(all_tables[0].get("gameCode").as_str(), Some("BACCARAT_T-A2"));
+        assert_eq!(all_tables[0].get("playerCount").as_i64(), Some(7));
+        assert_eq!(all_tables[1].get("tableId").as_str(), Some("T-A3"));
+        assert_eq!(all_tables[1].get("gameCode").as_str(), Some("BACCARAT_T-A3"));
+        assert_eq!(all_tables[1].get("playerCount").as_i64(), Some(2));
+
+        let mut ccu_tbl_req = Json::object();
+        ccu_tbl_req.set("tableId", Json::Str("T-A2".into()));
+        let ccu_tbl_res = client.get_game_ccu(ccu_tbl_req).unwrap();
+        let ccu_tbl = ccu_tbl_res.get("data");
+        assert_eq!(ccu_tbl.get("operatorId").as_str(), Some("OP_TEST"));
+        assert_eq!(ccu_tbl.get("onlinePlayers").as_i64(), Some(7));
+        assert_eq!(ccu_tbl.get("seatedPlayers").as_i64(), Some(7));
+        assert_eq!(ccu_tbl.get("lobbyPlayers").as_i64(), Some(0));
+        assert_eq!(ccu_tbl.get("serverTime").as_i64(), Some(1_764_200_000_100));
+        let tbl_rows = ccu_tbl.get("tables").as_array().unwrap();
+        assert_eq!(tbl_rows.len(), 1);
+        assert_eq!(tbl_rows[0].get("tableId").as_str(), Some("T-A2"));
+        assert_eq!(tbl_rows[0].get("gameCode").as_str(), Some("BACCARAT_T-A2"));
+        assert_eq!(tbl_rows[0].get("playerCount").as_i64(), Some(7));
+
+        // 3. get_wallet_transaction_status with pageNo/pageSize & pagination metadata
+        let mut wts_base = Json::object();
+        wts_base.set("username", Json::Str("player_9527".into()));
+        wts_base.set("fromTime", Json::Int(0));
+        wts_base.set("toTime", Json::Int(86_400_000));
+
+        let mut wts_p1 = wts_base.clone();
+        wts_p1.set("pageNo", Json::Int(1));
+        wts_p1.set("pageSize", Json::Int(2));
+        let p1 = client.get_wallet_transaction_status(wts_p1).unwrap();
+        assert_eq!(p1.get("data").get("transactions").as_array().unwrap().len(), 2);
+        assert_eq!(p1.get("data").get("pageNo").as_i64(), Some(1));
+        assert_eq!(p1.get("data").get("pageSize").as_i64(), Some(2));
+        assert_eq!(p1.get("data").get("total").as_i64(), Some(3));
+        assert_eq!(p1.get("data").get("hasMore").as_bool(), Some(true));
+
+        let mut wts_p2 = wts_base.clone();
+        wts_p2.set("pageNo", Json::Int(2));
+        wts_p2.set("pageSize", Json::Int(2));
+        let p2 = client.get_wallet_transaction_status(wts_p2).unwrap();
+        let p2_rows = p2.get("data").get("transactions").as_array().unwrap();
+        assert_eq!(p2_rows.len(), 1);
+        assert_eq!(p2_rows[0].get("transactionId").as_str(), Some("bet_rs_3"));
+        assert_eq!(p2.get("data").get("pageNo").as_i64(), Some(2));
+        assert_eq!(p2.get("data").get("pageSize").as_i64(), Some(2));
+        assert_eq!(p2.get("data").get("total").as_i64(), Some(3));
+        assert_eq!(p2.get("data").get("hasMore").as_bool(), Some(false));
+
+        let mut wts_null_pg = wts_base.clone();
+        wts_null_pg.set("pageNo", Json::Null);
+        wts_null_pg.set("pageSize", Json::Null);
+        let p_def = client.get_wallet_transaction_status(wts_null_pg).unwrap();
+        assert_eq!(p_def.get("data").get("pageNo").as_i64(), Some(1));
+        assert_eq!(p_def.get("data").get("pageSize").as_i64(), Some(200));
+        assert_eq!(p_def.get("data").get("total").as_i64(), Some(3));
+        assert_eq!(p_def.get("data").get("hasMore").as_bool(), Some(false));
+
+        for (field, bad_val) in [
+            ("pageNo", Json::Int(0)),
+            ("pageNo", Json::Int(1_000_001)),
+            ("pageNo", Json::Str("1".into())),
+            ("pageSize", Json::Int(0)),
+            ("pageSize", Json::Int(201)),
+            ("pageSize", Json::Bool(true)),
+        ] {
+            let mut bad = wts_base.clone();
+            bad.set(field, bad_val);
+            assert!(matches!(client.get_wallet_transaction_status(bad), Err(SdkError::Argument(_))));
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        let _ = std::net::TcpStream::connect(("127.0.0.1", port));
+        let _ = srv_handle.join();
+
+        // 4. /wallet/bet_result with isEndRound: 0 (non-last) and isEndRound: 1 (last) in same round,
+        //    plus confirming outbound X-Timestamp header does not break X-Signature verification.
+        let tok = "b2bt_9f81c204d7e641b8a5309c17e248f6b109d3a4c5e6f70819";
+        let wallet = InMemoryWallet::new();
+        wallet.add_account("player_v16", "USD", "1000.00", 2, &[tok]).unwrap();
+        let disp = WebhookDispatcher::from_credentials(api_key, secret, &wallet).unwrap();
+
+        let make_bet = |tx_id: &str, bet_id: &str, amount: &str| {
+            let mut p = Json::object();
+            p.set("traceId", Json::Str(format!("tr_{}", tx_id)));
+            p.set("transactionId", Json::Str(tx_id.into()));
+            p.set("username", Json::Str("player_v16".into()));
+            p.set("betId", Json::Str(bet_id.into()));
+            p.set("externalTransactionId", Json::Str(bet_id.into()));
+            p.set("roundId", Json::Str("round_v16_multi_1".into()));
+            p.set("currency", Json::Str("USD".into()));
+            p.set("gameCode", Json::Str("BACCARAT_T-A2".into()));
+            p.set("token", Json::Str(tok.into()));
+            p.set("amount", Json::Str(amount.into()));
+            p
+        };
+        let make_settle = |tx_id: &str, bet_id: &str, bet_amt: &str, win_amt: &str, win_loss: &str, res_type: &str, is_end_round: i64| {
+            let mut p = Json::object();
+            p.set("traceId", Json::Str(format!("tr_{}", tx_id)));
+            p.set("transactionId", Json::Str(tx_id.into()));
+            p.set("username", Json::Str("player_v16".into()));
+            p.set("betId", Json::Str(bet_id.into()));
+            p.set("externalTransactionId", Json::Str(bet_id.into()));
+            p.set("roundId", Json::Str("round_v16_multi_1".into()));
+            p.set("currency", Json::Str("USD".into()));
+            p.set("gameCode", Json::Str("BACCARAT_T-A2".into()));
+            p.set("betAmount", Json::Str(bet_amt.into()));
+            p.set("winAmount", Json::Str(win_amt.into()));
+            p.set("effectiveTurnover", Json::Str(bet_amt.into()));
+            p.set("winLoss", Json::Str(win_loss.into()));
+            p.set("jackpotAmount", Json::Str("0.00".into()));
+            p.set("resultType", Json::Str(res_type.into()));
+            p.set("isFreespin", Json::Int(0));
+            p.set("isEndRound", Json::Int(is_end_round));
+            p.set("betTime", Json::Int(1_764_200_000_000));
+            p
+        };
+        let dispatch_with_ts = |route: &str, payload: &Json, x_timestamp: &str| -> Json {
+            let raw = payload.dump();
+            let sig = sign_body(raw.as_bytes(), secret).unwrap();
+            let mut headers = HashMap::new();
+            headers.insert("X-API-Key", api_key);
+            headers.insert("X-Signature", sig.as_str());
+            headers.insert("X-Timestamp", x_timestamp);
+            assert_eq!(
+                verify_webhook_headers(
+                    headers["X-API-Key"],
+                    headers["X-Signature"],
+                    raw.as_bytes(),
+                    api_key,
+                    secret,
+                ),
+                status_code::SC_OK
+            );
+            let mut ts_prefixed = x_timestamp.as_bytes().to_vec();
+            ts_prefixed.extend_from_slice(raw.as_bytes());
+            let wrong_ts_sig = sign_body(&ts_prefixed, secret).unwrap();
+            assert!(!verify_signature(raw.as_bytes(), &wrong_ts_sig, secret));
+            disp.handle(route, headers["X-API-Key"], headers["X-Signature"], raw.as_bytes())
+        };
+
+        let b1 = make_bet("bet_v16_1", "b2btkt_v16_1", "50.00");
+        let b2 = make_bet("bet_v16_2", "b2btkt_v16_2", "30.00");
+        assert_eq!(dispatch_with_ts("/wallet/bet", &b1, "1764200000010").get("data").get("balance").as_str(), Some("950.00"));
+        assert_eq!(dispatch_with_ts("/wallet/bet", &b2, "1764200000020").get("data").get("balance").as_str(), Some("920.00"));
+
+        // Non-last ticket in round: isEndRound = 0
+        let stl1 = make_settle("stl_v16_1", "b2btkt_v16_1", "50.00", "100.00", "50.00", "WIN", 0);
+        assert_eq!(dispatch_with_ts("/wallet/bet_result", &stl1, "1764200001000").get("data").get("balance").as_str(), Some("1020.00"));
+        let mut stl1_retry = stl1.clone();
+        stl1_retry.set("traceId", Json::Str("tr_stl_v16_1_retry".into()));
+        assert_eq!(dispatch_with_ts("/wallet/bet_result", &stl1_retry, "1764200002000").get("data").get("balance").as_str(), Some("1020.00"));
+        let mut stl1_conflict = stl1.clone();
+        stl1_conflict.set("isEndRound", Json::Int(1));
+        assert_eq!(
+            dispatch_with_ts("/wallet/bet_result", &stl1_conflict, "1764200003000").get("status").as_str(),
+            Some(status_code::SC_TRANSACTION_DUPLICATED)
+        );
+
+        // Last ticket in same round: isEndRound = 1
+        let stl2 = make_settle("stl_v16_2", "b2btkt_v16_2", "30.00", "0.00", "-30.00", "LOSE", 1);
+        assert_eq!(dispatch_with_ts("/wallet/bet_result", &stl2, "1764200004000").get("data").get("balance").as_str(), Some("1020.00"));
+        let mut stl2_retry = stl2.clone();
+        stl2_retry.set("traceId", Json::Str("tr_stl_v16_2_retry".into()));
+        assert_eq!(dispatch_with_ts("/wallet/bet_result", &stl2_retry, "1764200005000").get("data").get("balance").as_str(), Some("1020.00"));
     }
 }

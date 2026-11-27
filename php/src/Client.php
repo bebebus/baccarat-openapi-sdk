@@ -205,6 +205,38 @@ final class Client
         return $this->postSigned('/operator/v1/player/limits', $params);
     }
 
+    /**
+     * Notify an online player's active WebSocket sessions of a main-site balance change.
+     *
+     * Request params: traceId? (auto UUID), username (required non-empty string), currency? (string|null), reason? (string|null).
+     * Response data: { username: string, currency: string|null, notified: bool, activeSessions: int, serverTime: int }.
+     *
+     * @param array<string, mixed> $params
+     * @return array<string, mixed>
+     */
+    public function notifyPlayerBalance(array $params): array
+    {
+        $username = is_string($params['username'] ?? null) ? trim($params['username']) : '';
+        if ($username === '') {
+            throw new BaccaratSdkException('username is required', 'INVALID_ARGUMENT');
+        }
+        return $this->postSigned('/operator/v1/player/balance-notify', $params);
+    }
+
+    /**
+     * Query real-time concurrent players (CCU) for the operator or a single table.
+     *
+     * Request params: traceId? (auto UUID), tableId? (string|null).
+     * Response data: { operatorId: string, onlinePlayers: int, seatedPlayers: int, lobbyPlayers: int, tables: list<array{tableId: string, gameCode: string, playerCount: int}>, serverTime: int }.
+     *
+     * @param array<string, mixed> $params
+     * @return array<string, mixed>
+     */
+    public function getGameCcu(array $params = []): array
+    {
+        return $this->postSigned('/operator/v1/game/ccu', $params);
+    }
+
     /** @param array<string, mixed> $params @return array<string, mixed> */
     public function listTransactions(array $params): array
     {
@@ -312,12 +344,22 @@ final class Client
         return $this->postSigned('/operator/v1/transaction/unsettled', $params);
     }
 
-    /** @param array<string, mixed> $params @return array<string, mixed> */
+    /**
+     * Query wallet callback delivery status via POST /operator/v1/wallet/transaction-status.
+     *
+     * Request params: traceId? (auto UUID), transactionId?|betId?|username? (at least one required),
+     * fromTime?|toTime? (non-negative epoch ms; required with <= 24h window when querying by username only),
+     * pageNo? (int >= 1, default 1), pageSize? (int 1..200, default 200).
+     * Response data: { transactions: list<array<string, mixed>>, pageNo: int, pageSize: int, total: int, hasMore: bool }.
+     *
+     * @param array<string, mixed> $params
+     * @return array<string, mixed>
+     */
     public function getWalletTransactionStatus(array $params): array
     {
-        $txId = trim((string) ($params['transactionId'] ?? ''));
-        $betId = trim((string) ($params['betId'] ?? ''));
-        $username = trim((string) ($params['username'] ?? ''));
+        $txId = is_string($params['transactionId'] ?? null) ? trim($params['transactionId']) : '';
+        $betId = is_string($params['betId'] ?? null) ? trim($params['betId']) : '';
+        $username = is_string($params['username'] ?? null) ? trim($params['username']) : '';
         if ($txId === '' && $betId === '' && $username === '') {
             throw new BaccaratSdkException('At least one of transactionId, betId, or username is required', 'INVALID_ARGUMENT');
         }
@@ -337,6 +379,16 @@ final class Client
                         : 'Invalid [fromTime, toTime] window',
                     'INVALID_ARGUMENT',
                 );
+            }
+        }
+        if (array_key_exists('pageNo', $params) && $params['pageNo'] !== null) {
+            if (!is_int($params['pageNo']) || $params['pageNo'] < 1) {
+                throw new BaccaratSdkException('pageNo must be an integer >= 1', 'INVALID_ARGUMENT');
+            }
+        }
+        if (array_key_exists('pageSize', $params) && $params['pageSize'] !== null) {
+            if (!is_int($params['pageSize']) || $params['pageSize'] < 1 || $params['pageSize'] > 200) {
+                throw new BaccaratSdkException('pageSize must be an integer in 1..200', 'INVALID_ARGUMENT');
             }
         }
         return $this->postSigned('/operator/v1/wallet/transaction-status', $params);

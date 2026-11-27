@@ -839,3 +839,374 @@ func TestV1511CustomHTTPClientRedirectDuplicateHeadersAndStrictUTF8(t *testing.T
 		t.Fatalf("expected SC_INVALID_REQUEST with empty traceId on invalid UTF-8, got %+v", badUTF8Resp)
 	}
 }
+
+func TestV160BalanceNotifyCcuPaginationAndDeterministicEndRound(t *testing.T) {
+	apiKey := "ak_0123456789abcdef0123456789abcdef"
+	secret := "dGVzdF9zZWNyZXRfNDBfY2hhcnNfYmFzZTY0dXJsX2s"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		st := VerifyWebhookHeaders(r.Header.Get("X-API-Key"), r.Header.Get("X-Signature"), raw, apiKey, secret)
+		var body map[string]any
+		_ = json.Unmarshal(raw, &body)
+		w.Header().Set("Content-Type", "application/json")
+		if st != SC_OK {
+			_ = json.NewEncoder(w).Encode(map[string]any{"traceId": body["traceId"], "status": st, "message": "bad auth"})
+			return
+		}
+		switch r.URL.Path {
+		case "/operator/v1/player/balance-notify":
+			switch body["username"] {
+			case "player_online":
+				if body["currency"] != "CNY" || body["reason"] != "DEPOSIT" {
+					_ = json.NewEncoder(w).Encode(map[string]any{"traceId": body["traceId"], "status": SC_INVALID_REQUEST, "message": "unexpected notify params"})
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"traceId": body["traceId"],
+					"status":  SC_OK,
+					"data": map[string]any{
+						"username":       "player_online",
+						"currency":       "CNY",
+						"notified":       true,
+						"activeSessions": 2,
+						"serverTime":     int64(1764200000000),
+					},
+				})
+			case "player_offline":
+				if _, hasCur := body["currency"]; hasCur {
+					_ = json.NewEncoder(w).Encode(map[string]any{"traceId": body["traceId"], "status": SC_INVALID_REQUEST, "message": "currency should be omitted"})
+					return
+				}
+				if _, hasReason := body["reason"]; hasReason {
+					_ = json.NewEncoder(w).Encode(map[string]any{"traceId": body["traceId"], "status": SC_INVALID_REQUEST, "message": "reason should be omitted"})
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"traceId": body["traceId"],
+					"status":  SC_OK,
+					"data": map[string]any{
+						"username":       "player_offline",
+						"currency":       nil,
+						"notified":       false,
+						"activeSessions": 0,
+						"serverTime":     int64(1764200000001),
+					},
+				})
+			default:
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"traceId": body["traceId"],
+					"status":  SC_USER_NOT_EXISTS,
+					"message": "user not mapped",
+				})
+			}
+		case "/operator/v1/game/ccu":
+			tableID, _ := body["tableId"].(string)
+			switch tableID {
+			case "":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"traceId": body["traceId"],
+					"status":  SC_OK,
+					"data": map[string]any{
+						"operatorId":    "OP_ALPHA",
+						"onlinePlayers": 12,
+						"seatedPlayers": 9,
+						"lobbyPlayers":  3,
+						"tables": []map[string]any{
+							{"tableId": "T-A1", "gameCode": "BACCARAT_T-A1", "playerCount": 2},
+							{"tableId": "T-A2", "gameCode": "BACCARAT_T-A2", "playerCount": 7},
+						},
+						"serverTime": int64(1764200000100),
+					},
+				})
+			case "T-A2":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"traceId": body["traceId"],
+					"status":  SC_OK,
+					"data": map[string]any{
+						"operatorId":    "OP_ALPHA",
+						"onlinePlayers": 7,
+						"seatedPlayers": 7,
+						"lobbyPlayers":  0,
+						"tables": []map[string]any{
+							{"tableId": "T-A2", "gameCode": "BACCARAT_T-A2", "playerCount": 7},
+						},
+						"serverTime": int64(1764200000200),
+					},
+				})
+			default:
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"traceId": body["traceId"],
+					"status":  SC_INVALID_GAME,
+					"message": "table not permitted",
+				})
+			}
+		case "/operator/v1/wallet/transaction-status":
+			pageNo := 1
+			if v, ok := body["pageNo"].(float64); ok {
+				pageNo = int(v)
+			}
+			pageSize := 200
+			if v, ok := body["pageSize"].(float64); ok {
+				pageSize = int(v)
+			}
+			var rows []map[string]any
+			hasMore := false
+			if pageNo == 1 {
+				rows = []map[string]any{
+					{
+						"transactionId": "bet_p1_1", "betId": "b2btkt_p1", "roundId": "rnd_p1",
+						"username": "player_9527", "family": "opbet", "currencyCode": "USD",
+						"gameCode": "BACCARAT_T-A2", "amount": "50.00", "status": "COMPLETED",
+						"operatorStatus": SC_OK, "attempts": 1, "autoRetryCount": 0,
+						"deadLettered": false, "createdAt": int64(1764200000000),
+						"completedAt": int64(1764200000050), "roundStatus": "SETTLED",
+					},
+					{
+						"transactionId": "stl_p1_2", "betId": "b2btkt_p1", "roundId": "rnd_p1",
+						"username": "player_9527", "family": "opsettle", "currencyCode": "USD",
+						"gameCode": "BACCARAT_T-A2", "amount": "100.00", "status": "COMPLETED",
+						"operatorStatus": SC_OK, "attempts": 1, "autoRetryCount": 0,
+						"deadLettered": false, "createdAt": int64(1764200001000),
+						"completedAt": int64(1764200001050), "roundStatus": "SETTLED",
+					},
+				}
+				hasMore = pageNo*pageSize < 3
+			} else {
+				rows = []map[string]any{
+					{
+						"transactionId": "stl_p2_3", "betId": "b2btkt_p2", "roundId": "rnd_p1",
+						"username": "player_9527", "family": "opsettle", "currencyCode": "USD",
+						"gameCode": "BACCARAT_T-A2", "amount": "0.00", "status": "PENDING",
+						"operatorStatus": nil, "attempts": 1, "autoRetryCount": 0,
+						"deadLettered": false, "createdAt": int64(1764200002000),
+						"completedAt": nil, "roundStatus": "SETTLED",
+					},
+				}
+				hasMore = false
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"traceId": body["traceId"],
+				"status":  SC_OK,
+				"data": map[string]any{
+					"transactions": rows,
+					"pageNo":       pageNo,
+					"pageSize":     pageSize,
+					"total":        3,
+					"hasMore":      hasMore,
+				},
+			})
+		}
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(Config{APIKey: apiKey, HMACSecret: secret, BaseURL: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	// 1. NotifyPlayerBalance: online (notified=true), offline (notified=false + nullable currency), validation & API error
+	onlineNotify, _, err := client.NotifyPlayerBalance(ctx, PlayerBalanceNotifyRequest{
+		Username: "player_online",
+		Currency: "CNY",
+		Reason:   "DEPOSIT",
+	})
+	if err != nil || onlineNotify.Username != "player_online" || onlineNotify.Currency == nil || *onlineNotify.Currency != "CNY" ||
+		!onlineNotify.Notified || onlineNotify.ActiveSessions != 2 || onlineNotify.ServerTime != 1764200000000 {
+		t.Fatalf("NotifyPlayerBalance online failed: %+v err=%v", onlineNotify, err)
+	}
+
+	offlineNotify, _, err := client.NotifyPlayerBalance(ctx, PlayerBalanceNotifyRequest{
+		Username: "player_offline",
+	})
+	if err != nil || offlineNotify.Username != "player_offline" || offlineNotify.Currency != nil ||
+		offlineNotify.Notified || offlineNotify.ActiveSessions != 0 || offlineNotify.ServerTime != 1764200000001 {
+		t.Fatalf("NotifyPlayerBalance offline failed: %+v err=%v", offlineNotify, err)
+	}
+
+	if _, _, err := client.NotifyPlayerBalance(ctx, PlayerBalanceNotifyRequest{Username: "  "}); err == nil {
+		t.Fatal("expected blank username in NotifyPlayerBalance to fail")
+	}
+	_, _, err = client.NotifyPlayerBalance(ctx, PlayerBalanceNotifyRequest{Username: "ghost_user"})
+	var notifyErr *ApiError
+	if !errors.As(err, &notifyErr) || notifyErr.Status != SC_USER_NOT_EXISTS {
+		t.Fatalf("expected SC_USER_NOT_EXISTS from NotifyPlayerBalance, got %v", err)
+	}
+
+	// 2. GetGameCcu: aggregate & tableId-filtered & invalid table
+	ccuAll, _, err := client.GetGameCcu(ctx, GameCcuRequest{})
+	if err != nil || ccuAll.OperatorID != "OP_ALPHA" || ccuAll.OnlinePlayers != 12 ||
+		ccuAll.SeatedPlayers != 9 || ccuAll.LobbyPlayers != 3 || ccuAll.ServerTime != 1764200000100 ||
+		len(ccuAll.Tables) != 2 ||
+		ccuAll.Tables[0].TableID != "T-A1" || ccuAll.Tables[0].GameCode != "BACCARAT_T-A1" || ccuAll.Tables[0].PlayerCount != 2 ||
+		ccuAll.Tables[1].TableID != "T-A2" || ccuAll.Tables[1].GameCode != "BACCARAT_T-A2" || ccuAll.Tables[1].PlayerCount != 7 {
+		t.Fatalf("GetGameCcu aggregate failed: %+v err=%v", ccuAll, err)
+	}
+
+	ccuTable, _, err := client.GetGameCcu(ctx, GameCcuRequest{TableID: "T-A2"})
+	if err != nil || ccuTable.OperatorID != "OP_ALPHA" || ccuTable.OnlinePlayers != 7 ||
+		ccuTable.SeatedPlayers != 7 || ccuTable.LobbyPlayers != 0 || ccuTable.ServerTime != 1764200000200 ||
+		len(ccuTable.Tables) != 1 ||
+		ccuTable.Tables[0].TableID != "T-A2" || ccuTable.Tables[0].GameCode != "BACCARAT_T-A2" || ccuTable.Tables[0].PlayerCount != 7 {
+		t.Fatalf("GetGameCcu tableId filter failed: %+v err=%v", ccuTable, err)
+	}
+
+	_, _, err = client.GetGameCcu(ctx, GameCcuRequest{TableID: "T-UNKNOWN"})
+	var ccuErr *ApiError
+	if !errors.As(err, &ccuErr) || ccuErr.Status != SC_INVALID_GAME {
+		t.Fatalf("expected SC_INVALID_GAME from GetGameCcu, got %v", err)
+	}
+
+	// 3. GetWalletTransactionStatus with pageNo & pageSize, asserting pageNo/pageSize/total/hasMore & WalletTransactionStatusData struct
+	i64 := func(v int64) *int64 { return &v }
+	wtsPage1, _, err := client.GetWalletTransactionStatus(ctx, WalletTransactionStatusRequest{
+		Username: "player_9527",
+		FromTime: i64(1764190000000),
+		ToTime:   i64(1764210000000),
+		PageNo:   1,
+		PageSize: 2,
+	})
+	if err != nil || wtsPage1["pageNo"] != float64(1) || wtsPage1["pageSize"] != float64(2) ||
+		wtsPage1["total"] != float64(3) || wtsPage1["hasMore"] != true ||
+		len(wtsPage1["transactions"].([]any)) != 2 {
+		t.Fatalf("GetWalletTransactionStatus page 1 failed: %+v err=%v", wtsPage1, err)
+	}
+
+	wtsPage2, _, err := client.GetWalletTransactionStatus(ctx, WalletTransactionStatusRequest{
+		Username: "player_9527",
+		FromTime: i64(1764190000000),
+		ToTime:   i64(1764210000000),
+		PageNo:   2,
+		PageSize: 2,
+	})
+	if err != nil || wtsPage2["pageNo"] != float64(2) || wtsPage2["pageSize"] != float64(2) ||
+		wtsPage2["total"] != float64(3) || wtsPage2["hasMore"] != false ||
+		len(wtsPage2["transactions"].([]any)) != 1 {
+		t.Fatalf("GetWalletTransactionStatus page 2 failed: %+v err=%v", wtsPage2, err)
+	}
+
+	rawPage2, err := json.Marshal(wtsPage2)
+	if err != nil {
+		t.Fatalf("marshal wtsPage2: %v", err)
+	}
+	var typedWts WalletTransactionStatusData
+	if err := json.Unmarshal(rawPage2, &typedWts); err != nil ||
+		typedWts.PageNo != 2 || typedWts.PageSize != 2 || typedWts.Total != 3 || typedWts.HasMore ||
+		len(typedWts.Transactions) != 1 || typedWts.Transactions[0].TransactionID != "stl_p2_3" ||
+		typedWts.Transactions[0].OperatorStatus != nil || typedWts.Transactions[0].CompletedAt != nil {
+		t.Fatalf("WalletTransactionStatusData decode failed: %+v err=%v", typedWts, err)
+	}
+
+	// 4. /wallet/bet_result with deterministic isEndRound: 0 (non-last) & isEndRound: 1 (last) in same round + outbound X-Timestamp header
+	tok := "b2bt_9f81c204d7e641b8a5309c17e248f6b109d3a4c5e6f70819"
+	wallet, err := NewInMemoryWallet(map[string]AccountInit{
+		"player_9527": {Currency: "USD", Balance: "1000.00", Exponent: 2, Tokens: []string{tok}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	disp, err := NewWebhookDispatcher(apiKey, secret, wallet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wbSrv := httptest.NewServer(disp)
+	defer wbSrv.Close()
+
+	postWbWithTimestamp := func(route string, payload any, xTimestamp string) WalletResponse {
+		raw, err := marshalNoEscapeHTML(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sig, err := SignBody(raw, secret)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !VerifySignature(raw, sig, secret) {
+			t.Fatal("VerifySignature failed before request")
+		}
+		req, err := http.NewRequest(http.MethodPost, wbSrv.URL+route, bytes.NewReader(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", apiKey)
+		req.Header.Set("X-Signature", sig)
+		if xTimestamp != "" {
+			req.Header.Set("X-Timestamp", xTimestamp)
+		}
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		var out WalletResponse
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	roundID := "rnd_v160_multi_bet"
+	bet1 := WalletBetRequest{
+		TraceID: "tr_b1", Username: "player_9527", TransactionID: "bet_v160_1",
+		BetID: "b2btkt_v160_1", ExternalTransactionID: "b2btkt_v160_1",
+		Amount: "50.00", Currency: "USD", Token: tok, GameCode: "BACCARAT_T-A2",
+		RoundID: roundID, Timestamp: 1764200000100,
+	}
+	bet2 := WalletBetRequest{
+		TraceID: "tr_b2", Username: "player_9527", TransactionID: "bet_v160_2",
+		BetID: "b2btkt_v160_2", ExternalTransactionID: "b2btkt_v160_2",
+		Amount: "30.00", Currency: "USD", Token: tok, GameCode: "BACCARAT_T-A2",
+		RoundID: roundID, Timestamp: 1764200000150,
+	}
+	if r := postWbWithTimestamp("/wallet/bet", bet1, "1764200000101"); r.Status != SC_OK || r.Data.Balance != "950.00" {
+		t.Fatalf("bet1 with X-Timestamp failed: %+v", r)
+	}
+	if r := postWbWithTimestamp("/wallet/bet", bet2, "1764200000151"); r.Status != SC_OK || r.Data.Balance != "920.00" {
+		t.Fatalf("bet2 with X-Timestamp failed: %+v", r)
+	}
+
+	stl1 := WalletBetResultRequest{
+		TraceID: "tr_s1", Username: "player_9527", TransactionID: "stl_v160_1",
+		BetID: "b2btkt_v160_1", ExternalTransactionID: "b2btkt_v160_1", RoundID: roundID,
+		BetAmount: "50.00", WinAmount: "100.00", EffectiveTurnover: "50.00", WinLoss: "50.00",
+		JackpotAmount: "0.00", ResultType: "WIN", IsFreespin: 0, IsEndRound: 0,
+		Currency: "USD", Token: tok, GameCode: "BACCARAT_T-A2",
+		BetTime: 1764200000100, SettledTime: 1764200000300,
+	}
+	if r := postWbWithTimestamp("/wallet/bet_result", stl1, "1764200000301"); r.Status != SC_OK || r.Data.Balance != "1020.00" {
+		t.Fatalf("bet_result isEndRound=0 failed: %+v", r)
+	}
+	// Idempotent retry with updated traceId/settledTime & new X-Timestamp preserves balance
+	stl1Retry := stl1
+	stl1Retry.TraceID = "tr_s1_retry"
+	stl1Retry.SettledTime = 1764200030300
+	if r := postWbWithTimestamp("/wallet/bet_result", stl1Retry, "1764200030301"); r.Status != SC_OK || r.Data.Balance != "1020.00" {
+		t.Fatalf("bet_result isEndRound=0 retry failed: %+v", r)
+	}
+	// Flipping isEndRound on same transactionId is detected as conflict
+	stl1Conflict := stl1
+	stl1Conflict.TraceID = "tr_s1_conflict"
+	stl1Conflict.IsEndRound = 1
+	if r := postWbWithTimestamp("/wallet/bet_result", stl1Conflict, "1764200040301"); r.Status != SC_TRANSACTION_DUPLICATED {
+		t.Fatalf("expected SC_TRANSACTION_DUPLICATED when isEndRound flips on same transactionId, got %+v", r)
+	}
+
+	// Second ticket (last ticket in same round) carries isEndRound: 1 and settles cleanly
+	stl2 := WalletBetResultRequest{
+		TraceID: "tr_s2", Username: "player_9527", TransactionID: "stl_v160_2",
+		BetID: "b2btkt_v160_2", ExternalTransactionID: "b2btkt_v160_2", RoundID: roundID,
+		BetAmount: "30.00", WinAmount: "0.00", EffectiveTurnover: "30.00", WinLoss: "-30.00",
+		JackpotAmount: "0.00", ResultType: "LOSE", IsFreespin: 0, IsEndRound: 1,
+		Currency: "USD", Token: tok, GameCode: "BACCARAT_T-A2",
+		BetTime: 1764200000150, SettledTime: 1764200000400,
+	}
+	if r := postWbWithTimestamp("/wallet/bet_result", stl2, "1764200000401"); r.Status != SC_OK || r.Data.Balance != "1020.00" {
+		t.Fatalf("bet_result isEndRound=1 failed: %+v", r)
+	}
+	// Verify identical X-Signature acceptance without X-Timestamp as well (idempotent replay)
+	if r := postWbWithTimestamp("/wallet/bet_result", stl2, ""); r.Status != SC_OK || r.Data.Balance != "1020.00" {
+		t.Fatalf("bet_result isEndRound=1 without X-Timestamp failed: %+v", r)
+	}
+}

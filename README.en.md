@@ -1,18 +1,18 @@
 > [中文](./README.md) | English
 
-# Baccarat Live Platform · Multi-Language B2B Merchant SDKs (v1.5.11)
+# Baccarat Live Platform · Multi-Language B2B Merchant SDKs (v1.6.0)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
-[![OpenAPI 3.1](https://img.shields.io/badge/OpenAPI_3.1-v1.5.11-635bff)](https://openapi.lt.cniia.cloud/en/)
+[![OpenAPI 3.1](https://img.shields.io/badge/OpenAPI_3.1-v1.6.0-635bff)](https://openapi.lt.cniia.cloud/en/)
 
-Official bidirectional B2B Operator Seamless Wallet SDKs (`bebebus/baccarat-openapi-sdk`) for **Node.js, Python, PHP, Go, Java, C++, and Rust**, aligned 100% with OpenAPI `v1.5.11` (`https://openapi.lt.cniia.cloud/en/`).
+Official bidirectional B2B Operator Seamless Wallet SDKs (`bebebus/baccarat-openapi-sdk`) for **Node.js, Python, PHP, Go, Java, C++, and Rust**, aligned 100% with OpenAPI `v1.6.0` (`https://openapi.lt.cniia.cloud/en/`).
 
 ## Design Highlights
 
 - **Zero External Package Dependencies**: Node.js, Python, PHP, Go, Java, and Rust have **zero third-party package dependencies**; C++ uses only CMake + system `OpenSSL` and `libcurl` with a built-in single-header RFC-8259 JSON parser/serializer.
-- **Full Bidirectional Coverage (10 Inbound S2S + 5 Outbound Webhooks)**:
-  - **S2S Client (`/operator/v1/*`)**: `ping`, `listTables`, `createGameUrl` (with `lobby | table | table_locked` `entryMode`), `terminateSessions` (`USER | ALL` `scope`), `updatePlayerStatus` (`ACTIVE | DISABLED`, view-only `bettingEnabled`, atomic `resetPnlWindow`, and structured `HTTP 403`/`409` risk-guard errors), `updatePlayerLimits` (`GET | SET | CLEAR` dynamic per-player limits & chips bounded by operator template), `listTransactions` (+ `listAllTransactions` auto-paginator with automatic `SC_RATE_LIMITED` backoff), `getTransactionDetail`, `listUnsettledTransactions`, and `getWalletTransactionStatus` (by `transactionId`, `betId`, or `username` + `<= 24h` window, max 200 rows), plus optional `X-Timestamp` anti-replay header support.
-  - **Seamless Wallet Webhook Router (`{callbackUrl}/wallet/*`)**: Raw-body HMAC-SHA256 verification before JSON parsing across `/wallet/balance`, `/wallet/bet`, `/wallet/bet_result`, `/wallet/rollback`, and `/wallet/adjustment`, retry-safe conflict fingerprinting (excluding mutable `traceId`, `timestamp`, `settledTime`, `memo`, `referenceNo` and additive `v1.3.0+` context fields), and a reference `InMemoryWallet` engine.
+- **Full Bidirectional Coverage (12 Inbound S2S + 5 Outbound Webhooks)**:
+  - **S2S Client (`/operator/v1/*`)**: `ping`, `listTables`, `createGameUrl` (with `lobby | table | table_locked` `entryMode`), `terminateSessions` (`USER | ALL` `scope`), `updatePlayerStatus` (`ACTIVE | DISABLED`, view-only `bettingEnabled`, atomic `resetPnlWindow`, and structured `HTTP 403`/`409` risk-guard errors), `updatePlayerLimits` (`GET | SET | CLEAR` dynamic per-player limits & chips bounded by operator template), `notifyPlayerBalance` (push lightweight WS balance refresh signal to online player sessions after main-site deposit/bonus), `getGameCcu` (multi-pod deduplicated online/seated/lobby/per-table CCU), `listTransactions` (+ `listAllTransactions` auto-paginator with automatic `SC_RATE_LIMITED` backoff), `getTransactionDetail`, `listUnsettledTransactions`, and `getWalletTransactionStatus` (paginated by `pageNo`/`pageSize` up to 200 rows/page, returning `total` and `hasMore`), plus optional `X-Timestamp` anti-replay header support.
+  - **Seamless Wallet Webhook Router (`{callbackUrl}/wallet/*`)**: Raw-body HMAC-SHA256 verification before JSON parsing across `/wallet/balance`, `/wallet/bet`, `/wallet/bet_result`, `/wallet/rollback`, and `/wallet/adjustment` (outbound webhooks carry a 13-digit ms `X-Timestamp` header excluded from `X-Signature`), retry-safe conflict fingerprinting (excluding mutable `traceId`, `timestamp`, `settledTime`, `memo`, `referenceNo` and additive `v1.3.0+` context fields), and a reference `InMemoryWallet` engine.
 - **Byte-for-Byte Cross-Language Golden Vectors**: All 7 SDK test suites execute against the shared [`test-vectors.json`](./test-vectors.json).
 
 ## Language Matrix
@@ -20,12 +20,12 @@ Official bidirectional B2B Operator Seamless Wallet SDKs (`bebebus/baccarat-open
 | Language | Directory | Install / Import | External Packages | Test Command |
 | --- | --- | --- | --- | --- |
 | **Node.js** (>= 18) | [`nodejs/`](./nodejs/) | Clone & import `./nodejs/src/index.js` or `npm install ./baccarat-openapi-sdk/nodejs` | **0** | `cd nodejs && node --test` |
-| **Python** (>= 3.9) | [`python/`](./python/) | `pip install "git+https://github.com/bebebus/baccarat-openapi-sdk.git@v1.5.11#subdirectory=python"` | **0** | `cd python && python3 -m unittest discover -s tests -v` |
+| **Python** (>= 3.9) | [`python/`](./python/) | `pip install "git+https://github.com/bebebus/baccarat-openapi-sdk.git@v1.6.0#subdirectory=python"` | **0** | `cd python && python3 -m unittest discover -s tests -v` |
 | **PHP** (>= 8.1) | [`php/`](./php/) | `require 'php/autoload.php'` or Composer path repo `Bebebus\BaccaratSdk\` | **0** (`ext-curl`, `ext-json`) | `cd php && php tests/run.php` |
-| **Go** (>= 1.21) | [`go/`](./go/) | `go get github.com/bebebus/baccarat-openapi-sdk/go@v1.5.11` | **0** | `cd go && go test -v -count=1 ./...` |
+| **Go** (>= 1.21) | [`go/`](./go/) | `go get github.com/bebebus/baccarat-openapi-sdk/go@v1.6.0` | **0** | `cd go && go test -v -count=1 ./...` |
 | **Java** (>= 17) | [`java/`](./java/) | `cd java && mvn install` or source import `cloud.cniia.baccarat.sdk.*` | **0** | `cd java && bash run-tests.sh` |
 | **C++** (C++17) | [`cpp/`](./cpp/) | CMake `add_subdirectory(cpp)` link `baccarat_sdk` | System `OpenSSL` + `libcurl` | `cmake -S cpp -B cpp/build && cmake --build cpp/build && ctest --test-dir cpp/build --output-on-failure` |
-| **Rust** (2021) | [`rust/`](./rust/) | `baccarat-openapi-sdk = { git = "https://github.com/bebebus/baccarat-openapi-sdk", tag = "v1.5.11" }` | **0 Crates** (`std` + system `libcurl`) | `cd rust && cargo test` |
+| **Rust** (2021) | [`rust/`](./rust/) | `baccarat-openapi-sdk = { git = "https://github.com/bebebus/baccarat-openapi-sdk", tag = "v1.6.0" }` | **0 Crates** (`std` + system `libcurl`) | `cd rust && cargo test` |
 
 Run all 7 test suites sequentially:
 
@@ -40,10 +40,10 @@ bash _tooling/run-all-tests.sh
 
 ## Production Webhook Invariants
 
-1. **4-way concurrent webhooks per operator (NOT serialized per player)**: Guard per-player balance updates with DB row locks (`SELECT ... FOR UPDATE`) or atomic `UPDATE ... SET balance = balance + delta` plus `UNIQUE(transaction_id)`.
-2. **`isEndRound: 1` is sent on EVERY ticket in multi-bet rounds**: Never finalize or lock round-level state on the first `isEndRound: 1` callback; settle strictly per `betId` / `transactionId`.
+1. **Per-player serial happy-path settlement + 4-way cross-player concurrency (row locks still required)**: In `v1.6.0+`, same-round `/wallet/bet_result` deliveries for one player are serialized by `(createdAt ASC, id ASC)` on the happy path while keeping up to 4 concurrent webhooks per operator across distinct players. Because a transient retry on an earlier ticket does not block later tickets, still guard per-player balance updates with DB row locks (`SELECT ... FOR UPDATE`) or atomic `UPDATE ... SET balance = balance + delta` plus `UNIQUE(transaction_id)`.
+2. **Deterministic `isEndRound` (`v1.6.0+`)**: In multi-bet rounds, **`isEndRound: 1` is sent ONLY on the player's last non-`REJECTED` ticket** (`0` on earlier tickets), deterministically preserved across initial delivery and all retries/redrives; still settle strictly per `betId` / `transactionId` in case retries reorder deliveries.
 3. **Terminal HTTP/JSON traps & `~5.07h` retry horizon (1 initial + 12 auto-retries)**: Returning `HTTP 200` with non-JSON body or non-2xx JSON without a transient `SC_*` status parks `/wallet/bet_result` winning tickets in `HELD` with **0 retries**. `WebhookDispatcher` automatically maps unexpected runtime/DB exceptions to retryable `SC_OPERATOR_TIMEOUT` with a sanitized message.
-4. **0-decimal currencies (e.g. `JPY`) format zero as `"0"`**: Never compare zero amounts with `=== "0.00"`; use `decimalToLedgerUnits` or exact decimal comparison.
+4. **0-decimal currencies (e.g. `JPY`) format zero as `"0"` & outbound `X-Timestamp`**: Never compare zero amounts with `=== "0.00"`; use `decimalToLedgerUnits` or exact decimal comparison. All outbound `/wallet/*` webhooks carry a 13-digit ms `X-Timestamp` header (NOT included in `X-Signature`).
 
 ## Quick Start (Node.js)
 

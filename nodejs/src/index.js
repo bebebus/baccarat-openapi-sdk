@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Zero-dependency Node.js SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.11).
+// Zero-dependency Node.js SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.6.0).
 
 import crypto from 'node:crypto';
 import http from 'node:http';
@@ -532,6 +532,17 @@ export class Client {
     return this.postSigned('/operator/v1/player/limits', params);
   }
 
+  notifyPlayerBalance(params) {
+    if (params == null || typeof params !== 'object' || Array.isArray(params) || typeof params.username !== 'string' || !params.username.trim()) {
+      throw new BaccaratSdkError('username is required', 'INVALID_ARGUMENT');
+    }
+    return this.postSigned('/operator/v1/player/balance-notify', params);
+  }
+
+  getGameCcu(params = {}) {
+    return this.postSigned('/operator/v1/game/ccu', params);
+  }
+
   listTransactions(params) {
     if (params == null || !isValidEpochMs(params.fromTime) || !isValidEpochMs(params.toTime) || params.toTime < params.fromTime) {
       throw new BaccaratSdkError('Invalid [fromTime, toTime] settlement window', 'INVALID_ARGUMENT');
@@ -645,6 +656,16 @@ export class Client {
             : 'Invalid [fromTime, toTime] window',
           'INVALID_ARGUMENT',
         );
+      }
+    }
+    if (params?.pageNo !== undefined && params?.pageNo !== null) {
+      if (typeof params.pageNo !== 'number' || !Number.isSafeInteger(params.pageNo) || params.pageNo < 1) {
+        throw new BaccaratSdkError('pageNo must be an integer >= 1', 'INVALID_ARGUMENT');
+      }
+    }
+    if (params?.pageSize !== undefined && params?.pageSize !== null) {
+      if (typeof params.pageSize !== 'number' || !Number.isSafeInteger(params.pageSize) || params.pageSize < 1 || params.pageSize > 200) {
+        throw new BaccaratSdkError('pageSize must be an integer in 1..200', 'INVALID_ARGUMENT');
       }
     }
     return this.postSigned('/operator/v1/wallet/transaction-status', params);

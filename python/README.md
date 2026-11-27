@@ -8,7 +8,7 @@
 - 安装（通过 Git 标签安装子目录包）：
 
 ```bash
-pip install "git+https://github.com/bebebus/baccarat-openapi-sdk.git@v1.5.11#subdirectory=python"
+pip install "git+https://github.com/bebebus/baccarat-openapi-sdk.git@v1.6.0#subdirectory=python"
 ```
 
 - 单测命令：`cd python && python3 -m unittest discover -s tests -v`
@@ -47,12 +47,12 @@ print(launch["data"]["gameUrl"])
 
 > **生产提示**：`InMemoryWallet` 仅用于本地联调与单测；生产环境请实现持久化数据库 `WalletHandler`（覆盖 `on_balance`、`on_bet`、`on_bet_result`、`on_rollback`、`on_adjustment`，可使用 `wallet_ok(...)` / `wallet_error(...)` 构造标准响应信封）。纯回调服务可使用 `WebhookDispatcher.from_credentials(api_key, hmac_secret, wallet)` 而无需填写 `base_url`。
 
-### 生产回调 4 项强制不变量
+### 生产回调 4 项强制不变量（v1.6.0）
 
-1. **4 路并发（不按玩家串行）**：平台按单商户最多 4 路并发推送回调，数据库层务必使用玩家行锁（`SELECT ... FOR UPDATE`）或原子 `UPDATE ... SET balance = balance + delta` + `UNIQUE(transaction_id)`。
-2. **多注同局每张注单均带 `isEndRound: 1`**：切勿收到首张 `isEndRound: 1` 即终结局级状态，必须按 `betId` / `transactionId` 逐票入账。
-3. **终态拦截与 `~5.07h` 重试窗口**：返回 `HTTP 200` 非 JSON 或无瞬态 `SC_*` 的非 2xx JSON 会使 `/wallet/bet_result` 立即挂起 `HELD` 且 0 次重试；瞬态错误按 **1 次首次 + 12 次自动重试（约 `5.07h`）** 退避重试（`WebhookDispatcher` 已自动将未捕获异常映射为 `SC_OPERATOR_TIMEOUT`）。
-4. **0 位小数币种（如 `JPY`）零值为 `"0"`**：切勿用 `== "0.00"` 判零，请使用 `decimal_to_ledger_units(...) == 0`。
+1. **按玩家串行结算，但数据库仍须行锁与幂等键**：平台按单商户最多 4 路并发推送 `/wallet/*` 回调；自 `v1.6.0` 起 `/wallet/bet_result` 同局结算按玩家串行投递，但跨玩家并发及余额查询/下注/重试仍可能交错抵达，数据库层务必始终使用玩家行锁（`SELECT ... FOR UPDATE`）或原子 `UPDATE ... SET balance = balance + delta` + `UNIQUE(transaction_id)`。
+2. **确定性 `isEndRound` 语义与逐票入账**：同局多注时，非最后一张注单确定性携带 `isEndRound: 0`，最后一张非 `REJECTED` 注单确定性携带 `isEndRound: 1`（按 `(createdAt ASC, id ASC)` 排序，自动重试与补推保持一致）；仍须按 `betId` / `transactionId` 逐票幂等入账。
+3. **出站 `X-Timestamp` 请求头与原始字节验签**：平台向 `/wallet/*` 发起的所有出站回调均附带 13 位毫秒级 `X-Timestamp` 请求头（可供可选防重放校验）；**`X-Signature` 仍严格仅对原始请求体字节计算 HMAC-SHA256，不包含 `X-Timestamp`**。
+4. **终态拦截、重试窗口与 0 位小数币种**：返回 `HTTP 200` 非 JSON 或无瞬态 `SC_*` 的非 2xx JSON 会使 `/wallet/bet_result` 立即挂起 `HELD` 且 0 次重试；瞬态错误按 **1 次首次 + 12 次自动重试（约 `5.07h`）** 退避重试（`WebhookDispatcher` 已自动将未捕获异常映射为 `SC_OPERATOR_TIMEOUT`）。0 位小数币种（如 `JPY`）零值为 `"0"`，切勿用 `== "0.00"` 判零，请使用 `decimal_to_ledger_units(...) == 0`。
 
 > **单字段清空说明**：调用 `client.update_player_status(..., reason=None)` 或 `client.update_player_limits(..., max_bet=None)` 时，显式传入 `None` 会序列化为 JSON `null` 以清空对应字段；省略参数（默认 `UNSET`）则不发送该键。
 

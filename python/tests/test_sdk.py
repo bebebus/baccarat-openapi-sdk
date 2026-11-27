@@ -593,6 +593,347 @@ class TestBaccaratPythonSdk(unittest.TestCase):
         self.assertEqual(body_chk["status"], StatusCode.SC_OK)
         self.assertEqual(body_chk["data"]["balance"], "100.00")
 
+    def test_v16_s2s_endpoints_pagination_and_webhook_semantics(self) -> None:
+        api_key = "ak_0123456789abcdef0123456789abcdef"
+        secret = "dGVzdF9zZWNyZXRfNDBfY2hhcnNfYmFzZTY0dXJsX2s"
+        captured_requests: list[tuple[str, dict]] = []
+
+        class MockV16Handler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:
+                return
+
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", "0"))
+                raw = self.rfile.read(length)
+                st = verify_webhook_headers(
+                    self.headers.get("X-API-Key"),
+                    self.headers.get("X-Signature"),
+                    raw,
+                    api_key,
+                    secret,
+                )
+                body = json.loads(raw.decode("utf-8"))
+                captured_requests.append((self.path, body))
+                if st != StatusCode.SC_OK:
+                    resp = {"traceId": body.get("traceId", ""), "status": st, "message": "auth error"}
+                elif self.path == "/operator/v1/player/balance-notify":
+                    is_online = body["username"] == "player_online"
+                    resp = {
+                        "traceId": body["traceId"],
+                        "status": "SC_OK",
+                        "data": {
+                            "username": body["username"],
+                            "currency": body.get("currency") if body.get("currency") is not None else ("USD" if is_online else None),
+                            "notified": is_online,
+                            "activeSessions": 2 if is_online else 0,
+                            "serverTime": 1763612000123,
+                        },
+                    }
+                elif self.path == "/operator/v1/game/ccu":
+                    if body.get("tableId") == "T-A2":
+                        resp = {
+                            "traceId": body["traceId"],
+                            "status": "SC_OK",
+                            "data": {
+                                "operatorId": "OP_DEMO",
+                                "onlinePlayers": 7,
+                                "seatedPlayers": 7,
+                                "lobbyPlayers": 0,
+                                "tables": [{"tableId": "T-A2", "gameCode": "BACCARAT:T-A2", "playerCount": 7}],
+                                "serverTime": 1763612000456,
+                            },
+                        }
+                    else:
+                        resp = {
+                            "traceId": body["traceId"],
+                            "status": "SC_OK",
+                            "data": {
+                                "operatorId": "OP_DEMO",
+                                "onlinePlayers": 15,
+                                "seatedPlayers": 11,
+                                "lobbyPlayers": 4,
+                                "tables": [
+                                    {"tableId": "T-A2", "gameCode": "BACCARAT:T-A2", "playerCount": 7},
+                                    {"tableId": "T-A3", "gameCode": "BACCARAT:T-A3", "playerCount": 4},
+                                ],
+                                "serverTime": 1763612000456,
+                            },
+                        }
+                elif self.path == "/operator/v1/wallet/transaction-status":
+                    all_rows = [
+                        {"transactionId": "bet_p1", "username": "player_online", "status": "COMPLETED"},
+                        {"transactionId": "bet_p2", "username": "player_online", "status": "COMPLETED"},
+                        {"transactionId": "stl_p3", "username": "player_online", "status": "COMPLETED"},
+                    ]
+                    page_no = body.get("pageNo", 1)
+                    page_size = body.get("pageSize", 200)
+                    start = (page_no - 1) * page_size
+                    rows = all_rows[start : start + page_size]
+                    has_more = bool(rows) and (page_no * page_size < len(all_rows))
+                    resp = {
+                        "traceId": body["traceId"],
+                        "status": "SC_OK",
+                        "data": {
+                            "transactions": rows,
+                            "pageNo": page_no,
+                            "pageSize": page_size,
+                            "total": len(all_rows),
+                            "hasMore": has_more,
+                        },
+                    }
+                else:
+                    resp = {"traceId": body.get("traceId", ""), "status": "SC_INVALID_REQUEST", "message": "unknown"}
+
+                out = json.dumps(resp).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(out)))
+                self.end_headers()
+                self.wfile.write(out)
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), MockV16Handler)
+        port = httpd.server_address[1]
+        t = threading.Thread(target=httpd.serve_forever, daemon=True)
+        t.start()
+        try:
+            client = Client(Config(api_key=api_key, hmac_secret=secret, base_url=f"http://127.0.0.1:{port}"))
+
+            # 1. notify_player_balance (dict params and kwargs; online & offline; optional currency/reason)
+            online_dict = client.notify_player_balance({
+                "username": "player_online",
+                "currency": "USD",
+                "reason": "DEPOSIT",
+            })
+            self.assertEqual(online_dict["data"], {
+                "username": "player_online",
+                "currency": "USD",
+                "notified": True,
+                "activeSessions": 2,
+                "serverTime": 1763612000123,
+            })
+            self.assertEqual(captured_requests[-1][1]["reason"], "DEPOSIT")
+
+            offline_kw = client.notify_player_balance(
+                username="player_offline",
+                trace_id="t_py_bal_offline",
+            )
+            self.assertEqual(offline_kw["traceId"], "t_py_bal_offline")
+            self.assertEqual(offline_kw["data"], {
+                "username": "player_offline",
+                "currency": None,
+                "notified": False,
+                "activeSessions": 0,
+                "serverTime": 1763612000123,
+            })
+
+            offline_nulls = client.notify_player_balance({
+                "username": "player_offline",
+                "currency": None,
+                "reason": None,
+            })
+            self.assertFalse(offline_nulls["data"]["notified"])
+            self.assertIsNone(offline_nulls["data"]["currency"])
+
+            for bad_call in (
+                lambda: client.notify_player_balance(),
+                lambda: client.notify_player_balance({}),
+                lambda: client.notify_player_balance({"username": "   "}),
+                lambda: client.notify_player_balance("bad"),  # type: ignore[arg-type]
+                lambda: client.notify_player_balance(username=""),
+            ):
+                with self.assertRaises(BaccaratSdkError) as ctx_bn:
+                    bad_call()
+                self.assertEqual(ctx_bn.exception.code, "INVALID_ARGUMENT")
+
+            # 2. get_game_ccu (aggregate & tableId filter, dict params & kwargs)
+            agg = client.get_game_ccu()
+            self.assertEqual(agg["data"]["operatorId"], "OP_DEMO")
+            self.assertEqual(agg["data"]["onlinePlayers"], 15)
+            self.assertEqual(agg["data"]["seatedPlayers"], 11)
+            self.assertEqual(agg["data"]["lobbyPlayers"], 4)
+            self.assertEqual(len(agg["data"]["tables"]), 2)
+            self.assertEqual(agg["data"]["serverTime"], 1763612000456)
+
+            tbl_dict = client.get_game_ccu({"tableId": "T-A2", "traceId": "t_py_ccu_dict"})
+            self.assertEqual(tbl_dict["traceId"], "t_py_ccu_dict")
+            self.assertEqual(tbl_dict["data"]["onlinePlayers"], 7)
+            self.assertEqual(tbl_dict["data"]["seatedPlayers"], 7)
+            self.assertEqual(tbl_dict["data"]["lobbyPlayers"], 0)
+            self.assertEqual(tbl_dict["data"]["tables"], [{"tableId": "T-A2", "gameCode": "BACCARAT:T-A2", "playerCount": 7}])
+
+            tbl_kw = client.get_game_ccu(table_id="T-A2")
+            self.assertEqual(tbl_kw["data"]["tables"][0]["tableId"], "T-A2")
+
+            with self.assertRaises(BaccaratSdkError) as ctx_ccu:
+                client.get_game_ccu("bad")  # type: ignore[arg-type]
+            self.assertEqual(ctx_ccu.exception.code, "INVALID_ARGUMENT")
+
+            # 3. get_wallet_transaction_status pagination (page_no/page_size + total/hasMore) & backward compatibility
+            wts_default = client.get_wallet_transaction_status(
+                username="player_online",
+                from_time=0,
+                to_time=86_400_000,
+            )
+            self.assertEqual(len(wts_default["data"]["transactions"]), 3)
+            self.assertEqual(wts_default["data"]["pageNo"], 1)
+            self.assertEqual(wts_default["data"]["pageSize"], 200)
+            self.assertEqual(wts_default["data"]["total"], 3)
+            self.assertFalse(wts_default["data"]["hasMore"])
+            self.assertNotIn("pageNo", captured_requests[-1][1])
+            self.assertNotIn("pageSize", captured_requests[-1][1])
+
+            wts_p1 = client.get_wallet_transaction_status(
+                username="player_online",
+                from_time=0,
+                to_time=86_400_000,
+                page_no=1,
+                page_size=2,
+            )
+            self.assertEqual(len(wts_p1["data"]["transactions"]), 2)
+            self.assertEqual(wts_p1["data"]["pageNo"], 1)
+            self.assertEqual(wts_p1["data"]["pageSize"], 2)
+            self.assertEqual(wts_p1["data"]["total"], 3)
+            self.assertTrue(wts_p1["data"]["hasMore"])
+
+            wts_p2 = client.get_wallet_transaction_status(
+                username="player_online",
+                from_time=0,
+                to_time=86_400_000,
+                page_no=2,
+                page_size=2,
+            )
+            self.assertEqual(len(wts_p2["data"]["transactions"]), 1)
+            self.assertEqual(wts_p2["data"]["pageNo"], 2)
+            self.assertEqual(wts_p2["data"]["pageSize"], 2)
+            self.assertEqual(wts_p2["data"]["total"], 3)
+            self.assertFalse(wts_p2["data"]["hasMore"])
+
+            for bad_page_kwargs in (
+                {"transaction_id": "bet_1", "page_no": 0},
+                {"transaction_id": "bet_1", "page_no": -1},
+                {"transaction_id": "bet_1", "page_no": True},
+                {"transaction_id": "bet_1", "page_size": 0},
+                {"transaction_id": "bet_1", "page_size": 201},
+                {"transaction_id": "bet_1", "page_size": False},
+            ):
+                with self.assertRaises(BaccaratSdkError) as ctx_pg:
+                    client.get_wallet_transaction_status(**bad_page_kwargs)  # type: ignore[arg-type]
+                self.assertEqual(ctx_pg.exception.code, "INVALID_ARGUMENT")
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+        # 4. /wallet/bet_result with isEndRound=0 (non-last) and isEndRound=1 (last) in same round + outbound X-Timestamp header
+        tok = "b2bt_v16_multi_ticket_token_0123456789abcdef01234567"
+        wallet = InMemoryWallet({"player_v16": {"currency": "USD", "balance": "1000.00", "exponent": 2, "tokens": [tok]}})
+        disp = WebhookDispatcher.from_credentials(api_key, secret, wallet)
+        seen_timestamps: list[str] = []
+
+        def send_with_timestamp(route: str, obj: dict, x_timestamp: str) -> dict:
+            raw_bytes = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            headers = {
+                "X-API-Key": api_key,
+                # Outbound X-Timestamp is sent on every /wallet/* callback while X-Signature stays strictly over raw body bytes
+                "X-Signature": sign_body(raw_bytes, secret),
+                "X-Timestamp": x_timestamp,
+            }
+            seen_timestamps.append(headers["X-Timestamp"])
+            status_code, resp_body = disp.handle(route, headers["X-API-Key"], headers["X-Signature"], raw_bytes)
+            self.assertEqual(status_code, 200)
+            return resp_body
+
+        round_id = "rnd_v16_py_1"
+        b1 = send_with_timestamp("/wallet/bet", {
+            "traceId": "t_py_b1",
+            "transactionId": "bet_py_v16_1",
+            "betId": "tkt_py_v16_1",
+            "externalTransactionId": "tkt_py_v16_1",
+            "roundId": round_id,
+            "username": "player_v16",
+            "currency": "USD",
+            "gameCode": "BACCARAT:T-A2",
+            "amount": "100.00",
+            "token": tok,
+        }, "1763612001000")
+        self.assertEqual(b1["status"], StatusCode.SC_OK)
+        self.assertEqual(b1["data"]["balance"], "900.00")
+
+        b2 = send_with_timestamp("/wallet/bet", {
+            "traceId": "t_py_b2",
+            "transactionId": "bet_py_v16_2",
+            "betId": "tkt_py_v16_2",
+            "externalTransactionId": "tkt_py_v16_2",
+            "roundId": round_id,
+            "username": "player_v16",
+            "currency": "USD",
+            "gameCode": "BACCARAT:T-A2",
+            "amount": "50.00",
+            "token": tok,
+        }, "1763612001100")
+        self.assertEqual(b2["status"], StatusCode.SC_OK)
+        self.assertEqual(b2["data"]["balance"], "850.00")
+
+        # Ticket 1 (non-last): isEndRound = 0
+        stl1 = {
+            "traceId": "t_py_s1",
+            "transactionId": "stl_py_v16_1",
+            "betId": "tkt_py_v16_1",
+            "externalTransactionId": "tkt_py_v16_1",
+            "roundId": round_id,
+            "username": "player_v16",
+            "currency": "USD",
+            "gameCode": "BACCARAT:T-A2",
+            "betAmount": "100.00",
+            "winAmount": "200.00",
+            "effectiveTurnover": "100.00",
+            "winLoss": "100.00",
+            "jackpotAmount": "0.00",
+            "resultType": "WIN",
+            "isFreespin": 0,
+            "isEndRound": 0,
+            "betTime": 1763612001000,
+        }
+        r_s1 = send_with_timestamp("/wallet/bet_result", stl1, "1763612005000")
+        self.assertEqual(r_s1["status"], StatusCode.SC_OK)
+        self.assertEqual(r_s1["data"]["balance"], "1050.00")
+
+        # Replay with newer X-Timestamp & traceId still passes signature and idempotency
+        r_s1_replay = send_with_timestamp("/wallet/bet_result", dict(stl1, traceId="t_py_s1_retry"), "1763612009999")
+        self.assertEqual(r_s1_replay["status"], StatusCode.SC_OK)
+        self.assertEqual(r_s1_replay["data"]["balance"], "1050.00")
+
+        # Mutating isEndRound 0 -> 1 on same transactionId triggers SC_TRANSACTION_DUPLICATED
+        self.assertNotEqual(bet_result_fingerprint(stl1), bet_result_fingerprint(dict(stl1, isEndRound=1)))
+        r_s1_conf = send_with_timestamp("/wallet/bet_result", dict(stl1, traceId="t_py_s1_conf", isEndRound=1), "1763612010500")
+        self.assertEqual(r_s1_conf["status"], StatusCode.SC_TRANSACTION_DUPLICATED)
+
+        # Ticket 2 (last non-REJECTED in same round): isEndRound = 1
+        r_s2 = send_with_timestamp("/wallet/bet_result", {
+            "traceId": "t_py_s2",
+            "transactionId": "stl_py_v16_2",
+            "betId": "tkt_py_v16_2",
+            "externalTransactionId": "tkt_py_v16_2",
+            "roundId": round_id,
+            "username": "player_v16",
+            "currency": "USD",
+            "gameCode": "BACCARAT:T-A2",
+            "betAmount": "50.00",
+            "winAmount": "0.00",
+            "effectiveTurnover": "50.00",
+            "winLoss": "-50.00",
+            "jackpotAmount": "0.00",
+            "resultType": "LOSE",
+            "isFreespin": 0,
+            "isEndRound": 1,
+            "betTime": 1763612001100,
+        }, "1763612012000")
+        self.assertEqual(r_s2["status"], StatusCode.SC_OK)
+        self.assertEqual(r_s2["data"]["balance"], "1050.00")
+
+        self.assertEqual(len(seen_timestamps), 6)
+        for ts in seen_timestamps:
+            self.assertRegex(ts, r"^\d{13}$")
+
 
 if __name__ == "__main__":
     unittest.main()

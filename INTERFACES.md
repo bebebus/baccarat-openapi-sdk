@@ -1,12 +1,12 @@
 > 中文 | [English](./INTERFACES.en.md)
 
-# B2B 运营商单一无缝钱包接口与状态码字典（v1.5.11）
+# B2B 运营商单一无缝钱包接口与状态码字典（v1.6.0）
 
 在线交互式文档与 OpenAPI 3.1 规范：`https://openapi.lt.cniia.cloud`
 
 ## 1. 入站 S2S 接口（商户 → 平台，Base URL：`https://api.lt.cniia.cloud` 或专属正式网关）
 
-所有接口均为 `POST` JSON 请求，常规业务响应返回 `HTTP 200` 结构化信封；其中 `POST /operator/v1/player/status` 针对风控拦截场景额外返回同结构的非 200 HTTP 状态码（`HTTP 403` `SC_USER_DISABLED` / `PLATFORM_RISK_LOCKED`、`HTTP 409` `SC_INVALID_REQUEST` / `PNL_CAP_BREACHED_RESET_REQUIRED`、`HTTP 400` `SC_INVALID_REQUEST`），7 套 SDK 均自动解析为带 `httpStatus` / `status` / `message` 的 API 异常：
+所有接口均为 `POST` JSON 请求，常规业务响应及 `/operator/v1/*` 的 `body-parser` 解析/超 `100 KB` 异常均统一返回 `HTTP 200` 结构化信封；其中 `POST /operator/v1/player/status` 针对风控拦截场景额外返回同结构的非 200 HTTP 状态码（`HTTP 403` `SC_USER_DISABLED` / `PLATFORM_RISK_LOCKED`、`HTTP 409` `SC_INVALID_REQUEST` / `PNL_CAP_BREACHED_RESET_REQUIRED`、`HTTP 400` `SC_INVALID_REQUEST`），7 套 SDK 均自动解析为带 `httpStatus` / `status` / `message` 的 API 异常：
 - 成功：`{ "traceId": "...", "status": "SC_OK", "data": { ... } }`
 - 业务/协议拒绝：`{ "traceId": "...", "status": "SC_*", "message": "...", "validation"?: { ... } }`
 
@@ -18,10 +18,12 @@
 | `terminateSessions` / `terminate_sessions` / `TerminateSessions` | `POST /operator/v1/game/terminate` | — | `username, scope ("USER"\|"ALL")` | `scope, username, terminatedSessions, revokedLaunchTokens` |
 | `updatePlayerStatus` / `update_player_status` / `UpdatePlayerStatus` | `POST /operator/v1/player/status` | `username` | `action ("GET"\|"SET"), status ("ACTIVE"\|"DISABLED"), bettingEnabled (boolean), resetPnlWindow (boolean), reason` | `username, status, bettingEnabled, rgRestricted, statusReason, revokedSessions, revokedLaunchTokens` |
 | `updatePlayerLimits` / `update_player_limits` / `UpdatePlayerLimits` | `POST /operator/v1/player/limits` | `username, currency` | `action ("GET"\|"SET"\|"CLEAR"), minBet, maxBet, maxTableRound, maxUserDay, maxLossPerDay, customChips[]` | `username, currency, cleared, hasOverride, minBet..customChips` |
+| `notifyPlayerBalance` / `notify_player_balance` / `NotifyPlayerBalance` | `POST /operator/v1/player/balance-notify` | `username` | `currency (3 位字母或省略回退), reason (<= 64 字符, 仅审计不发 WS)`；默认频控 `600 次 / 60s` | `username, currency, notified, activeSessions, serverTime` |
+| `getGameCcu` / `get_game_ccu` / `GetGameCcu` | `POST /operator/v1/game/ccu` | —（`traceId` 自动补全） | `tableId`（省略统计全商户）；频控 `120 次 / 60s` | `operatorId, onlinePlayers, seatedPlayers, lobbyPlayers, tables[{tableId, gameCode, playerCount}], serverTime` |
 | `listTransactions` / `list_transactions` / `ListTransactions` | `POST /operator/v1/transaction/list` | `fromTime, toTime`（非负整数毫秒，不可为 `null`，`toTime >= fromTime`） | `timeType, status, username, tableId, roundId, pageNo (1..1000000), pageSize (1..20000)`；单商户频控 `120 次 / 60s` 滑动窗口 | `transactions[], pageNo, pageSize, total`（`VOID` 行 `vendorSettleTime: null`） |
 | `getTransactionDetail` / `get_transaction_detail` / `GetTransactionDetail` | `POST /operator/v1/transaction/detail` | `betId` | `fromTime, toTime`（省略默认近 7 天，不可传 `null`；指定时跨度 `<= 604800000` ms）, `language, detailUrlTtlSec` | 对账字段 + `roundResult`（牌面 `suit: 1..4` 分别代表 ♠/♥/♦/♣）+ `detailUrl` + `adjustments[]` |
 | `listUnsettledTransactions` / `list_unsettled_transactions` / `ListUnsettledTransactions` | `POST /operator/v1/transaction/unsettled` | — | `fromTime, toTime`（非负整数，不可传 `null`）, `username, tableId, pageNo (1..1000000), pageSize (1..5000)`；频控 `120 次 / 60s` | `transactions[], pageNo, pageSize, total` |
-| `getWalletTransactionStatus` / `get_wallet_transaction_status` / `GetWalletTransactionStatus` | `POST /operator/v1/wallet/transaction-status` | `transactionId`、`betId` 或 `username` 三选一 | `fromTime, toTime`（非负整数不可传 `null`；仅传 `username` 时必填且跨度 `<= 86400000` ms） | `transactions[]`（按 `createdAt ASC` 最多返回 **200 条**，无分页；出站状态、重试计数与牌局状态） |
+| `getWalletTransactionStatus` / `get_wallet_transaction_status` / `GetWalletTransactionStatus` | `POST /operator/v1/wallet/transaction-status` | `transactionId`、`betId` 或 `username` 三选一 | `fromTime, toTime`（非负整数不可传 `null`；仅传 `username` 时必填且跨度 `<= 86400000` ms）, `pageNo (1..1000000, 默认 1), pageSize (1..200, 默认 200)` | `transactions[]`（按 `createdAt ASC, id ASC` 每页最多 200 条）, `pageNo, pageSize, total, hasMore` |
 
 此外每套 SDK 均提供 `listAllTransactions` / `list_all_transactions` / `ListAllTransactions` 自动翻页拉取器（支持命中 `SC_RATE_LIMITED` 自动退避重试；Go 如需传入可选过滤条件与自定义重试退避请使用 `ListAllTransactionsWithOptions`，Rust 请使用 `list_all_transactions_with_options`），按 `(settledAt ASC, ticketId ASC)` 拉齐指定时间区间内的全部对账流水。
 
@@ -33,15 +35,15 @@
 | --- | --- | --- | --- |
 | `POST /wallet/balance` | 只读查询（无 `transactionId`） | 核对 `token` 与 `currency`，不改余额 | `SC_OK` + `data: { balance, currency, username, timestamp }` |
 | `POST /wallet/bet` | `bet_<32hex>` | 按 `transactionId` 幂等扣除 `amount`；余额不足回 `SC_INSUFFICIENT_FUNDS` | `SC_OK` + 最新 `balance` |
-| `POST /wallet/bet_result` | `stl_<32hex>` | 逐票结算加款 `winAmount`（`WIN` 为本金+净赢，和局 `PUSH` 同样传 `resultType = "WIN"`、`winAmount = betAmount`、`winLoss = "0.00"` 或 0 位小数币种如 `JPY` 为 `"0"`、`effectiveTurnover = "0.00"` / `"0"`，`LOSE` 传 `resultType = "LOSE"`、`winAmount = "0.00"` / `"0"`，**切勿使用 `=== "0.00"` 字符串判零**）；多注同一局中**每张注单均携带 `isEndRound: 1`**（严禁收到首票即锁定或关闭局级状态）；**即使玩家会话已过期/被踢也必须放行已扣款注单入账** | `SC_OK` + 最新 `balance` |
+| `POST /wallet/bet_result` | `stl_<32hex>` | 逐票结算加款 `winAmount`（`WIN` 为本金+净赢，和局 `PUSH` 同样传 `resultType = "WIN"`、`winAmount = betAmount`、`winLoss = "0.00"` 或 0 位小数币种如 `JPY` 为 `"0"`、`effectiveTurnover = "0.00"` / `"0"`，`LOSE` 传 `resultType = "LOSE"`、`winAmount = "0.00"` / `"0"`，**切勿使用 `=== "0.00"` 字符串判零**）；`v1.6.0` 起同玩家同局多张非 `REJECTED` 注单正常路径串行下发且**仅末票携带 `isEndRound: 1`**（较早票为 `0`，首投与重试完全一致）；**即使玩家会话已过期/被踢也必须放行已扣款注单入账** | `SC_OK` + 最新 `balance` |
 | `POST /wallet/rollback` | `rb_<betId>` 或 `late_<betTxId>` | 冲回原注 `amount`；**若原 `betId` 在商户侧从未扣款成功，返回 `SC_TRANSACTION_NOT_EXISTS` 即按空成功收敛** | `SC_OK` + 最新 `balance`，或 `SC_TRANSACTION_NOT_EXISTS` |
 | `POST /wallet/adjustment` | `adj_<ref>` | 赛后错牌重算或四眼申诉裁决差额调账（`CREDIT` 加款 / `DEBIT` 扣款）；`DEBIT` 余额不足回 `SC_INSUFFICIENT_FUNDS` 终态失败不死循环 | `SC_OK` + 最新 `balance` |
 
 > **生产回调 4 项强制不变量（必读）**：
-> 1. **4 路并发回调（不按玩家串行）**：平台按单商户最多 4 路并发推送 `/wallet/*` 回调，同一玩家的多次下注/派彩可能同时抵达。商户数据库层务必对玩家钱包行加行锁（`SELECT ... FOR UPDATE`）或使用原子扣加款 `UPDATE ... SET balance = balance + delta` 配合 `UNIQUE(transaction_id)` 幂等索引。
-> 2. **多注同局每票均带 `isEndRound: 1`**：单局同时押多个注区时，每条 `/wallet/bet_result` 都会传 `isEndRound: 1`；请严格按 `betId` / `transactionId` 逐票入账，切勿以首票 `isEndRound: 1` 提前终结整局状态。
+> 1. **同玩家局内串行结算 + 跨玩家 4 路并发（仍须行锁）**：`v1.6.0` 起同一玩家同局 `/wallet/bet_result` 正常路径按 `(createdAt ASC, id ASC)` 串行下发（不同玩家间仍保持单商户最高 4 路并发），但前票遇瞬态重试时后续票仍会推进；商户数据库层仍务必对玩家钱包行加行锁（`SELECT ... FOR UPDATE`）或使用原子扣加款 `UPDATE ... SET balance = balance + delta` 配合 `UNIQUE(transaction_id)` 幂等索引。
+> 2. **确定性 `isEndRound`（`v1.6.0`）**：单局多注中仅最后一张非 `REJECTED` 注单传 `isEndRound: 1`、较早票传 `0`，首投与全部 12 次重试/手动重推保持一致；仍请严格按 `betId` / `transactionId` 逐票入账，防范重试乱序。
 > 3. **终态拦截 vs 约 `5.07h` 自动重试窗口（1 次首次 + 12 次自动重试）**：返回 `HTTP 200` 非 JSON 响应体，或返回非 2xx JSON 但未携带可重试状态码（`SC_OPERATOR_TIMEOUT`、`SC_TRANSACTION_STILL_PROCESSING`、`SC_RATE_LIMITED`；结算/冲正/调账亦包含 `SC_UNDER_MAINTENANCE`），均视为终态失败——在 `/wallet/bet_result` 上会**立即将中奖注单挂起为 `HELD` 且 0 次重试**。本 SDK 的 `WebhookDispatcher` 已自动将未捕获的运行时/数据库异常（如锁冲突死锁）映射为可重试的 `SC_OPERATOR_TIMEOUT` 且不泄露原始异常堆栈。
-> 4. **0 位小数币种零值格式为 `"0"`**：如 `JPY`、`KRW`、`VND` 等 0 位小数币种的零金额序列化为 `"0"` 而非 `"0.00"`；比较金额务必通过十进制数值或 `decimalToLedgerUnits` 账本整数单位，严禁 `=== "0.00"`。
+> 4. **0 位小数币种零值格式为 `"0"` 与出站 `X-Timestamp`**：如 `JPY`、`KRW`、`VND` 等 0 位小数币种的零金额序列化为 `"0"` 而非 `"0.00"`，严禁 `=== "0.00"`；`v1.6.0` 起全部 5 路出站 `/wallet/*` 回调均携带 13 位毫秒 `X-Timestamp`（不参与 `X-Signature` 计算）。
 
 ## 3. 18 项标准状态码（`SC_*`）
 
@@ -64,4 +66,4 @@
 | `SC_OPERATOR_TIMEOUT` | **`true`** | 出站调用超 8000ms 或网络/408/5xx 瞬态异常，原键重试 |
 | `SC_UNDER_MAINTENANCE` | `false` | 桌台维护挂起或商户风控限额模板未激活（出站 `bet_result`/`rollback`/`adjustment` 回调返回此码时平台按瞬态最多自动重试 12 次） |
 | `SC_GAME_DISABLED` | `false` | 游戏类型已停用 |
-| `SC_RATE_LIMITED` | **`true`** | 对账或未结注单轮询超出 `120 次 / 60s` 滑动窗口，或出站钱包返回 HTTP 429 / `SC_RATE_LIMITED`；退避后以相同参数重试 |
+| `SC_RATE_LIMITED` | **`true`** | 对账、未结注单、CCU（`120 次 / 60s`）或余额通知（默认 `600 次 / 60s`）超出滑动窗口限流，或出站钱包返回 HTTP 429 / `SC_RATE_LIMITED`；退避后以相同参数重试 |

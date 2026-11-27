@@ -296,13 +296,78 @@ int main() {
                         data.set("revokedLaunchTokens", Json(0));
                         resp.set("data", data);
                     }
-                } else if (path == "/operator/v1/wallet/transaction-status") {
-                    Json row = Json::object();
-                    row.set("transactionId", Json("bet_cpp_1"));
-                    row.set("username", body.at("username"));
-                    row.set("status", Json("COMPLETED"));
+                } else if (path == "/operator/v1/game/ccu") {
+                    std::string tid = body.at("tableId").is_string() ? body.at("tableId").as_string() : "";
                     Json data = Json::object();
-                    data.set("transactions", Json(Json::Array{row}));
+                    data.set("operatorId", Json("OP_TEST"));
+                    if (!tid.empty()) {
+                        Json t1 = Json::object();
+                        t1.set("tableId", Json(tid));
+                        t1.set("gameCode", Json("BACCARAT_" + tid));
+                        t1.set("playerCount", Json(7));
+                        data.set("onlinePlayers", Json(7));
+                        data.set("seatedPlayers", Json(7));
+                        data.set("lobbyPlayers", Json(0));
+                        data.set("tables", Json(Json::Array{t1}));
+                        data.set("serverTime", Json(static_cast<int64_t>(1764200000100LL)));
+                    } else {
+                        Json t1 = Json::object();
+                        t1.set("tableId", Json("T-A2"));
+                        t1.set("gameCode", Json("BACCARAT_T-A2"));
+                        t1.set("playerCount", Json(7));
+                        Json t2 = Json::object();
+                        t2.set("tableId", Json("T-A3"));
+                        t2.set("gameCode", Json("BACCARAT_T-A3"));
+                        t2.set("playerCount", Json(2));
+                        data.set("onlinePlayers", Json(12));
+                        data.set("seatedPlayers", Json(9));
+                        data.set("lobbyPlayers", Json(3));
+                        data.set("tables", Json(Json::Array{t1, t2}));
+                        data.set("serverTime", Json(static_cast<int64_t>(1764200000200LL)));
+                    }
+                    resp.set("data", data);
+                } else if (path == "/operator/v1/player/balance-notify") {
+                    std::string uname = body.at("username").as_string();
+                    Json data = Json::object();
+                    data.set("username", Json(uname));
+                    if (uname == "player_offline") {
+                        data.set("currency", Json(nullptr));
+                        data.set("notified", Json(false));
+                        data.set("activeSessions", Json(0));
+                        data.set("serverTime", Json(static_cast<int64_t>(1764200000001LL)));
+                    } else {
+                        std::string cur = (body.contains("currency") && body.at("currency").is_string() && !body.at("currency").as_string().empty())
+                            ? body.at("currency").as_string()
+                            : "USD";
+                        data.set("currency", Json(cur));
+                        data.set("notified", Json(true));
+                        data.set("activeSessions", Json(2));
+                        data.set("serverTime", Json(static_cast<int64_t>(1764200000000LL)));
+                    }
+                    resp.set("data", data);
+                } else if (path == "/operator/v1/wallet/transaction-status") {
+                    int64_t pno = (body.contains("pageNo") && body.at("pageNo").is_int()) ? body.at("pageNo").as_int(1) : 1;
+                    int64_t psize = (body.contains("pageSize") && body.at("pageSize").is_int()) ? body.at("pageSize").as_int(200) : 200;
+                    Json::Array all_rows;
+                    for (int i = 1; i <= 3; ++i) {
+                        Json row = Json::object();
+                        row.set("transactionId", Json("bet_cpp_" + std::to_string(i)));
+                        row.set("username", body.at("username"));
+                        row.set("status", Json("COMPLETED"));
+                        all_rows.push_back(std::move(row));
+                    }
+                    Json::Array page_rows;
+                    int64_t start = (pno - 1) * psize;
+                    for (int64_t i = start; i < start + psize && i < static_cast<int64_t>(all_rows.size()); ++i) {
+                        if (i >= 0) page_rows.push_back(all_rows[static_cast<size_t>(i)]);
+                    }
+                    int64_t total = static_cast<int64_t>(all_rows.size());
+                    Json data = Json::object();
+                    data.set("transactions", Json(std::move(page_rows)));
+                    data.set("pageNo", Json(pno));
+                    data.set("pageSize", Json(psize));
+                    data.set("total", Json(total));
+                    data.set("hasMore", Json(pno * psize < total));
                     resp.set("data", data);
                 } else if (path == "/operator/v1/transaction/list") {
                     if (body.at("username").as_string() == "rl_user") {
@@ -419,6 +484,99 @@ int main() {
     wts_req.set("toTime", Json(static_cast<int64_t>(86400000)));
     Json wts_res = client.get_wallet_transaction_status(wts_req);
     require_eq(wts_res.at("data").at("transactions").as_array()[0].at("username").as_string(), "player_9527", "s2s:walletStatusByUser");
+    require_true(wts_res.at("data").at("pageNo").as_int() == 1, "s2s:walletStatusDefaultPageNo");
+    require_true(wts_res.at("data").at("pageSize").as_int() == 200, "s2s:walletStatusDefaultPageSize");
+    require_true(wts_res.at("data").at("total").as_int() == 3, "s2s:walletStatusDefaultTotal");
+    require_true(!wts_res.at("data").at("hasMore").as_bool(true), "s2s:walletStatusDefaultHasMore");
+
+    // v1.6.0: paginated get_wallet_transaction_status (pageNo/pageSize -> pageNo/pageSize/total/hasMore)
+    Json wts_p1 = wts_req;
+    wts_p1.set("pageNo", Json(1));
+    wts_p1.set("pageSize", Json(2));
+    Json wts_p1_res = client.get_wallet_transaction_status(wts_p1);
+    require_true(wts_p1_res.at("data").at("transactions").as_array().size() == 2, "s2s:wtsPage1Len");
+    require_true(wts_p1_res.at("data").at("pageNo").as_int() == 1, "s2s:wtsPage1No");
+    require_true(wts_p1_res.at("data").at("pageSize").as_int() == 2, "s2s:wtsPage1Size");
+    require_true(wts_p1_res.at("data").at("total").as_int() == 3, "s2s:wtsPage1Total");
+    require_true(wts_p1_res.at("data").at("hasMore").as_bool(false), "s2s:wtsPage1HasMore");
+
+    Json wts_p2 = wts_req;
+    wts_p2.set("pageNo", Json(2));
+    wts_p2.set("pageSize", Json(2));
+    Json wts_p2_res = client.get_wallet_transaction_status(wts_p2);
+    require_true(wts_p2_res.at("data").at("transactions").as_array().size() == 1, "s2s:wtsPage2Len");
+    require_eq(wts_p2_res.at("data").at("transactions").as_array()[0].at("transactionId").as_string(), "bet_cpp_3", "s2s:wtsPage2Row");
+    require_true(wts_p2_res.at("data").at("pageNo").as_int() == 2, "s2s:wtsPage2No");
+    require_true(wts_p2_res.at("data").at("pageSize").as_int() == 2, "s2s:wtsPage2Size");
+    require_true(wts_p2_res.at("data").at("total").as_int() == 3, "s2s:wtsPage2Total");
+    require_true(!wts_p2_res.at("data").at("hasMore").as_bool(true), "s2s:wtsPage2HasMore");
+
+    Json wts_null_pg = wts_req;
+    wts_null_pg.set("pageNo", Json(nullptr));
+    wts_null_pg.set("pageSize", Json(nullptr));
+    Json wts_null_pg_res = client.get_wallet_transaction_status(wts_null_pg);
+    require_true(wts_null_pg_res.at("data").at("pageNo").as_int() == 1, "s2s:wtsNullPageNo");
+    require_true(wts_null_pg_res.at("data").at("pageSize").as_int() == 200, "s2s:wtsNullPageSize");
+
+    // v1.6.0: notify_player_balance (online & offline with nullable currency)
+    Json bn_online_req = Json::object();
+    bn_online_req.set("username", Json("player_online"));
+    bn_online_req.set("currency", Json("CNY"));
+    bn_online_req.set("reason", Json("DEPOSIT"));
+    Json bn_online_res = client.notify_player_balance(bn_online_req);
+    require_true(bn_online_res.at("traceId").as_string().size() == 36, "s2s:bnOnlineAutoTrace");
+    require_eq(bn_online_res.at("status").as_string(), "SC_OK", "s2s:bnOnlineStatus");
+    require_eq(bn_online_res.at("data").at("username").as_string(), "player_online", "s2s:bnOnlineUser");
+    require_eq(bn_online_res.at("data").at("currency").as_string(), "CNY", "s2s:bnOnlineCurrency");
+    require_true(bn_online_res.at("data").at("notified").as_bool(false), "s2s:bnOnlineNotified");
+    require_true(bn_online_res.at("data").at("activeSessions").as_int() == 2, "s2s:bnOnlineSessions");
+    require_true(bn_online_res.at("data").at("serverTime").as_int() == 1764200000000LL, "s2s:bnOnlineServerTime");
+
+    Json bn_obj_res = client.notify_player_balance(Json::Object{
+        {"username", Json("player_online")},
+        {"currency", Json("USD")}
+    });
+    require_eq(bn_obj_res.at("data").at("currency").as_string(), "USD", "s2s:bnObjectOverload");
+
+    Json bn_offline_req = Json::object();
+    bn_offline_req.set("username", Json("player_offline"));
+    Json bn_offline_res = client.notify_player_balance(bn_offline_req);
+    require_eq(bn_offline_res.at("data").at("username").as_string(), "player_offline", "s2s:bnOfflineUser");
+    require_true(bn_offline_res.at("data").at("currency").is_null(), "s2s:bnOfflineNullCurrency");
+    require_true(!bn_offline_res.at("data").at("notified").as_bool(true), "s2s:bnOfflineNotified");
+    require_true(bn_offline_res.at("data").at("activeSessions").as_int() == 0, "s2s:bnOfflineSessions");
+    require_true(bn_offline_res.at("data").at("serverTime").as_int() == 1764200000001LL, "s2s:bnOfflineServerTime");
+
+    // v1.6.0: get_game_ccu (aggregate & tableId filter)
+    Json ccu_all_res = client.get_game_ccu();
+    require_true(ccu_all_res.at("traceId").as_string().size() == 36, "s2s:ccuAllAutoTrace");
+    const Json& ccu_all = ccu_all_res.at("data");
+    require_eq(ccu_all.at("operatorId").as_string(), "OP_TEST", "s2s:ccuAllOp");
+    require_true(ccu_all.at("onlinePlayers").as_int() == 12, "s2s:ccuAllOnline");
+    require_true(ccu_all.at("seatedPlayers").as_int() == 9, "s2s:ccuAllSeated");
+    require_true(ccu_all.at("lobbyPlayers").as_int() == 3, "s2s:ccuAllLobby");
+    require_true(ccu_all.at("serverTime").as_int() == 1764200000200LL, "s2s:ccuAllServerTime");
+    require_true(ccu_all.at("tables").as_array().size() == 2, "s2s:ccuAllTablesLen");
+    require_eq(ccu_all.at("tables").as_array()[0].at("tableId").as_string(), "T-A2", "s2s:ccuAllT0Id");
+    require_eq(ccu_all.at("tables").as_array()[0].at("gameCode").as_string(), "BACCARAT_T-A2", "s2s:ccuAllT0Code");
+    require_true(ccu_all.at("tables").as_array()[0].at("playerCount").as_int() == 7, "s2s:ccuAllT0Count");
+    require_eq(ccu_all.at("tables").as_array()[1].at("tableId").as_string(), "T-A3", "s2s:ccuAllT1Id");
+    require_eq(ccu_all.at("tables").as_array()[1].at("gameCode").as_string(), "BACCARAT_T-A3", "s2s:ccuAllT1Code");
+    require_true(ccu_all.at("tables").as_array()[1].at("playerCount").as_int() == 2, "s2s:ccuAllT1Count");
+
+    Json ccu_tbl_req = Json::object();
+    ccu_tbl_req.set("tableId", Json("T-A2"));
+    Json ccu_tbl_res = client.get_game_ccu(ccu_tbl_req);
+    const Json& ccu_tbl = ccu_tbl_res.at("data");
+    require_eq(ccu_tbl.at("operatorId").as_string(), "OP_TEST", "s2s:ccuTblOp");
+    require_true(ccu_tbl.at("onlinePlayers").as_int() == 7, "s2s:ccuTblOnline");
+    require_true(ccu_tbl.at("seatedPlayers").as_int() == 7, "s2s:ccuTblSeated");
+    require_true(ccu_tbl.at("lobbyPlayers").as_int() == 0, "s2s:ccuTblLobby");
+    require_true(ccu_tbl.at("serverTime").as_int() == 1764200000100LL, "s2s:ccuTblServerTime");
+    require_true(ccu_tbl.at("tables").as_array().size() == 1, "s2s:ccuTblTablesLen");
+    require_eq(ccu_tbl.at("tables").as_array()[0].at("tableId").as_string(), "T-A2", "s2s:ccuTblT0Id");
+    require_eq(ccu_tbl.at("tables").as_array()[0].at("gameCode").as_string(), "BACCARAT_T-A2", "s2s:ccuTblT0Code");
+    require_true(ccu_tbl.at("tables").as_array()[0].at("playerCount").as_int() == 7, "s2s:ccuTblT0Count");
 
     auto expect_invalid_arg = [&](auto fn, const std::string& label) {
         bool threw = false;
@@ -429,6 +587,39 @@ int main() {
         }
         require_true(threw, label);
     };
+    expect_invalid_arg([&] { client.notify_player_balance(Json::object()); }, "s2s:bnMissingUser");
+    expect_invalid_arg([&] {
+        Json p = Json::object(); p.set("username", Json("   "));
+        client.notify_player_balance(p);
+    }, "s2s:bnBlankUser");
+    expect_invalid_arg([&] {
+        Json p = Json::object(); p.set("username", Json(123));
+        client.notify_player_balance(p);
+    }, "s2s:bnNonStringUser");
+    expect_invalid_arg([&] {
+        Json p = wts_req; p.set("pageNo", Json(0));
+        client.get_wallet_transaction_status(p);
+    }, "s2s:wtsPageNoZero");
+    expect_invalid_arg([&] {
+        Json p = wts_req; p.set("pageNo", Json(1000001));
+        client.get_wallet_transaction_status(p);
+    }, "s2s:wtsPageNoOverflow");
+    expect_invalid_arg([&] {
+        Json p = wts_req; p.set("pageNo", Json("1"));
+        client.get_wallet_transaction_status(p);
+    }, "s2s:wtsPageNoString");
+    expect_invalid_arg([&] {
+        Json p = wts_req; p.set("pageSize", Json(0));
+        client.get_wallet_transaction_status(p);
+    }, "s2s:wtsPageSizeZero");
+    expect_invalid_arg([&] {
+        Json p = wts_req; p.set("pageSize", Json(201));
+        client.get_wallet_transaction_status(p);
+    }, "s2s:wtsPageSizeOver200");
+    expect_invalid_arg([&] {
+        Json p = wts_req; p.set("pageSize", Json(true));
+        client.get_wallet_transaction_status(p);
+    }, "s2s:wtsPageSizeBool");
     expect_invalid_arg([&] { client.get_wallet_transaction_status(Json::object()); }, "s2s:wtsEmpty");
     expect_invalid_arg([&] {
         Json p = Json::object(); p.set("username", Json("player_9527"));
@@ -718,6 +909,86 @@ int main() {
     Json bad_utf8_res = dl_disp.handle("/wallet/balance", api_key, sign_body(bad_utf8, secret), bad_utf8);
     require_eq(bad_utf8_res.at("status").as_string(), StatusCode::SC_INVALID_REQUEST, "wb:p32InvalidUtf8Status");
     require_eq(bad_utf8_res.at("traceId").as_string(), "", "wb:p32InvalidUtf8TraceEmpty");
+
+    // 8. v1.6.0 webhook contracts: deterministic isEndRound (0 for non-last, 1 for last in same round) & outbound X-Timestamp header compatibility
+    InMemoryWallet v16_wallet;
+    v16_wallet.add_account("player_v16", "USD", "1000.00", 2, {tok});
+    WebhookDispatcher v16_disp(api_key, secret, v16_wallet);
+
+    auto make_v16_bet = [&](const std::string& tx_id, const std::string& bet_id, const std::string& amount) -> Json {
+        Json p = Json::object();
+        p.set("traceId", Json("tr_" + tx_id));
+        p.set("transactionId", Json(tx_id));
+        p.set("username", Json("player_v16"));
+        p.set("betId", Json(bet_id));
+        p.set("externalTransactionId", Json(bet_id));
+        p.set("roundId", Json("round_v16_multi_1"));
+        p.set("currency", Json("USD"));
+        p.set("gameCode", Json("BACCARAT_T-A2"));
+        p.set("token", Json(tok));
+        p.set("amount", Json(amount));
+        return p;
+    };
+    auto make_v16_settle = [&](const std::string& tx_id, const std::string& bet_id, const std::string& bet_amt, const std::string& win_amt, const std::string& win_loss, const std::string& res_type, int is_end_round) -> Json {
+        Json p = Json::object();
+        p.set("traceId", Json("tr_" + tx_id));
+        p.set("transactionId", Json(tx_id));
+        p.set("username", Json("player_v16"));
+        p.set("betId", Json(bet_id));
+        p.set("externalTransactionId", Json(bet_id));
+        p.set("roundId", Json("round_v16_multi_1"));
+        p.set("currency", Json("USD"));
+        p.set("gameCode", Json("BACCARAT_T-A2"));
+        p.set("betAmount", Json(bet_amt));
+        p.set("winAmount", Json(win_amt));
+        p.set("effectiveTurnover", Json(bet_amt));
+        p.set("winLoss", Json(win_loss));
+        p.set("jackpotAmount", Json("0.00"));
+        p.set("resultType", Json(res_type));
+        p.set("isFreespin", Json(0));
+        p.set("isEndRound", Json(is_end_round));
+        p.set("betTime", Json(static_cast<int64_t>(1764200000000LL)));
+        return p;
+    };
+
+    auto dispatch_v16_with_ts = [&](const std::string& route, const Json& payload, const std::string& x_timestamp) -> Json {
+        std::string raw = payload.dump();
+        std::string sig = sign_body(raw, secret);
+        // Outbound v1.6.0 callbacks include X-Timestamp alongside X-API-Key and X-Signature;
+        // X-Signature remains strictly HMAC-SHA256(raw_body, hmac_secret) without X-Timestamp.
+        std::map<std::string, std::string> headers{
+            {"X-API-Key", api_key},
+            {"X-Signature", sig},
+            {"X-Timestamp", x_timestamp}
+        };
+        require_eq(verify_webhook_headers(headers["X-API-Key"], headers["X-Signature"], raw, api_key, secret), StatusCode::SC_OK, "v16:verifyWithTs:" + route);
+        require_true(!verify_signature(raw, sign_body(headers["X-Timestamp"] + raw, secret), secret), "v16:tsExcludedFromSig:" + route);
+        return v16_disp.handle(route, headers["X-API-Key"], headers["X-Signature"], raw);
+    };
+
+    Json b1 = make_v16_bet("bet_v16_1", "b2btkt_v16_1", "50.00");
+    Json b2 = make_v16_bet("bet_v16_2", "b2btkt_v16_2", "30.00");
+    require_eq(dispatch_v16_with_ts("/wallet/bet", b1, "1764200000010").at("data").at("balance").as_string(), "950.00", "v16:bet1");
+    require_eq(dispatch_v16_with_ts("/wallet/bet", b2, "1764200000020").at("data").at("balance").as_string(), "920.00", "v16:bet2");
+
+    // Ticket 1 (non-last ticket in round): isEndRound = 0
+    Json stl_non_last = make_v16_settle("stl_v16_1", "b2btkt_v16_1", "50.00", "100.00", "50.00", "WIN", 0);
+    require_eq(dispatch_v16_with_ts("/wallet/bet_result", stl_non_last, "1764200001000").at("data").at("balance").as_string(), "1020.00", "v16:settleNonLast");
+    // Idempotent retry with identical isEndRound = 0 succeeds without double-credit
+    Json stl_non_last_retry = stl_non_last;
+    stl_non_last_retry.set("traceId", Json("tr_stl_v16_1_retry"));
+    require_eq(dispatch_v16_with_ts("/wallet/bet_result", stl_non_last_retry, "1764200002000").at("data").at("balance").as_string(), "1020.00", "v16:settleNonLastReplay");
+    // Conflicting retry flipping isEndRound 0 -> 1 is caught as SC_TRANSACTION_DUPLICATED
+    Json stl_non_last_conflict = stl_non_last;
+    stl_non_last_conflict.set("isEndRound", Json(1));
+    require_eq(dispatch_v16_with_ts("/wallet/bet_result", stl_non_last_conflict, "1764200003000").at("status").as_string(), StatusCode::SC_TRANSACTION_DUPLICATED, "v16:settleEndRoundConflict");
+
+    // Ticket 2 (last ticket in same round): isEndRound = 1
+    Json stl_last = make_v16_settle("stl_v16_2", "b2btkt_v16_2", "30.00", "0.00", "-30.00", "LOSE", 1);
+    require_eq(dispatch_v16_with_ts("/wallet/bet_result", stl_last, "1764200004000").at("data").at("balance").as_string(), "1020.00", "v16:settleLast");
+    Json stl_last_retry = stl_last;
+    stl_last_retry.set("traceId", Json("tr_stl_v16_2_retry"));
+    require_eq(dispatch_v16_with_ts("/wallet/bet_result", stl_last_retry, "1764200005000").at("data").at("balance").as_string(), "1020.00", "v16:settleLastReplay");
 
     std::cout << "C++17 SDK: ALL TESTS PASSED\n";
     return 0;

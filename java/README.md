@@ -5,7 +5,7 @@
 ## 安装、编译与单测
 
 ```bash
-git clone --branch v1.5.11 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
+git clone --branch v1.6.0 --depth 1 https://github.com/bebebus/baccarat-openapi-sdk.git
 cd baccarat-openapi-sdk/java
 bash run-tests.sh          # 零 Maven 依赖直接编译并运行全部单测
 # 或安装至本地 ~/.m2：mvn install
@@ -47,6 +47,19 @@ Map<String, Object> res = client.createGameUrl(Map.of(
     "ipAddress", "203.0.113.42"
 ));
 System.out.println(res.get("data"));
+
+// v1.6.0 新增：主站余额变动推送（player/balance-notify）、实时在线人数查询（game/ccu）与分页钱包状态反查
+Map<String, Object> notifyRes = client.notifyPlayerBalance(Map.of(
+    "username", "player_9527", "currency", "USD", "reason", "DEPOSIT"
+));
+Map<String, Object> ccuRes = client.getGameCcu(); // 或 client.getGameCcu(Map.of("tableId", "T-A2"))
+Map<String, Object> wtsRes = client.getWalletTransactionStatus(Map.of(
+    "username", "player_9527", "fromTime", 1764190000000L, "toTime", 1764210000000L,
+    "pageNo", 1, "pageSize", 200
+)); // data 返回 transactions[], pageNo, pageSize, total, hasMore
+System.out.println(notifyRes.get("data"));
+System.out.println(ccuRes.get("data"));
+System.out.println(wtsRes.get("data"));
 ```
 
 ## 钱包回调接入示例（纯回调服务无需 `baseUrl`）
@@ -94,7 +107,7 @@ WebhookDispatcher dispatcher = new WebhookDispatcher(
 
 ### 生产回调 4 项强制不变量
 
-1. **4 路并发（不按玩家串行）**：平台按单商户最多 4 路并发推送回调，请对玩家钱包行使用 `SELECT ... FOR UPDATE` 或原子 `UPDATE ... SET balance = balance + delta` + `UNIQUE(transaction_id)`。
-2. **多注同局每张注单均带 `isEndRound: 1`**：切勿收到首张 `isEndRound: 1` 即终结局级状态，必须按 `betId` / `transactionId` 逐票入账。
+1. **同玩家正常路径串行 + 跨玩家 4 路并发**：`v1.6.0` 起同一玩家单局多注的 `/wallet/bet_result` 按 `(createdAt ASC, id ASC)` 在正常路径下按 `(operatorId, userId)` 串行推送，跨玩家保持单商户最多 4 路并发；若某票触发瞬态重试，同局后续注单仍会继续推进不阻塞开奖。数据库层仍须对玩家钱包行使用 `SELECT ... FOR UPDATE` 或原子 `UPDATE ... SET balance = balance + delta` + `UNIQUE(transaction_id)`。
+2. **确定性末票 `isEndRound` 与出站 `X-Timestamp`**：`v1.6.0` 起同一玩家同局仅最后一张非 `REJECTED` 注单携带 `isEndRound: 1`，其余较早注单为 `isEndRound: 0`（首推与重试均确定性一致）；仍须按 `betId` / `transactionId` 逐票入账。平台出站 `/wallet/*` 回调默认附带 13 位毫秒 `X-Timestamp` 请求头，但**不参与 `X-Signature` 计算**（验签仍仅覆盖原始请求体字节）。
 3. **终态拦截与 `~5.07h` 重试窗口**：返回 `HTTP 200` 非 JSON 或无瞬态 `SC_*` 的非 2xx JSON 会使 `/wallet/bet_result` 立即挂起 `HELD` 且 0 次重试；瞬态错误按 **1 次首次 + 12 次自动重试（约 `5.07h`）** 退避重试（`WebhookDispatcher` 已自动将未捕获 `Exception`（含 Kotlin / Groovy / Lombok `@SneakyThrows` 抛出的 `SQLException`、`IOException` 等受检异常）映射为 `SC_OPERATOR_TIMEOUT`）。
 4. **0 位小数币种（如 `JPY`）零值为 `"0"`**：切勿用 `"0.00".equals(...)` 判零，请使用 `BaccaratSdk.decimalToLedgerUnits(...)` 比较。

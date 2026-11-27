@@ -574,6 +574,294 @@ try {
     );
     $arrOkRes = $arrOkClient->ping(['traceId' => 't_php_arr_ok']);
     assertEq($arrOkRes['traceId'], 't_php_arr_ok', 'p11:clientNonStringTraceOk');
+
+    // 9. v1.6.0: notifyPlayerBalance, getGameCcu, paginated getWalletTransactionStatus, deterministic isEndRound & outbound X-Timestamp
+    $v16Captured = [];
+    $v16Transport = static function (string $url, array $headers, string $rawBody, int $timeoutMs) use ($apiKey, $secret, &$v16Captured): array {
+        $st = Signing::verifyWebhookHeaders($headers['X-API-Key'] ?? null, $headers['X-Signature'] ?? null, $rawBody, $apiKey, $secret);
+        $body = json_decode($rawBody, true, 512, JSON_THROW_ON_ERROR);
+        $v16Captured[] = ['url' => $url, 'body' => $body];
+        if ($st !== StatusCode::SC_OK) {
+            return [200, json_encode(['traceId' => $body['traceId'], 'status' => $st, 'message' => 'bad auth'], JSON_THROW_ON_ERROR)];
+        }
+        if (str_ends_with($url, '/operator/v1/player/balance-notify')) {
+            $isOnline = ($body['username'] ?? '') === 'player_online';
+            return [200, json_encode([
+                'traceId' => $body['traceId'],
+                'status' => 'SC_OK',
+                'data' => [
+                    'username' => $body['username'],
+                    'currency' => array_key_exists('currency', $body) && $body['currency'] !== null ? $body['currency'] : ($isOnline ? 'USD' : null),
+                    'notified' => $isOnline,
+                    'activeSessions' => $isOnline ? 2 : 0,
+                    'serverTime' => 1763612000123,
+                ],
+            ], JSON_THROW_ON_ERROR)];
+        }
+        if (str_ends_with($url, '/operator/v1/game/ccu')) {
+            if (($body['tableId'] ?? null) === 'T-A2') {
+                return [200, json_encode([
+                    'traceId' => $body['traceId'],
+                    'status' => 'SC_OK',
+                    'data' => [
+                        'operatorId' => 'OP_DEMO',
+                        'onlinePlayers' => 7,
+                        'seatedPlayers' => 7,
+                        'lobbyPlayers' => 0,
+                        'tables' => [['tableId' => 'T-A2', 'gameCode' => 'BACCARAT:T-A2', 'playerCount' => 7]],
+                        'serverTime' => 1763612000456,
+                    ],
+                ], JSON_THROW_ON_ERROR)];
+            }
+            return [200, json_encode([
+                'traceId' => $body['traceId'],
+                'status' => 'SC_OK',
+                'data' => [
+                    'operatorId' => 'OP_DEMO',
+                    'onlinePlayers' => 15,
+                    'seatedPlayers' => 11,
+                    'lobbyPlayers' => 4,
+                    'tables' => [
+                        ['tableId' => 'T-A2', 'gameCode' => 'BACCARAT:T-A2', 'playerCount' => 7],
+                        ['tableId' => 'T-A3', 'gameCode' => 'BACCARAT:T-A3', 'playerCount' => 4],
+                    ],
+                    'serverTime' => 1763612000456,
+                ],
+            ], JSON_THROW_ON_ERROR)];
+        }
+        if (str_ends_with($url, '/operator/v1/wallet/transaction-status')) {
+            $allRows = [
+                ['transactionId' => 'bet_p1', 'username' => 'player_online', 'status' => 'COMPLETED'],
+                ['transactionId' => 'bet_p2', 'username' => 'player_online', 'status' => 'COMPLETED'],
+                ['transactionId' => 'stl_p3', 'username' => 'player_online', 'status' => 'COMPLETED'],
+            ];
+            $pageNo = $body['pageNo'] ?? 1;
+            $pageSize = $body['pageSize'] ?? 200;
+            $slice = array_slice($allRows, ($pageNo - 1) * $pageSize, $pageSize);
+            $hasMore = count($slice) > 0 && ($pageNo * $pageSize < count($allRows));
+            return [200, json_encode([
+                'traceId' => $body['traceId'],
+                'status' => 'SC_OK',
+                'data' => [
+                    'transactions' => $slice,
+                    'pageNo' => $pageNo,
+                    'pageSize' => $pageSize,
+                    'total' => count($allRows),
+                    'hasMore' => $hasMore,
+                ],
+            ], JSON_THROW_ON_ERROR)];
+        }
+        return [404, json_encode(['traceId' => $body['traceId'] ?? '', 'status' => 'SC_INVALID_REQUEST', 'message' => 'not found'], JSON_THROW_ON_ERROR)];
+    };
+
+    $v16Client = new Client($cfg, $v16Transport);
+
+    // 9a. notifyPlayerBalance: online (with currency/reason) & offline (null/omitted)
+    $bnOnline = $v16Client->notifyPlayerBalance([
+        'username' => 'player_online',
+        'currency' => 'USD',
+        'reason' => 'DEPOSIT',
+    ]);
+    assertEq((bool) preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/', (string) $bnOnline['traceId']), true, 'v16:bnAutoTrace');
+    assertEq($bnOnline['data'], [
+        'username' => 'player_online',
+        'currency' => 'USD',
+        'notified' => true,
+        'activeSessions' => 2,
+        'serverTime' => 1763612000123,
+    ], 'v16:bnOnline');
+    assertEq($v16Captured[count($v16Captured) - 1]['body']['reason'], 'DEPOSIT', 'v16:bnReasonSent');
+
+    $bnOffline = $v16Client->notifyPlayerBalance([
+        'traceId' => 't_php_bn_offline',
+        'username' => 'player_offline',
+        'currency' => null,
+        'reason' => null,
+    ]);
+    assertEq($bnOffline['traceId'], 't_php_bn_offline', 'v16:bnOfflineTrace');
+    assertEq($bnOffline['data'], [
+        'username' => 'player_offline',
+        'currency' => null,
+        'notified' => false,
+        'activeSessions' => 0,
+        'serverTime' => 1763612000123,
+    ], 'v16:bnOffline');
+
+    $expectInvalidArg(static fn() => $v16Client->notifyPlayerBalance([]), 'v16:bnEmpty');
+    $expectInvalidArg(static fn() => $v16Client->notifyPlayerBalance(['username' => '   ']), 'v16:bnBlank');
+    $expectInvalidArg(static fn() => $v16Client->notifyPlayerBalance(['username' => ['bad']]), 'v16:bnArrayUser');
+
+    // 9b. getGameCcu: aggregate & tableId filter
+    $ccuAgg = $v16Client->getGameCcu();
+    assertEq((bool) preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/', (string) $ccuAgg['traceId']), true, 'v16:ccuAutoTrace');
+    assertEq($ccuAgg['data']['operatorId'], 'OP_DEMO', 'v16:ccuOpId');
+    assertEq($ccuAgg['data']['onlinePlayers'], 15, 'v16:ccuOnline');
+    assertEq($ccuAgg['data']['seatedPlayers'], 11, 'v16:ccuSeated');
+    assertEq($ccuAgg['data']['lobbyPlayers'], 4, 'v16:ccuLobby');
+    assertEq(count($ccuAgg['data']['tables']), 2, 'v16:ccuTablesLen');
+    assertEq($ccuAgg['data']['serverTime'], 1763612000456, 'v16:ccuServerTime');
+
+    $ccuTbl = $v16Client->getGameCcu(['traceId' => 't_php_ccu_t2', 'tableId' => 'T-A2']);
+    assertEq($ccuTbl['traceId'], 't_php_ccu_t2', 'v16:ccuTblTrace');
+    assertEq($ccuTbl['data']['onlinePlayers'], 7, 'v16:ccuTblOnline');
+    assertEq($ccuTbl['data']['seatedPlayers'], 7, 'v16:ccuTblSeated');
+    assertEq($ccuTbl['data']['lobbyPlayers'], 0, 'v16:ccuTblLobby');
+    assertEq($ccuTbl['data']['tables'], [['tableId' => 'T-A2', 'gameCode' => 'BACCARAT:T-A2', 'playerCount' => 7]], 'v16:ccuTblRows');
+
+    // 9c. getWalletTransactionStatus pagination (pageNo/pageSize + total/hasMore) & backward compatibility
+    $wtsDef = $v16Client->getWalletTransactionStatus(['username' => 'player_online', 'fromTime' => 0, 'toTime' => 86400000]);
+    assertEq(count($wtsDef['data']['transactions']), 3, 'v16:wtsDefCount');
+    assertEq($wtsDef['data']['pageNo'], 1, 'v16:wtsDefPageNo');
+    assertEq($wtsDef['data']['pageSize'], 200, 'v16:wtsDefPageSize');
+    assertEq($wtsDef['data']['total'], 3, 'v16:wtsDefTotal');
+    assertEq($wtsDef['data']['hasMore'], false, 'v16:wtsDefHasMore');
+    assertEq(array_key_exists('pageNo', $v16Captured[count($v16Captured) - 1]['body']), false, 'v16:wtsDefNoPageNoSent');
+    assertEq(array_key_exists('pageSize', $v16Captured[count($v16Captured) - 1]['body']), false, 'v16:wtsDefNoPageSizeSent');
+
+    $wtsP1 = $v16Client->getWalletTransactionStatus([
+        'username' => 'player_online',
+        'fromTime' => 0,
+        'toTime' => 86400000,
+        'pageNo' => 1,
+        'pageSize' => 2,
+    ]);
+    assertEq(count($wtsP1['data']['transactions']), 2, 'v16:wtsP1Count');
+    assertEq($wtsP1['data']['pageNo'], 1, 'v16:wtsP1PageNo');
+    assertEq($wtsP1['data']['pageSize'], 2, 'v16:wtsP1PageSize');
+    assertEq($wtsP1['data']['total'], 3, 'v16:wtsP1Total');
+    assertEq($wtsP1['data']['hasMore'], true, 'v16:wtsP1HasMore');
+
+    $wtsP2 = $v16Client->getWalletTransactionStatus([
+        'username' => 'player_online',
+        'fromTime' => 0,
+        'toTime' => 86400000,
+        'pageNo' => 2,
+        'pageSize' => 2,
+    ]);
+    assertEq(count($wtsP2['data']['transactions']), 1, 'v16:wtsP2Count');
+    assertEq($wtsP2['data']['pageNo'], 2, 'v16:wtsP2PageNo');
+    assertEq($wtsP2['data']['pageSize'], 2, 'v16:wtsP2PageSize');
+    assertEq($wtsP2['data']['total'], 3, 'v16:wtsP2Total');
+    assertEq($wtsP2['data']['hasMore'], false, 'v16:wtsP2HasMore');
+
+    $expectInvalidArg(static fn() => $v16Client->getWalletTransactionStatus(['transactionId' => 'bet_1', 'pageNo' => 0]), 'v16:wtsPageNo0');
+    $expectInvalidArg(static fn() => $v16Client->getWalletTransactionStatus(['transactionId' => 'bet_1', 'pageNo' => -1]), 'v16:wtsPageNoNeg');
+    $expectInvalidArg(static fn() => $v16Client->getWalletTransactionStatus(['transactionId' => 'bet_1', 'pageNo' => '1']), 'v16:wtsPageNoStr');
+    $expectInvalidArg(static fn() => $v16Client->getWalletTransactionStatus(['transactionId' => 'bet_1', 'pageSize' => 0]), 'v16:wtsPageSize0');
+    $expectInvalidArg(static fn() => $v16Client->getWalletTransactionStatus(['transactionId' => 'bet_1', 'pageSize' => 201]), 'v16:wtsPageSize201');
+    $expectInvalidArg(static fn() => $v16Client->getWalletTransactionStatus(['transactionId' => 'bet_1', 'pageSize' => '10']), 'v16:wtsPageSizeStr');
+
+    // 9d. /wallet/bet_result with deterministic isEndRound (0 on non-last, 1 on last) + outbound X-Timestamp header
+    $v16Tok = 'b2bt_v16_multi_ticket_token_0123456789abcdef01234567';
+    $v16Wallet = new InMemoryWallet(['player_v16' => ['currency' => 'USD', 'balance' => '1000.00', 'exponent' => 2, 'tokens' => [$v16Tok]]]);
+    $v16Disp = WebhookDispatcher::fromCredentials($apiKey, $secret, $v16Wallet);
+    $v16SeenTs = [];
+    $sendWithTs = static function (string $route, array $obj, string $xTimestamp) use ($v16Disp, $apiKey, $secret, &$v16SeenTs): array {
+        $raw = json_encode($obj, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        // Simulate PHP-FPM $_SERVER headers with outbound X-Timestamp present; X-Signature remains strictly over raw body bytes only
+        $httpHeaders = [
+            'HTTP_X_API_KEY' => $apiKey,
+            'HTTP_X_SIGNATURE' => Signing::signBody($raw, $secret),
+            'HTTP_X_TIMESTAMP' => $xTimestamp,
+        ];
+        $v16SeenTs[] = $httpHeaders['HTTP_X_TIMESTAMP'];
+        $out = $v16Disp->handle($route, $httpHeaders['HTTP_X_API_KEY'], $httpHeaders['HTTP_X_SIGNATURE'], $raw);
+        assertEq($out['statusCode'], 200, 'v16:whHttp200:' . $route);
+        return $out['body'];
+    };
+
+    $roundId = 'rnd_v16_php_1';
+    $rb1 = $sendWithTs('/wallet/bet', [
+        'traceId' => 't_php_v16_b1',
+        'transactionId' => 'bet_php_v16_1',
+        'betId' => 'tkt_php_v16_1',
+        'externalTransactionId' => 'tkt_php_v16_1',
+        'roundId' => $roundId,
+        'username' => 'player_v16',
+        'currency' => 'USD',
+        'gameCode' => 'BACCARAT:T-A2',
+        'amount' => '100.00',
+        'token' => $v16Tok,
+    ], '1763612001000');
+    assertEq($rb1['status'], StatusCode::SC_OK, 'v16:whBet1Status');
+    assertEq($rb1['data']['balance'], '900.00', 'v16:whBet1Bal');
+
+    $rb2 = $sendWithTs('/wallet/bet', [
+        'traceId' => 't_php_v16_b2',
+        'transactionId' => 'bet_php_v16_2',
+        'betId' => 'tkt_php_v16_2',
+        'externalTransactionId' => 'tkt_php_v16_2',
+        'roundId' => $roundId,
+        'username' => 'player_v16',
+        'currency' => 'USD',
+        'gameCode' => 'BACCARAT:T-A2',
+        'amount' => '50.00',
+        'token' => $v16Tok,
+    ], '1763612001100');
+    assertEq($rb2['status'], StatusCode::SC_OK, 'v16:whBet2Status');
+    assertEq($rb2['data']['balance'], '850.00', 'v16:whBet2Bal');
+
+    // Ticket 1 (non-last): isEndRound: 0
+    $stl1 = [
+        'traceId' => 't_php_v16_s1',
+        'transactionId' => 'stl_php_v16_1',
+        'betId' => 'tkt_php_v16_1',
+        'externalTransactionId' => 'tkt_php_v16_1',
+        'roundId' => $roundId,
+        'username' => 'player_v16',
+        'currency' => 'USD',
+        'gameCode' => 'BACCARAT:T-A2',
+        'betAmount' => '100.00',
+        'winAmount' => '200.00',
+        'effectiveTurnover' => '100.00',
+        'winLoss' => '100.00',
+        'jackpotAmount' => '0.00',
+        'resultType' => 'WIN',
+        'isFreespin' => 0,
+        'isEndRound' => 0,
+        'betTime' => 1763612001000,
+    ];
+    $rs1 = $sendWithTs('/wallet/bet_result', $stl1, '1763612005000');
+    assertEq($rs1['status'], StatusCode::SC_OK, 'v16:whStl1Status');
+    assertEq($rs1['data']['balance'], '1050.00', 'v16:whStl1Bal');
+
+    // Replay with different X-Timestamp and traceId still passes raw-body signature & idempotency
+    $rs1Replay = $sendWithTs('/wallet/bet_result', array_merge($stl1, ['traceId' => 't_php_v16_s1_retry']), '1763612009999');
+    assertEq($rs1Replay['status'], StatusCode::SC_OK, 'v16:whStl1ReplayStatus');
+    assertEq($rs1Replay['data']['balance'], '1050.00', 'v16:whStl1ReplayBal');
+
+    // Flipping isEndRound 0 -> 1 on same transactionId triggers SC_TRANSACTION_DUPLICATED
+    assertEq(Idempotency::betResultFingerprint($stl1) !== Idempotency::betResultFingerprint(array_merge($stl1, ['isEndRound' => 1])), true, 'v16:fpIsEndRoundDistinct');
+    $rs1Conf = $sendWithTs('/wallet/bet_result', array_merge($stl1, ['traceId' => 't_php_v16_s1_conf', 'isEndRound' => 1]), '1763612010500');
+    assertEq($rs1Conf['status'], StatusCode::SC_TRANSACTION_DUPLICATED, 'v16:whStl1Conflict');
+
+    // Ticket 2 (last non-REJECTED in same round): isEndRound: 1
+    $rs2 = $sendWithTs('/wallet/bet_result', [
+        'traceId' => 't_php_v16_s2',
+        'transactionId' => 'stl_php_v16_2',
+        'betId' => 'tkt_php_v16_2',
+        'externalTransactionId' => 'tkt_php_v16_2',
+        'roundId' => $roundId,
+        'username' => 'player_v16',
+        'currency' => 'USD',
+        'gameCode' => 'BACCARAT:T-A2',
+        'betAmount' => '50.00',
+        'winAmount' => '0.00',
+        'effectiveTurnover' => '50.00',
+        'winLoss' => '-50.00',
+        'jackpotAmount' => '0.00',
+        'resultType' => 'LOSE',
+        'isFreespin' => 0,
+        'isEndRound' => 1,
+        'betTime' => 1763612001100,
+    ], '1763612012000');
+    assertEq($rs2['status'], StatusCode::SC_OK, 'v16:whStl2Status');
+    assertEq($rs2['data']['balance'], '1050.00', 'v16:whStl2Bal');
+
+    assertEq(count($v16SeenTs), 6, 'v16:seenTsCount');
+    foreach ($v16SeenTs as $idx => $ts) {
+        assertEq((bool) preg_match('/^\d{13}$/', $ts), true, 'v16:seenTsFormat:' . $idx);
+    }
 } finally {
     restore_error_handler();
 }

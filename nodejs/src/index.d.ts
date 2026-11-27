@@ -93,6 +93,12 @@ export class Config {
   });
 }
 
+export interface GameCcuTableItem {
+  tableId: string;
+  gameCode: string;
+  playerCount: number;
+}
+
 export interface TableCatalogItem {
   tableId: string;
   gameCode: string;
@@ -183,6 +189,37 @@ export class Client {
     maxLossPerDay?: string | null;
     customChips?: string[] | null;
   }): Promise<{ traceId: string; status: 'SC_OK'; data: Record<string, unknown> }>;
+  notifyPlayerBalance(params: {
+    traceId?: string;
+    username: string;
+    currency?: string | null;
+    reason?: string | null;
+  }): Promise<{
+    traceId: string;
+    status: 'SC_OK';
+    data: {
+      username: string;
+      currency: string | null;
+      notified: boolean;
+      activeSessions: number;
+      serverTime: number;
+    };
+  }>;
+  getGameCcu(params?: {
+    traceId?: string;
+    tableId?: string | null;
+  }): Promise<{
+    traceId: string;
+    status: 'SC_OK';
+    data: {
+      operatorId: string;
+      onlinePlayers: number;
+      seatedPlayers: number;
+      lobbyPlayers: number;
+      tables: GameCcuTableItem[];
+      serverTime: number;
+    };
+  }>;
   listTransactions(params: {
     traceId?: string;
     fromTime: number;
@@ -232,7 +269,19 @@ export class Client {
     username?: string | null;
     fromTime?: number;
     toTime?: number;
-  }): Promise<{ traceId: string; status: 'SC_OK'; data: Record<string, unknown> }>;
+    pageNo?: number | null;
+    pageSize?: number | null;
+  }): Promise<{
+    traceId: string;
+    status: 'SC_OK';
+    data: {
+      transactions: Array<Record<string, unknown>>;
+      pageNo: number;
+      pageSize: number;
+      total: number;
+      hasMore: boolean;
+    };
+  }>;
 }
 
 export type WalletOkResponse = {

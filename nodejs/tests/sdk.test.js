@@ -656,3 +656,372 @@ test('v1.5.11 regressions: deadlock, S2S ApiError/TransportError/overflow & allo
   assert.equal(badUtf8Res.body.status, StatusCode.SC_INVALID_REQUEST);
   assert.equal(badUtf8Res.body.traceId, '');
 });
+
+test('v1.6.0: notifyPlayerBalance, getGameCcu, paginated getWalletTransactionStatus, deterministic isEndRound & outbound X-Timestamp', async () => {
+  const apiKey = 'ak_0123456789abcdef0123456789abcdef';
+  const secret = 'dGVzdF9zZWNyZXRfNDBfY2hhcnNfYmFzZTY0dXJsX2s';
+  const capturedBodies = [];
+
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const rawBuf = Buffer.concat(chunks);
+      const status = verifyWebhookHeaders(req.headers['x-api-key'], req.headers['x-signature'], rawBuf, apiKey, secret);
+      const body = JSON.parse(rawBuf.toString('utf8'));
+      capturedBodies.push({ url: req.url, body });
+      res.setHeader('Content-Type', 'application/json');
+      if (status !== StatusCode.SC_OK) {
+        res.end(JSON.stringify({ traceId: body.traceId, status, message: 'Auth failed' }));
+        return;
+      }
+      if (req.url === '/operator/v1/player/balance-notify') {
+        const isOnline = body.username === 'player_online';
+        res.end(JSON.stringify({
+          traceId: body.traceId,
+          status: 'SC_OK',
+          data: {
+            username: body.username,
+            currency: body.currency ?? (isOnline ? 'USD' : null),
+            notified: isOnline,
+            activeSessions: isOnline ? 2 : 0,
+            serverTime: 1763612000123,
+          },
+        }));
+        return;
+      }
+      if (req.url === '/operator/v1/game/ccu') {
+        if (body.tableId === 'T-A2') {
+          res.end(JSON.stringify({
+            traceId: body.traceId,
+            status: 'SC_OK',
+            data: {
+              operatorId: 'OP_DEMO',
+              onlinePlayers: 7,
+              seatedPlayers: 7,
+              lobbyPlayers: 0,
+              tables: [{ tableId: 'T-A2', gameCode: 'BACCARAT:T-A2', playerCount: 7 }],
+              serverTime: 1763612000456,
+            },
+          }));
+          return;
+        }
+        res.end(JSON.stringify({
+          traceId: body.traceId,
+          status: 'SC_OK',
+          data: {
+            operatorId: 'OP_DEMO',
+            onlinePlayers: 15,
+            seatedPlayers: 11,
+            lobbyPlayers: 4,
+            tables: [
+              { tableId: 'T-A2', gameCode: 'BACCARAT:T-A2', playerCount: 7 },
+              { tableId: 'T-A3', gameCode: 'BACCARAT:T-A3', playerCount: 4 },
+            ],
+            serverTime: 1763612000456,
+          },
+        }));
+        return;
+      }
+      if (req.url === '/operator/v1/wallet/transaction-status') {
+        const allRows = [
+          { transactionId: 'bet_p1', username: 'player_online', status: 'COMPLETED' },
+          { transactionId: 'bet_p2', username: 'player_online', status: 'COMPLETED' },
+          { transactionId: 'stl_p3', username: 'player_online', status: 'COMPLETED' },
+        ];
+        const pageNo = body.pageNo ?? 1;
+        const pageSize = body.pageSize ?? 200;
+        const start = (pageNo - 1) * pageSize;
+        const slice = allRows.slice(start, start + pageSize);
+        const hasMore = slice.length > 0 && pageNo * pageSize < allRows.length;
+        res.end(JSON.stringify({
+          traceId: body.traceId,
+          status: 'SC_OK',
+          data: {
+            transactions: slice,
+            pageNo,
+            pageSize,
+            total: allRows.length,
+            hasMore,
+          },
+        }));
+        return;
+      }
+      res.writeHead(404);
+      res.end(JSON.stringify({ traceId: body.traceId, status: 'SC_INVALID_REQUEST', message: 'Not found' }));
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  try {
+    const client = new Client({ apiKey, hmacSecret: secret, baseUrl: `http://127.0.0.1:${port}` });
+
+    // 1. notifyPlayerBalance: online (with currency & reason) and offline (omitted / null optional fields)
+    const onlineRes = await client.notifyPlayerBalance({
+      username: 'player_online',
+      currency: 'USD',
+      reason: 'DEPOSIT',
+    });
+    assert.match(onlineRes.traceId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    assert.deepEqual(onlineRes.data, {
+      username: 'player_online',
+      currency: 'USD',
+      notified: true,
+      activeSessions: 2,
+      serverTime: 1763612000123,
+    });
+    assert.equal(capturedBodies.at(-1).body.reason, 'DEPOSIT');
+
+    const offlineRes = await client.notifyPlayerBalance({
+      traceId: 't_bal_offline',
+      username: 'player_offline',
+      currency: null,
+      reason: null,
+    });
+    assert.equal(offlineRes.traceId, 't_bal_offline');
+    assert.deepEqual(offlineRes.data, {
+      username: 'player_offline',
+      currency: null,
+      notified: false,
+      activeSessions: 0,
+      serverTime: 1763612000123,
+    });
+
+    for (const badParams of [undefined, null, {}, { username: '' }, { username: '   ' }, { username: 123 }]) {
+      assert.throws(
+        () => client.notifyPlayerBalance(badParams),
+        (err) => err instanceof BaccaratSdkError && err.code === 'INVALID_ARGUMENT',
+      );
+    }
+
+    // 2. getGameCcu: aggregate and tableId filter
+    const aggCcu = await client.getGameCcu();
+    assert.match(aggCcu.traceId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    assert.equal(aggCcu.data.operatorId, 'OP_DEMO');
+    assert.equal(aggCcu.data.onlinePlayers, 15);
+    assert.equal(aggCcu.data.seatedPlayers, 11);
+    assert.equal(aggCcu.data.lobbyPlayers, 4);
+    assert.equal(aggCcu.data.tables.length, 2);
+    assert.equal(aggCcu.data.serverTime, 1763612000456);
+
+    const tblCcu = await client.getGameCcu({ traceId: 't_ccu_t2', tableId: 'T-A2' });
+    assert.equal(tblCcu.traceId, 't_ccu_t2');
+    assert.equal(tblCcu.data.onlinePlayers, 7);
+    assert.equal(tblCcu.data.seatedPlayers, 7);
+    assert.equal(tblCcu.data.lobbyPlayers, 0);
+    assert.deepEqual(tblCcu.data.tables, [{ tableId: 'T-A2', gameCode: 'BACCARAT:T-A2', playerCount: 7 }]);
+
+    // 3. getWalletTransactionStatus pagination (pageNo/pageSize + total/hasMore) & backward compatibility
+    const wtsDefault = await client.getWalletTransactionStatus({
+      username: 'player_online',
+      fromTime: 0,
+      toTime: 86_400_000,
+    });
+    assert.equal(wtsDefault.data.transactions.length, 3);
+    assert.equal(wtsDefault.data.pageNo, 1);
+    assert.equal(wtsDefault.data.pageSize, 200);
+    assert.equal(wtsDefault.data.total, 3);
+    assert.equal(wtsDefault.data.hasMore, false);
+    assert.equal(Object.prototype.hasOwnProperty.call(capturedBodies.at(-1).body, 'pageNo'), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(capturedBodies.at(-1).body, 'pageSize'), false);
+
+    const wtsPage1 = await client.getWalletTransactionStatus({
+      username: 'player_online',
+      fromTime: 0,
+      toTime: 86_400_000,
+      pageNo: 1,
+      pageSize: 2,
+    });
+    assert.equal(wtsPage1.data.transactions.length, 2);
+    assert.equal(wtsPage1.data.pageNo, 1);
+    assert.equal(wtsPage1.data.pageSize, 2);
+    assert.equal(wtsPage1.data.total, 3);
+    assert.equal(wtsPage1.data.hasMore, true);
+
+    const wtsPage2 = await client.getWalletTransactionStatus({
+      username: 'player_online',
+      fromTime: 0,
+      toTime: 86_400_000,
+      pageNo: 2,
+      pageSize: 2,
+    });
+    assert.equal(wtsPage2.data.transactions.length, 1);
+    assert.equal(wtsPage2.data.pageNo, 2);
+    assert.equal(wtsPage2.data.pageSize, 2);
+    assert.equal(wtsPage2.data.total, 3);
+    assert.equal(wtsPage2.data.hasMore, false);
+
+    for (const badPage of [
+      { transactionId: 'bet_1', pageNo: 0 },
+      { transactionId: 'bet_1', pageNo: -1 },
+      { transactionId: 'bet_1', pageNo: 1.5 },
+      { transactionId: 'bet_1', pageNo: '1' },
+      { transactionId: 'bet_1', pageSize: 0 },
+      { transactionId: 'bet_1', pageSize: 201 },
+      { transactionId: 'bet_1', pageSize: 2.5 },
+      { transactionId: 'bet_1', pageSize: '10' },
+    ]) {
+      assert.throws(
+        () => client.getWalletTransactionStatus(badPage),
+        (err) => err instanceof BaccaratSdkError && err.code === 'INVALID_ARGUMENT',
+      );
+    }
+  } finally {
+    server.close();
+  }
+
+  // 4. /wallet/bet_result with deterministic isEndRound (0 on non-last, 1 on last) & outbound X-Timestamp header
+  const token = 'b2bt_v16_multi_ticket_token_0123456789abcdef01234567';
+  const wallet = new InMemoryWallet({
+    player_v16: { currency: 'USD', balance: '1000.00', exponent: 2, tokens: [token] },
+  });
+  const dispatcher = new WebhookDispatcher({ apiKey, hmacSecret: secret }, wallet);
+  const seenTimestamps = [];
+
+  const webhookSrv = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', async () => {
+      const rawBuf = Buffer.concat(chunks);
+      seenTimestamps.push(req.headers['x-timestamp']);
+      const out = await dispatcher.handle(
+        req.url ?? '',
+        req.headers['x-api-key'],
+        req.headers['x-signature'],
+        rawBuf,
+      );
+      res.writeHead(out.statusCode, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(out.body));
+    });
+  });
+
+  await new Promise((resolve) => webhookSrv.listen(0, '127.0.0.1', resolve));
+  const whPort = webhookSrv.address().port;
+  const postWebhook = (route, payloadObj, xTimestamp) => new Promise((resolve, reject) => {
+    const rawBuf = Buffer.from(JSON.stringify(payloadObj), 'utf8');
+    // Outbound X-Timestamp is sent on all /wallet/* callbacks, while X-Signature remains strictly over raw body bytes only
+    const sig = signBody(rawBuf, secret);
+    const req = http.request(
+      `http://127.0.0.1:${whPort}${route}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': String(rawBuf.length),
+          'X-API-Key': apiKey,
+          'X-Signature': sig,
+          'X-Timestamp': xTimestamp,
+        },
+      },
+      (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => resolve({ statusCode: res.statusCode, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) }));
+      },
+    );
+    req.on('error', reject);
+    req.write(rawBuf);
+    req.end();
+  });
+
+  try {
+    const roundId = 'rnd_v16_multi_1';
+    const b1 = await postWebhook('/wallet/bet', {
+      traceId: 't_v16_b1',
+      transactionId: 'bet_v16_1',
+      betId: 'tkt_v16_1',
+      externalTransactionId: 'tkt_v16_1',
+      roundId,
+      username: 'player_v16',
+      currency: 'USD',
+      gameCode: 'BACCARAT:T-A2',
+      amount: '100.00',
+      token,
+    }, '1763612001000');
+    assert.equal(b1.body.status, StatusCode.SC_OK);
+    assert.equal(b1.body.data.balance, '900.00');
+
+    const b2 = await postWebhook('/wallet/bet', {
+      traceId: 't_v16_b2',
+      transactionId: 'bet_v16_2',
+      betId: 'tkt_v16_2',
+      externalTransactionId: 'tkt_v16_2',
+      roundId,
+      username: 'player_v16',
+      currency: 'USD',
+      gameCode: 'BACCARAT:T-A2',
+      amount: '50.00',
+      token,
+    }, '1763612001100');
+    assert.equal(b2.body.status, StatusCode.SC_OK);
+    assert.equal(b2.body.data.balance, '850.00');
+
+    // Ticket 1 (non-last in round): isEndRound: 0
+    const settle1Payload = {
+      traceId: 't_v16_s1',
+      transactionId: 'stl_v16_1',
+      betId: 'tkt_v16_1',
+      externalTransactionId: 'tkt_v16_1',
+      roundId,
+      username: 'player_v16',
+      currency: 'USD',
+      gameCode: 'BACCARAT:T-A2',
+      betAmount: '100.00',
+      winAmount: '200.00',
+      effectiveTurnover: '100.00',
+      winLoss: '100.00',
+      jackpotAmount: '0.00',
+      resultType: 'WIN',
+      isFreespin: 0,
+      isEndRound: 0,
+      betTime: 1763612001000,
+    };
+    const s1 = await postWebhook('/wallet/bet_result', settle1Payload, '1763612005000');
+    assert.equal(s1.body.status, StatusCode.SC_OK);
+    assert.equal(s1.body.data.balance, '1050.00');
+
+    // Replay of ticket 1 with a newer X-Timestamp & traceId still succeeds idempotently (X-Signature over raw body only)
+    const s1Replay = await postWebhook('/wallet/bet_result', { ...settle1Payload, traceId: 't_v16_s1_retry' }, '1763612009999');
+    assert.equal(s1Replay.body.status, StatusCode.SC_OK);
+    assert.equal(s1Replay.body.data.balance, '1050.00');
+
+    // Flipping isEndRound from 0 -> 1 on same transactionId is detected as payload conflict
+    assert.notEqual(
+      betResultFingerprint(settle1Payload),
+      betResultFingerprint({ ...settle1Payload, isEndRound: 1 }),
+    );
+    const s1Conflict = await postWebhook('/wallet/bet_result', { ...settle1Payload, traceId: 't_v16_s1_conf', isEndRound: 1 }, '1763612010500');
+    assert.equal(s1Conflict.body.status, StatusCode.SC_TRANSACTION_DUPLICATED);
+
+    // Ticket 2 (last non-REJECTED ticket in same round): isEndRound: 1
+    const s2 = await postWebhook('/wallet/bet_result', {
+      traceId: 't_v16_s2',
+      transactionId: 'stl_v16_2',
+      betId: 'tkt_v16_2',
+      externalTransactionId: 'tkt_v16_2',
+      roundId,
+      username: 'player_v16',
+      currency: 'USD',
+      gameCode: 'BACCARAT:T-A2',
+      betAmount: '50.00',
+      winAmount: '0.00',
+      effectiveTurnover: '50.00',
+      winLoss: '-50.00',
+      jackpotAmount: '0.00',
+      resultType: 'LOSE',
+      isFreespin: 0,
+      isEndRound: 1,
+      betTime: 1763612001100,
+    }, '1763612012000');
+    assert.equal(s2.body.status, StatusCode.SC_OK);
+    assert.equal(s2.body.data.balance, '1050.00');
+
+    assert.equal(seenTimestamps.length, 6);
+    for (const ts of seenTimestamps) {
+      assert.match(ts, /^\d{13}$/);
+    }
+  } finally {
+    webhookSrv.close();
+  }
+});

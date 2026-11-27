@@ -21,6 +21,10 @@ impl Json {
         Json::Obj(Vec::new())
     }
 
+    pub fn is_null(&self) -> bool {
+        matches!(self, Json::Null)
+    }
+
     pub fn is_object(&self) -> bool {
         matches!(self, Json::Obj(_))
     }

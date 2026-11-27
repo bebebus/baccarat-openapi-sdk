@@ -638,12 +638,28 @@ public final class BaccaratSdk {
             return postSigned("/operator/v1/game/terminate", params);
         }
 
+        public Map<String, Object> getGameCcu() {
+            return getGameCcu(Map.of());
+        }
+
+        public Map<String, Object> getGameCcu(Map<String, Object> params) {
+            return postSigned("/operator/v1/game/ccu", params);
+        }
+
         public Map<String, Object> updatePlayerStatus(Map<String, Object> params) {
             return postSigned("/operator/v1/player/status", params);
         }
 
         public Map<String, Object> updatePlayerLimits(Map<String, Object> params) {
             return postSigned("/operator/v1/player/limits", params);
+        }
+
+        public Map<String, Object> notifyPlayerBalance(Map<String, Object> params) {
+            String username = strictStr(params, "username").trim();
+            if (username.isEmpty()) {
+                throw new SdkException("INVALID_ARGUMENT", "username is required");
+            }
+            return postSigned("/operator/v1/player/balance-notify", params);
         }
 
         public Map<String, Object> listTransactions(Map<String, Object> params) {
