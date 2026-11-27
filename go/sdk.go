@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Package baccarat provides a zero-dependency Go SDK for the Baccarat Live Platform
-// B2B Operator Seamless Wallet API (v1.5.9).
+// B2B Operator Seamless Wallet API (v1.5.10).
 package baccarat
 
 import (

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.9).
+//! Zero-crate Rust SDK for Baccarat Live Platform B2B Operator Seamless Wallet API (v1.5.10).
 
 pub mod crypto;
 mod curl_ffi;
@@ -2107,7 +2107,7 @@ mod tests {
         );
         assert_eq!(out.get("data").get("balance").as_str(), Some("500.00"));
 
-        // v1.5.9 regressions: panic & wallet_ok isolation -> SC_OPERATOR_TIMEOUT, SdkError PartialEq/Eq, wallet_ok/wallet_error allowlist guards, strict JSON whitespace & UTF-8 lossy trace hint, atomic checked_add before state mutation
+        // v1.5.10 regressions: panic & wallet_ok isolation -> SC_OPERATOR_TIMEOUT, SdkError PartialEq/Eq, wallet_ok/wallet_error allowlist guards, strict JSON whitespace & UTF-8 lossy trace hint, atomic checked_add before state mutation
         assert!(decimal_to_ledger_units("0", 0, false) == Ok(0));
         assert!(decimal_to_ledger_units("0.00", 2, false) == Ok(0));
         assert_eq!(SdkError::Money("x".into()), SdkError::Money("x".into()));

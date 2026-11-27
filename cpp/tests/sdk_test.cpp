@@ -601,7 +601,7 @@ int main() {
     require_eq(utf8_res.at("status").as_string(), StatusCode::SC_INVALID_REQUEST, "wb:m10Utf8Status");
     require_eq(utf8_res.at("traceId").as_string(), expected_trunc, "wb:m10Utf8Truncated128Chars");
 
-    // 7. v1.5.9 regressions: deadlock, S2S ApiError/TransportError/overflow & allowlist SdkError safety, wallet_ok/wallet_error guards, strict JSON ws trace hint, locale-independent JSON float
+    // 7. v1.5.10 regressions: deadlock, S2S ApiError/TransportError/overflow & allowlist SdkError safety, wallet_ok/wallet_error guards, strict JSON ws trace hint, locale-independent JSON float
     class DeadlockWallet final : public WalletHandler {
     public:
         Json on_balance(const Json&) override { throw SdkError(StatusCode::SC_INSUFFICIENT_FUNDS, "explicit sdk err"); }

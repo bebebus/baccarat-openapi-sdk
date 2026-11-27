@@ -326,7 +326,7 @@ assertEq($utf8Res['status'], StatusCode::SC_INVALID_REQUEST, 'wb:m10Utf8TraceSta
 assertEq((bool) preg_match('//u', (string) $utf8Res['traceId']), true, 'wb:m10Utf8Valid');
 assertEq($utf8Res['traceId'], str_repeat('中', 128), 'wb:m10Utf8CharCount');
 
-// 8. v1.5.9 regressions: deadlock, S2S ApiException/TransportException/overflow & allowlist SdkException safety, WalletResponse builders
+// 8. v1.5.10 regressions: deadlock, S2S ApiException/TransportException/overflow & allowlist SdkException safety, WalletResponse builders
 // Verify postSigned attaches traceId on 16 MiB overflow BaccaratApiException with empty traceId
 $ovClient = new Client(
     $cfg,

@@ -487,6 +487,71 @@ public final class SdkTestRunner {
             }
             check(caughtM4Overflow, "s2s:m4Overflow16MiB");
 
+            // v1.5.10 regression: BoundedBodySubscriber HTTP/2 synchronous-cancel race
+            // (Subscription.cancel() synchronously invokes onError(IOException("Stream 1 cancelled")) or throws)
+            {
+                BaccaratSdk.Client.BoundedBodySubscriber raceSub =
+                        new BaccaratSdk.Client.BoundedBodySubscriber(16, 200, "h2_sync_cancel_race");
+                java.util.concurrent.atomic.AtomicBoolean cancelCalled = new java.util.concurrent.atomic.AtomicBoolean(false);
+                java.util.concurrent.atomic.AtomicBoolean overflowVisibleInCancel = new java.util.concurrent.atomic.AtomicBoolean(false);
+                java.util.concurrent.atomic.AtomicBoolean bodyDoneInCancel = new java.util.concurrent.atomic.AtomicBoolean(false);
+                raceSub.onSubscribe(new java.util.concurrent.Flow.Subscription() {
+                    @Override public void request(long n) {}
+                    @Override public void cancel() {
+                        cancelCalled.set(true);
+                        overflowVisibleInCancel.set(raceSub.overflowError != null);
+                        bodyDoneInCancel.set(raceSub.getBody().toCompletableFuture().isCompletedExceptionally());
+                        raceSub.onError(new java.io.IOException("Stream 1 cancelled"));
+                    }
+                });
+                raceSub.onNext(List.of(java.nio.ByteBuffer.wrap(new byte[10])));
+                raceSub.onNext(List.of(java.nio.ByteBuffer.wrap(new byte[10])));
+                check(cancelCalled.get(), "s2s:h2RaceCancelCalled");
+                check(overflowVisibleInCancel.get(), "s2s:h2RaceOverflowSetBeforeCancel");
+                check(bodyDoneInCancel.get(), "s2s:h2RaceBodyCompletedBeforeCancel");
+                check(raceSub.overflowError != null
+                        && BaccaratSdk.StatusCode.SC_INVALID_REQUEST.equals(raceSub.overflowError.status)
+                        && raceSub.overflowError.httpStatus == 200
+                        && "h2_sync_cancel_race".equals(raceSub.overflowError.traceId)
+                        && !raceSub.overflowError.isRetryable(), "s2s:h2RaceOverflowError");
+                boolean bodyThrewApi = false;
+                try {
+                    raceSub.getBody().toCompletableFuture().get();
+                } catch (java.util.concurrent.ExecutionException ee) {
+                    if (ee.getCause() instanceof BaccaratSdk.ApiException apiEx) {
+                        bodyThrewApi = apiEx == raceSub.overflowError
+                                && BaccaratSdk.StatusCode.SC_INVALID_REQUEST.equals(apiEx.status)
+                                && apiEx.httpStatus == 200
+                                && "h2_sync_cancel_race".equals(apiEx.traceId)
+                                && !apiEx.isRetryable();
+                    }
+                }
+                check(bodyThrewApi, "s2s:h2RaceBodyFutureIsApiException");
+            }
+            {
+                BaccaratSdk.Client.BoundedBodySubscriber throwSub =
+                        new BaccaratSdk.Client.BoundedBodySubscriber(16, 200, "h2_cancel_throw_race");
+                throwSub.onSubscribe(new java.util.concurrent.Flow.Subscription() {
+                    @Override public void request(long n) {}
+                    @Override public void cancel() {
+                        throw new IllegalStateException("Stream 1 cancelled synchronously");
+                    }
+                });
+                throwSub.onNext(List.of(java.nio.ByteBuffer.wrap(new byte[32])));
+                check(throwSub.overflowError != null
+                        && BaccaratSdk.StatusCode.SC_INVALID_REQUEST.equals(throwSub.overflowError.status)
+                        && throwSub.overflowError.httpStatus == 200
+                        && "h2_cancel_throw_race".equals(throwSub.overflowError.traceId)
+                        && !throwSub.overflowError.isRetryable(), "s2s:h2CancelThrowOverflowError");
+                boolean bodyThrewApi = false;
+                try {
+                    throwSub.getBody().toCompletableFuture().get();
+                } catch (java.util.concurrent.ExecutionException ee) {
+                    bodyThrewApi = ee.getCause() == throwSub.overflowError;
+                }
+                check(bodyThrewApi, "s2s:h2CancelThrowBodyFutureIsApiException");
+            }
+
             // Body-read timeout regression: headers arrive immediately, body stalls mid-stream -> must fail within timeoutMs
             java.util.concurrent.CountDownLatch releaseStall = new java.util.concurrent.CountDownLatch(1);
             try (java.net.ServerSocket stallSrv = new java.net.ServerSocket(0, 50, java.net.InetAddress.getByName("127.0.0.1"))) {
@@ -555,7 +620,7 @@ public final class SdkTestRunner {
             rlSrv.stop(0);
         }
 
-        // 5. v1.5.9 regressions: deadlock, S2S ApiException/TransportException/overflow, allowlist SdkException & sneaky-thrown checked exceptions -> SC_OPERATOR_TIMEOUT sanitized, string-only traceId, & walletOk/walletError guards
+        // 5. v1.5.10 regressions: deadlock, S2S ApiException/TransportException/overflow, allowlist SdkException & sneaky-thrown checked exceptions -> SC_OPERATOR_TIMEOUT sanitized, string-only traceId, & walletOk/walletError guards
         BaccaratSdk.WalletHandler deadlockWallet = new BaccaratSdk.WalletHandler() {
             @Override public Map<String, Object> onBalance(Map<String, Object> req) {
                 throw new BaccaratSdk.SdkException(BaccaratSdk.StatusCode.SC_INSUFFICIENT_FUNDS, "explicit sdk err");

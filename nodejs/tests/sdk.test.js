@@ -482,7 +482,7 @@ test('WebhookDispatcher & InMemoryWallet full seamless wallet lifecycle', async 
   }
 });
 
-test('v1.5.9 regressions: deadlock, S2S ApiError/TransportError/overflow & allowlist SdkError safety, wallet response builders', async () => {
+test('v1.5.10 regressions: deadlock, S2S ApiError/TransportError/overflow & allowlist SdkError safety, wallet response builders', async () => {
   const apiKey = 'ak_0123456789abcdef0123456789abcdef';
   const secret = 'dGVzdF9zZWNyZXRfNDBfY2hhcnNfYmFzZTY0dXJsX2s';
   const deadlockWallet = {

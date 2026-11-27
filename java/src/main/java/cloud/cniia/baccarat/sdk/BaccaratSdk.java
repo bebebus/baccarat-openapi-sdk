@@ -378,7 +378,7 @@ public final class BaccaratSdk {
             return StatusCode.SC_INVALID_REQUEST;
         }
 
-        private static final class BoundedBodySubscriber implements HttpResponse.BodySubscriber<byte[]> {
+        static final class BoundedBodySubscriber implements HttpResponse.BodySubscriber<byte[]> {
             private final int maxBytes;
             private final int httpStatus;
             private final String traceId;
@@ -387,6 +387,7 @@ public final class BaccaratSdk {
             private volatile Flow.Subscription subscription;
             private long totalBytes = 0L;
             private volatile boolean failed = false;
+            volatile ApiException overflowError;
 
             BoundedBodySubscriber(int maxBytes, int httpStatus, String traceId) {
                 this.maxBytes = maxBytes;
@@ -425,19 +426,22 @@ public final class BaccaratSdk {
                     if (rem == 0) continue;
                     if (totalBytes + rem > maxBytes) {
                         failed = true;
+                        ApiException err = new ApiException(
+                                StatusCode.SC_INVALID_REQUEST,
+                                "Gateway response exceeded 16 MiB limit",
+                                traceId,
+                                null,
+                                httpStatus
+                        );
+                        this.overflowError = err;
+                        body.completeExceptionally(err);
                         Flow.Subscription sub = this.subscription;
                         if (sub != null) {
-                            sub.cancel();
+                            try {
+                                sub.cancel();
+                            } catch (RuntimeException ignored) {
+                            }
                         }
-                        body.completeExceptionally(
-                                new ApiException(
-                                        StatusCode.SC_INVALID_REQUEST,
-                                        "Gateway response exceeded 16 MiB limit",
-                                        traceId,
-                                        null,
-                                        httpStatus
-                                )
-                        );
                         return;
                     }
                     totalBytes += rem;
@@ -552,6 +556,10 @@ public final class BaccaratSdk {
                 SdkException cause = unwrapSdkException(e);
                 if (cause != null) {
                     throw cause;
+                }
+                BoundedBodySubscriber sub = activeSub.get();
+                if (sub != null && sub.overflowError != null) {
+                    throw sub.overflowError;
                 }
                 throw new TransportException("Network error: " + e.getMessage());
             }

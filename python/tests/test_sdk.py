@@ -402,7 +402,7 @@ class TestBaccaratPythonSdk(unittest.TestCase):
             redir_srv.shutdown()
             redir_srv.server_close()
 
-        # 6. v1.5.9 regressions: deadlock, S2S ApiError/TransportError/overflow & allowlist SdkError safety, ASCII decimal regex, HTTPError read failure, UNSET/None null clearing, wallet helpers
+        # 6. v1.5.10 regressions: deadlock, S2S ApiError/TransportError/overflow & allowlist SdkError safety, ASCII decimal regex, HTTPError read failure, UNSET/None null clearing, wallet helpers
         with self.assertRaises(BaccaratSdkError) as ctx_unicode_dec:
             decimal_to_ledger_units("\u0661\u0660\u0660.\u0660\u0660", 2)
         self.assertEqual(ctx_unicode_dec.exception.code, "INVALID_DECIMAL_AMOUNT")
